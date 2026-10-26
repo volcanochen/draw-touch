@@ -64,13 +64,30 @@ class MainActivity : Activity() {
         aspectMode = prefs.getInt("aspect", Protocol.ASPECT_KEEP)
         workMode = prefs.getInt("mode", Protocol.MODE_TABLET)
 
+        // 结构：FrameLayout 里放两层
+        //   ① content —— 上控制栏(固定高) + 中间书写区(weight=1) + 下状态栏(固定高)
+        //   ② panel   —— 设置详情，**浮在书写区之上**（展开/收起不改变书写区尺寸）
+        //
+        // 为什么设置面板要浮起来：如果面板参与布局，展开时会把书写区挤扁，
+        // 手机端宽高比一变，PC 上的桌面框形状就跟着突变（实测会被压成横条）。
+        // 浮起来之后，书写区尺寸恒定 → 两端的框形状永远稳定一致。
         val root = FrameLayout(this)
+        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
         canvas = PenCanvasView(this)
         canvas.pressureGain = prefs.getFloat("gain", 3.0f)
         canvas.sendHover = prefs.getBoolean("hover", true)
         canvas.workMode = workMode
-        root.addView(canvas, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        // 恢复上次保存的操作框（手机框与桌面框形状/位置保持一致）
+        canvas.restoreFrame(
+            prefs.getFloat("frameL", 0f),
+            prefs.getFloat("frameT", 0f),
+            prefs.getFloat("frameS", 1f)
+        )
+        // weight=1 让书写区吃掉除上下控制栏以外的全部剩余高度
+        content.addView(canvas, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
+        ))
 
         // ---------- 顶部设置面板 ----------
         // 注意：面板容器本身必须常驻可见，否则“点标题展开”这个开关自己也被藏起来了，
@@ -158,6 +175,10 @@ class MainActivity : Activity() {
             check(if (workMode == Protocol.MODE_MOUSE) radioMouse.id else radioTablet.id)
         }
 
+        val resetFrameBtn = Button(this).apply { text = "复位操作框（恢复整个书写区）" }
+        val pinchBtn = Button(this).apply { text = "模拟一次捏合（缩小 25%）" }
+        val collapseBtn = Button(this).apply { text = "收起设置（回到书写）" }
+
         val hoverBox = CheckBox(this).apply {
             text = "转发悬停移动（关掉更省资源）"
             setTextColor(Color.WHITE)
@@ -181,8 +202,9 @@ class MainActivity : Activity() {
         infoText = TextView(this).apply {
             textSize = 12f
             setTextColor(Color.parseColor("#FFBBBBBB"))
-            setPadding(0, 8, 0, 4)
+            setPadding(0, 4, 0, 4)
             text = ""
+            setLines(2)   // 固定两行 → 上控制栏高度恒定 → 书写区尺寸不会被挤变形
         }
 
         details.addView(rowHost)
@@ -191,34 +213,64 @@ class MainActivity : Activity() {
         details.addView(aspectGroup)
         details.addView(modeTitle)
         details.addView(modeGroup)
+        details.addView(resetFrameBtn)
+        details.addView(pinchBtn)
+        details.addView(collapseBtn)
         details.addView(hoverBox)
         details.addView(gainText)
         details.addView(gainRow)
 
-        panel.addView(status)
-        panel.addView(details)
-        panel.addView(infoText)
-        root.addView(
-            panel,
-            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.TOP
-            }
+        // ---- 上控制栏（固定高度）----
+        val topBar = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(16, 10, 16, 6)
+            setBackgroundColor(Color.parseColor("#E6222222"))
+        }
+        topBar.addView(status)
+        topBar.addView(infoText)
+        // index 0：上控制栏必须在画布**之前**，否则会被 weight=1 的画布挤到屏幕外
+        content.addView(
+            topBar, 0,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         )
 
+        // ---- 下状态栏（固定高度）----
         dbg = TextView(this).apply {
             textSize = 12f
             setTextColor(Color.parseColor("#FFDDDD"))
             setBackgroundColor(Color.parseColor("#AA000000"))
-            setPadding(12, 8, 12, 8)
+            setPadding(12, 6, 12, 6)
+            setLines(4)   // 固定四行 → 下状态栏高度恒定
             text = if (workMode == Protocol.MODE_MOUSE)
                 "鼠标模式：手指滑动=移动光标，单击=左键，双击=右键\n等待事件…"
             else
-                "数位板模式：S Pen 作画，手指滑动=移动范围框\n等待事件…"
+                "数位板模式：S Pen 作画｜单指滑动=移动范围框，双指捏合=缩放\n等待事件…"
         }
-        root.addView(
+        val bottomBar = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 0, 0)
+        }
+        bottomBar.addView(
             dbg,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        )
+        content.addView(
+            bottomBar,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        )
+
+        // 内容层铺满；设置面板作为覆盖层浮在书写区上方
+        root.addView(
+            content,
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        )
+
+        // ---- 设置详情（浮层，默认收起）----
+        panel.addView(details)
+        root.addView(
+            panel,
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.BOTTOM
+                gravity = Gravity.TOP
             }
         )
 
@@ -232,14 +284,21 @@ class MainActivity : Activity() {
         canvas.onPan = { dx, dy -> net.send(Protocol.buildPan(dx, dy)) }
         // 手指 → 鼠标模式下的触摸板动作（移动 / 左键 / 右键）
         canvas.onMouse = { kind, dx, dy -> net.send(Protocol.buildMouse(kind, dx, dy)) }
+        // 双指捏合 → 缩放 PC 上的操作范围框
+        canvas.onZoom = { scale, fx, fy -> net.send(Protocol.buildZoom(scale, fx, fy)) }
+        // 书写区尺寸变了（展开/收起设置面板会挤压中间区域）→ 重发握手帧让 PC 重算等比映射。
+        // 注意：首次布局发生在 setContentView() 里，那时 net 还没初始化，必须判空。
+        canvas.onSurfaceSizeChanged = { _, _ -> if (::net.isInitialized) net.sendHelloNow() }
+        // 操作框状态变化 → 存到 prefs（重开 App 后能恢复，手机框与桌面框形状仍然一致）
+        canvas.onFrameChanged = { l, t, s ->
+            prefs.edit().putFloat("frameL", l).putFloat("frameT", t).putFloat("frameS", s).apply()
+        }
 
         status.setOnClickListener {
             details.visibility = if (details.visibility == View.GONE) View.VISIBLE else View.GONE
         }
-        // 点标题栏任意位置都能展开，比只在文字上点好按
-        panel.setOnClickListener {
-            details.visibility = if (details.visibility == View.GONE) View.VISIBLE else View.GONE
-        }
+        // 注意：展开时面板是浮层，会盖住顶部状态栏，所以**不能**靠「点空白处收起」，
+        // 必须在面板底部放一个明确的「收起设置」按钮。
         hostEdit.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
@@ -265,6 +324,16 @@ class MainActivity : Activity() {
             net.send(Protocol.buildMode(m))
             Log.i("SpenTablet", "切换工作模式 -> ${if (m == Protocol.MODE_MOUSE) "鼠标" else "数位板"}")
         }
+        resetFrameBtn.setOnClickListener {
+            canvas.resetFrame()
+            net.send(Protocol.buildReset())
+            Log.i("SpenTablet", "操作框已复位")
+        }
+        collapseBtn.setOnClickListener { details.visibility = View.GONE }
+        pinchBtn.setOnClickListener {
+            canvas.simulatePinch(0.75f)
+            Log.i("SpenTablet", "模拟捏合 → ${canvas.frameSummary()}")
+        }
         hoverBox.setOnCheckedChangeListener { _, checked ->
             canvas.sendHover = checked
             prefs.edit().putBoolean("hover", checked).apply()
@@ -287,8 +356,8 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     status.text = (if (net.connected) "已连接 $host:$port" else "未连接") +
                             "｜$modeName（点此设置）"
-                    infoText.text = "绘制面 ${w.toInt()}×${h.toInt()} 宽高比 $aspect｜模式 $modeName｜" +
-                            "发送 ${net.sentFrames} 丢弃 ${net.droppedFrames}"
+                    infoText.text = "书写区 ${w.toInt()}×${h.toInt()} 宽高比 $aspect｜模式 $modeName\n" +
+                            "${canvas.frameSummary()}｜发送 ${net.sentFrames} 丢弃 ${net.droppedFrames}"
                     val tail = if (err != null) "错误: $err" else canvas.debugSummary().let { "" }
                     dbg.text = if (err != null) tail else "$sum"
                 }
@@ -313,9 +382,12 @@ class MainActivity : Activity() {
         return if (h > 0) h.toFloat() else resources.displayMetrics.heightPixels.toFloat()
     }
 
-    /** 握手帧：绘制面尺寸 + 当前比例偏好 + 当前工作模式（PC 据此恢复上次的模式） */
+    /** 握手帧：书写区尺寸 + 比例偏好 + 工作模式 + 操作框状态（PC 据此还原同形状的桌面框） */
     private fun helloFrame(): ByteArray =
-        Protocol.buildHello(surfaceW(), surfaceH(), aspectMode, workMode)
+        Protocol.buildHello(
+            surfaceW(), surfaceH(), aspectMode, workMode,
+            canvas.frameLeft, canvas.frameTop, canvas.frameScale
+        )
 
     private fun restartNet() {
         if (::net.isInitialized) net.stop()

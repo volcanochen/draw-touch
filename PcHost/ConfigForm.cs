@@ -25,6 +25,7 @@ internal sealed class ConfigForm : Form
     private readonly ComboBox _cmbMode;
     private readonly ComboBox _cmbWork;
     private readonly NumericUpDown _nudMouseSpeed;
+    private readonly NumericUpDown _nudScale;
     private readonly ComboBox _cmbAspect;
     private readonly CheckBox _chkFull;
     private readonly NumericUpDown _nudX, _nudY, _nudW, _nudH;
@@ -89,6 +90,24 @@ internal sealed class ConfigForm : Form
             Value = (decimal)Math.Clamp(cfg.MouseSpeed, 0.2, 4.0), Width = 90
         };
         AddRow("鼠标速度", _nudMouseSpeed);
+
+        var zoomRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
+        _nudScale = new NumericUpDown
+        {
+            Minimum = 0.05m, Maximum = 1m, DecimalPlaces = 2, Increment = 0.05m,
+            Value = (decimal)Math.Clamp(cfg.Scale, 0.05, 1.0), Width = 90,
+            ReadOnly = true
+        };
+        var lblHint = new Label
+        {
+            Text = "（由手机端双指捏合控制）",
+            AutoSize = true,
+            ForeColor = Color.DimGray,
+            Padding = new Padding(6, 6, 0, 0)
+        };
+        zoomRow.Controls.Add(_nudScale);
+        zoomRow.Controls.Add(lblHint);
+        AddRow("操作框缩放", zoomRow);
 
         _cmbAspect = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 200 };
         foreach (var (text, _) in AspectOptions) _cmbAspect.Items.Add(text);
@@ -160,11 +179,13 @@ internal sealed class ConfigForm : Form
         string phone = _cfg.PhoneAspect > 0
             ? $"{_cfg.PhoneAspect:0.###}（偏好 {(_cfg.PhonePrefersKeep ? "保持等比" : "拉伸")}）"
             : "未知（等待手机连接）";
+        _nudScale.Value = (decimal)Math.Clamp(_cfg.Scale, 0.05, 1.0);
         _info.Text =
             $"虚拟屏幕 : {_cfg.VirtualX},{_cfg.VirtualY} {_cfg.VirtualW}×{_cfg.VirtualH}\n" +
             $"手机比例 : {phone}\n" +
             $"实映射区 : {r.x},{r.y} {r.w}×{r.h}  （{(r.w > 0 && r.h > 0 ? ((double)r.w / r.h).ToString("0.###") : "-")}）\n" +
             $"工作模式 : {(_cfg.IsMouseMode ? "鼠标（范围框已隐藏）" : "数位板（范围框显示）")}  速度×{_cfg.MouseSpeed:0.##}\n" +
+            $"范围框   : 缩放×{_cfg.Scale:0.###}  位置({_cfg.FrameL:0.###},{_cfg.FrameT:0.###})（手机端捏合控制）\n" +
             $"帧统计   : DOWN={_server.CountDown} MOVE={_server.CountMove} UP={_server.CountUp} HOVER={_server.CountHover}\n" +
             $"最新     : ({_server.LastX},{_server.LastY}) 压感 {_server.LastPressure:0.00}\n" +
             "注：端口与注入模式需重启程序后生效";
@@ -177,6 +198,7 @@ internal sealed class ConfigForm : Form
         _cfg.Aspect = AspectOptions[Math.Max(0, _cmbAspect.SelectedIndex)].Key;
         _cfg.Debug = _chkDebug.Checked;
         _cfg.MouseSpeed = (double)_nudMouseSpeed.Value;
+        // 操作框的缩放/位置由手机端捏合控制，PC 这里只读不写
         _cfg.SetWorkMode(_cmbWork.SelectedIndex == 1);   // 立即生效并刷新范围框
         if (_cfg.IsMouseMode) MouseControl.ReleaseAll();
 

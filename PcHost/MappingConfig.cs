@@ -14,7 +14,7 @@ namespace SpenTabletHost;
 ///   Follow  —— 跟随手机端设置面板的选择（默认）
 ///
 /// 另外支持「操作范围框」：在桌面上画出笔实际能覆盖的区域，
-/// 并可用手指在手机上滑动来平移它（OffsetX / OffsetY）。
+/// 并可用手指在手机上滑动平移它、双指捏合缩放它（CenterX/CenterY + Scale）。
 /// </summary>
 public sealed class MappingConfig
 {
@@ -54,9 +54,17 @@ public sealed class MappingConfig
         Changed?.Invoke();
     }
 
-    /// <summary>操作范围框相对“基准位置”的平移量（像素）。手指滑动时改变。</summary>
-    public int OffsetX { get; set; } = 0;
-    public int OffsetY { get; set; } = 0;
+    /// <summary>
+    /// 操作范围框相对「基准矩形」的位置与大小（都用基准矩形的相对量表示，0..1）。
+    ///   Scale  —— 缩放倍数。1.0 = 基准（等比模式下就是能放下的最大等比矩形）
+    ///   FrameL/FrameT —— 操作框左上角在基准矩形里的相对位置
+    ///
+    /// 手机端用完全相同的三个量（相对书写区）画出自己的操作框，
+    /// 因此「手机上的框」与「桌面上的框」永远是同一个形状、同一个位置。
+    /// </summary>
+    public double Scale { get; set; } = 1.0;
+    public double FrameL { get; set; } = 0.0;
+    public double FrameT { get; set; } = 0.0;
 
     /// <summary>映射区域（虚拟屏幕像素）。任一为 0 表示使用整块虚拟屏幕。</summary>
     public int MappingX { get; set; } = 0;
@@ -74,6 +82,8 @@ public sealed class MappingConfig
     public event Action? Changed;
 
     private double _phoneAspect;      // 手机绘制面 宽/高，0 表示未知
+    private double _phoneSurfaceW;    // 手机书写区像素宽（用于精确还原手机端的框形状）
+    private double _phoneSurfaceH;    // 手机书写区像素高
     private bool _phonePrefersKeep;   // 手机端设置面板的选择
     public double PhoneAspect => _phoneAspect;
     public bool PhonePrefersKeep => _phonePrefersKeep;
@@ -101,12 +111,20 @@ public sealed class MappingConfig
         }
     }
 
-    /// <summary>手机握手：上报绘制面像素宽高、比例偏好，以及手机端当前的工作模式。</summary>
-    public void SetPhoneHello(float w, float h, float aspectMode, float workMode = 0f)
+    /// <summary>手机握手：上报绘制面像素宽高、比例偏好、工作模式，以及当前操作框状态。</summary>
+    public void SetPhoneHello(float w, float h, float aspectMode, float workMode = 0f,
+                              float frameL = -1f, float frameT = -1f, float frameScale = -1f)
     {
-        if (w > 0 && h > 0) _phoneAspect = (double)w / h;
+        if (w > 0 && h > 0)
+        {
+            _phoneAspect = (double)w / h;
+            _phoneSurfaceW = w;
+            _phoneSurfaceH = h;
+        }
         _phonePrefersKeep = aspectMode >= 1f;
         SetWorkMode(workMode >= 1f);
+        // 手机端上报了操作框状态就采纳它，保证重连后两端框仍然是同一个形状/位置
+        if (frameScale > 0f) SetFrame(frameL, frameT, frameScale);
         Changed?.Invoke();
     }
 
@@ -136,33 +154,105 @@ public sealed class MappingConfig
         return (_mapX + (_mapW - w) / 2, _mapY, w, _mapH);
     }
 
-    /// <summary>实际生效的映射矩形（含平移），保证不越出虚拟屏幕。</summary>
+    /// <summary>
+    /// 操作框在桌面上的尺寸。
+    /// 关键：尺寸由**手机书写区尺寸**换算而来（而不是直接缩放基准矩形），
+    /// 这样「桌面框」就是「手机框」等比放大后取整的结果 —— 两端形状严格一致，
+    /// 不会出现捏合后桌面框变形的现象。
+    /// </summary>
+    private (int w, int h) BoxSize(int baseW, double s)
+    {
+        double sw = _phoneSurfaceW > 0 ? _phoneSurfaceW : baseW;
+        double sh = _phoneSurfaceH > 0 ? _phoneSurfaceH : baseW;
+        double k = baseW / sw;                      // 桌面像素 / 手机像素
+        int w = Math.Max(16, (int)Math.Round(sw * s * k));
+        // 高由宽推出来（而不是各自取整），这样桌面框的宽高比严格等于手机框的宽高比，
+        // 捏合后再也不会出现「手机框和桌面框形状不一样」。
+        int h = Math.Max(16, (int)Math.Round(w * sh / sw));
+        return (w, h);
+    }
+
+    /// <summary>实际生效的映射矩形（操作框），保证不越出基准矩形（基准矩形必在虚拟屏幕内）。</summary>
     public (int x, int y, int w, int h) GetActiveRect()
     {
         var (bx, by, bw, bh) = BaseRect();
-        int x = Math.Clamp(bx + OffsetX, VirtualX, Math.Max(VirtualX, VirtualX + VirtualW - bw));
-        int y = Math.Clamp(by + OffsetY, VirtualY, Math.Max(VirtualY, VirtualY + VirtualH - bh));
-        return (x, y, bw, bh);
+        double s = Math.Clamp(Scale, MIN_SCALE, 1.0);
+        var (w, h) = BoxSize(bw, s);
+        int x = (int)Math.Round(bx + FrameL * bw);
+        int y = (int)Math.Round(by + FrameT * bh);
+        // 夹在基准矩形内：与手机端「框必须留在书写区内」的规则完全一致
+        x = Math.Clamp(x, bx, Math.Max(bx, bx + bw - w));
+        y = Math.Clamp(y, by, Math.Max(by, by + bh - h));
+        return (x, y, w, h);
     }
 
-    /// <summary>手指滑动平移：位移量按“框自身尺寸”的比例换算，手感 1:1。</summary>
-    public void Pan(float dxNorm, float dyNorm)
+    /// <summary>
+    /// 把 FrameL/FrameT 夹回合法区间。
+    /// 规则与手机端完全一致：[0, 1-Scale]，两端数值逐位相同。
+    /// </summary>
+    private void ClampFrame()
     {
-        var r = GetActiveRect();
-        OffsetX += (int)Math.Round(dxNorm * r.w);
-        OffsetY += (int)Math.Round(dyNorm * r.h);
-        var b = BaseRect();
-        OffsetX = Math.Clamp(OffsetX, VirtualX - b.x, Math.Max(VirtualX - b.x, VirtualX + VirtualW - b.x - b.w));
-        OffsetY = Math.Clamp(OffsetY, VirtualY - b.y, Math.Max(VirtualY - b.y, VirtualY + VirtualH - b.y - b.h));
+        double s = Math.Clamp(Scale, MIN_SCALE, 1.0);
+        double lim = Math.Max(0.0, 1.0 - s);
+        FrameL = Math.Clamp(FrameL, 0.0, lim);
+        FrameT = Math.Clamp(FrameT, 0.0, lim);
+    }
+
+    /// <summary>手指单指滑动平移：dx/dy 是「操作框宽度/高度」的相对位移。</summary>
+    public void Pan(double dx, double dy)
+    {
+        FrameL += dx;
+        FrameT += dy;
+        ClampFrame();
         Changed?.Invoke();
     }
 
-    /// <summary>回到基准位置（等比模式下即居中）。</summary>
-    public void CenterOffset()
+    /// <summary>
+    /// 双指捏合缩放。focusX/focusY 是捏合焦点在**操作框内**的相对位置(0..1)：
+    /// 缩放后该点仍停在原来的屏幕位置上，也就是「以捏合中心为锚点」缩放。
+    /// 手机端用同一套公式算自己的框，两端结果逐位一致。
+    /// </summary>
+    public void Zoom(double factor, float focusX, float focusY)
     {
-        OffsetX = 0; OffsetY = 0;
+        var (bx, by, bw, bh) = BaseRect();
+        double fx = Math.Clamp(focusX, 0f, 1f);
+        double fy = Math.Clamp(focusY, 0f, 1f);
+        double s = Math.Clamp(Scale, MIN_SCALE, 1.0);
+        var (w, h) = BoxSize(bw, s);
+        // 焦点所在的屏幕位置（桌面像素）
+        double px = bx + FrameL * bw + fx * w;
+        double py = by + FrameT * bh + fy * h;
+
+        double s2 = Math.Clamp(s * factor, MIN_SCALE, 1.0);
+        Scale = s2;
+        var (w2, h2) = BoxSize(bw, s2);
+        // 焦点不动 → 反推框的新位置
+        FrameL = bw > 0 ? (px - fx * w2 - bx) / bw : 0.0;
+        FrameT = bh > 0 ? (py - fy * h2 - by) / bh : 0.0;
+        ClampFrame();
         Changed?.Invoke();
     }
+
+    /// <summary>复位：操作框恢复为整个基准矩形。</summary>
+    public void ResetView()
+    {
+        Scale = 1.0;
+        FrameL = 0.0;
+        FrameT = 0.0;
+        Changed?.Invoke();
+    }
+
+    /// <summary>直接采纳手机端上报的操作框状态（重连时用，保证两端一致）。</summary>
+    public void SetFrame(double frameL, double frameT, double scale)
+    {
+        Scale = Math.Clamp(scale, MIN_SCALE, 1.0);
+        FrameL = frameL;
+        FrameT = frameT;
+        ClampFrame();
+        Changed?.Invoke();
+    }
+
+    public const double MIN_SCALE = 0.05;
 
     /// <summary>把归一化坐标(0..1)映射到像素坐标，并夹在虚拟屏幕内。</summary>
     public (int px, int py) ToPixels(float nx, float ny)

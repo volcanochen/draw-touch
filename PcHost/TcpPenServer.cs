@@ -24,6 +24,9 @@ public sealed class TcpPenServer : IDisposable
     private const byte TYPE_PAN = 0x06;
     private const byte TYPE_MOUSE = 0x07;
     private const byte TYPE_MODE = 0x08;
+    private const byte TYPE_ZOOM = 0x09;
+    private const byte TYPE_RESET = 0x0A;
+    private const byte TYPE_STATUS = 0x0B;
 
     // 鼠标帧 kind（与手机端 Protocol.MOUSE_* 一致）
     private const int MOUSE_MOVE = 0;
@@ -108,6 +111,15 @@ public sealed class TcpPenServer : IDisposable
                         case TYPE_MODE:
                             HandleMode(payload);
                             break;
+                        case TYPE_ZOOM:
+                            HandleZoom(payload);
+                            break;
+                        case TYPE_RESET:
+                            HandleReset(payload);
+                            break;
+                        case TYPE_STATUS:
+                            HandleStatus(payload);
+                            break;
                         case TYPE_PEN_DOWN:
                         case TYPE_PEN_MOVE:
                         case TYPE_PEN_UP:
@@ -139,11 +151,17 @@ public sealed class TcpPenServer : IDisposable
         float h = BitConverter.ToSingle(p, 4);
         float mode = BitConverter.ToSingle(p, 8);
         float work = p.Length >= 16 ? BitConverter.ToSingle(p, 12) : 0f;
-        _cfg.SetPhoneHello(w, h, mode, work);
+        float frameL = p.Length >= 20 ? BitConverter.ToSingle(p, 16) : -1f;
+        float frameT = p.Length >= 24 ? BitConverter.ToSingle(p, 20) : -1f;
+        float frameScale = p.Length >= 28 ? BitConverter.ToSingle(p, 24) : -1f;
+        _cfg.SetPhoneHello(w, h, mode, work, frameL, frameT, frameScale);
+        _zoomLog = 0;
         var r = _cfg.GetActiveRect();
-        AppLog.Info($"[Hello] 手机绘制面 {w:0}×{h:0} 宽高比={(_cfg.PhoneAspect > 0 ? _cfg.PhoneAspect : 0):0.###} " +
-                    $"偏好={(mode >= 1f ? "保持等比" : "拉伸")} → 实际映射区域 {r.x},{r.y} {r.w}×{r.h}");
-        AppLog.Info($"[Hello] 手机工作模式 = {(_cfg.IsMouseMode ? "鼠标" : "数位板")}");
+        AppLog.Info($"[Hello] 手机书写区 {w:0}×{h:0} 宽高比={(_cfg.PhoneAspect > 0 ? _cfg.PhoneAspect : 0):0.###} " +
+                    $"偏好={(mode >= 1f ? "保持等比" : "拉伸")}");
+        AppLog.Info($"[Hello] 工作模式={(_cfg.IsMouseMode ? "鼠标" : "数位板")} " +
+                    $"操作框 缩放×{_cfg.Scale:0.###} 位置({_cfg.FrameL:0.###},{_cfg.FrameT:0.###}) " +
+                    $"→ 桌面映射区域 {r.x},{r.y} {r.w}×{r.h}");
     }
 
     private int _panLog;
@@ -167,7 +185,8 @@ public sealed class TcpPenServer : IDisposable
         if (_panLog++ % 12 == 0)
         {
             var r = _cfg.GetActiveRect();
-            AppLog.Info($"[Pan] 平移 dx={dx:F3} dy={dy:F3} → 操作范围 {r.x},{r.y} {r.w}×{r.h}");
+            AppLog.Info($"[Pan] 平移 dx={dx:F3} dy={dy:F3} → 位置=({_cfg.FrameL:F3},{_cfg.FrameT:F3}) " +
+                        $"桌面范围 {r.x},{r.y} {r.w}×{r.h}");
         }
     }
 
@@ -184,6 +203,50 @@ public sealed class TcpPenServer : IDisposable
             : "[Mode] 切换到【数位板模式】：显示操作范围框，S Pen 在框内作画，手指滑动=移动范围框");
     }
 
+    private int _zoomLog;
+
+    /// <summary>缩放帧：手指双指捏合 → 缩放桌面上的操作范围框（以捏合中心为锚点）。</summary>
+    private void HandleZoom(byte[] p)
+    {
+        if (p.Length < 12) return;
+        float factor = BitConverter.ToSingle(p, 0);
+        float fx = BitConverter.ToSingle(p, 4);
+        float fy = BitConverter.ToSingle(p, 8);
+        // 互斥保险：鼠标模式下没有范围框，缩放无意义
+        if (_cfg.IsMouseMode)
+        {
+            if (_zoomIgnored++ % 20 == 0)
+                AppLog.Warn("[Zoom] 收到缩放帧，但当前是鼠标模式（无范围框），已忽略");
+            return;
+        }
+        _cfg.Zoom(factor, fx, fy);
+        if (++_zoomLog % 6 == 1)
+        {
+            var r = _cfg.GetActiveRect();
+            AppLog.Info($"[Zoom] ×{factor:F3} 焦点({fx:F2},{fy:F2}) → 缩放={_cfg.Scale:F3} " +
+                        $"位置=({_cfg.FrameL:F3},{_cfg.FrameT:F3}) 桌面范围 {r.x},{r.y} {r.w}×{r.h}");
+        }
+    }
+
+    /// <summary>状态查询帧：把当前操作框状态打进日志（调试/自测用）。</summary>
+    private void HandleStatus(byte[] p)
+    {
+        _zoomLog = 0;
+        var r = _cfg.GetActiveRect();
+        AppLog.Info($"[Status] 缩放={_cfg.Scale:F6} 位置=({_cfg.FrameL:F6},{_cfg.FrameT:F6}) " +
+                    $"桌面范围 {r.x},{r.y} {r.w}×{r.h} 宽高比={(r.h > 0 ? (double)r.w / r.h : 0):F6}");
+    }
+
+    /// <summary>复位帧：手机端把操作框恢复到整个书写区。</summary>
+    private void HandleReset(byte[] p)
+    {
+        _cfg.ResetView();
+        _zoomLog = 0;          // 复位后重新计数，日志从第 1 帧开始打
+        var r = _cfg.GetActiveRect();
+        AppLog.Info($"[Reset] 操作框已复位 → 桌面范围 {r.x},{r.y} {r.w}×{r.h}");
+    }
+
+    private int _zoomIgnored;
     private int _mouseLog;
 
     /// <summary>鼠标帧：手指当触摸板（相对移动 / 左键 / 右键）。</summary>

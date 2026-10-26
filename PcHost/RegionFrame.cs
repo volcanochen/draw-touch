@@ -90,7 +90,8 @@ internal sealed class RegionFrame : Form
                 if (r.w > 0 && r.h > 0)
                 {
                     Bounds = new Rectangle(r.x, r.y, r.w, r.h);
-                    _lbl.Text = $"S Pen 操作范围 {r.w}×{r.h}（手指在手机上滑动可移动）";
+                    _lbl.Text = $"S Pen 操作范围 {r.w}×{r.h}  ×{cfg.Scale:0.##}" +
+                                "（单指滑动=移动，双指捏合=缩放）";
                 }
                 if (!Visible) Visible = true;
             }));

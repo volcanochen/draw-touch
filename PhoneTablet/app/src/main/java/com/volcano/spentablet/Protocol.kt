@@ -34,6 +34,10 @@ object Protocol {
     const val TYPE_MOUSE: Int = 0x07
     /** 模式帧：手机通知 PC 当前是数位板模式还是鼠标模式 */
     const val TYPE_MODE: Int = 0x08
+    /** 缩放帧：双指捏合 → 缩放 PC 上的操作范围框 */
+    const val TYPE_ZOOM: Int = 0x09
+    /** 复位帧：把操作范围框恢复成整个书写区 */
+    const val TYPE_RESET: Int = 0x0A
 
     // ---- 工作模式 ----
     const val MODE_TABLET: Int = 0   // 数位板：S Pen 在框内作画，手指拖动框
@@ -53,6 +57,8 @@ object Protocol {
     const val ASPECT_KEEP: Int = 1
 
     private const val PAYLOAD_LEN = 24
+    /** 握手帧 payload 长度（7 个 float） */
+    private const val HELLO_LEN = 28
 
     fun buildPen(
         type: Int,
@@ -123,6 +129,27 @@ object Protocol {
         return buf.array()
     }
 
+    /**
+     * 缩放帧：双指捏合。
+     * payload: [0]=scaleFactor(float, >1 放大 / <1 缩小)
+     *          [4]=focusX(float, 捏合中心在书写区的归一化 X)
+     *          [8]=focusY(float, 归一化 Y)
+     * PC 会以该焦点为锚点缩放，焦点处的内容不会跑位。
+     */
+    fun buildZoom(scale: Float, focusX: Float, focusY: Float): ByteArray {
+        val buf = ByteBuffer.allocate(6 + PAYLOAD_LEN).order(ByteOrder.LITTLE_ENDIAN)
+        buf.put(MAGIC1)
+        buf.put(MAGIC2)
+        buf.put(VERSION)
+        buf.put(TYPE_ZOOM.toByte())
+        buf.putShort(PAYLOAD_LEN.toShort())
+        buf.putFloat(scale)
+        buf.putFloat(focusX)
+        buf.putFloat(focusY)
+        for (i in 12 until PAYLOAD_LEN) buf.put(0)
+        return buf.array()
+    }
+
     /** 模式帧：切换数位板/鼠标模式时通知 PC。 */
     fun buildMode(mode: Int): ByteArray {
         val buf = ByteBuffer.allocate(6 + PAYLOAD_LEN).order(ByteOrder.LITTLE_ENDIAN)
@@ -136,23 +163,48 @@ object Protocol {
         return buf.array()
     }
 
-    /**
-     * 握手帧：连上后立刻发送，也用于设置变更后通知 PC。
-     * payload: [0]=surfaceW(float) [4]=surfaceH(float) [8]=aspectMode(float)
-     *          [12]=workMode(float, MODE_TABLET=0 / MODE_MOUSE=1) 其余保留为 0
-     */
-    fun buildHello(surfaceW: Float, surfaceH: Float, aspectMode: Int, workMode: Int = MODE_TABLET): ByteArray {
+    /** 复位帧：操作框恢复成整个书写区（PC 端同步复位，保证两端形状一致）。 */
+    fun buildReset(): ByteArray {
         val buf = ByteBuffer.allocate(6 + PAYLOAD_LEN).order(ByteOrder.LITTLE_ENDIAN)
         buf.put(MAGIC1)
         buf.put(MAGIC2)
         buf.put(VERSION)
-        buf.put(TYPE_HELLO.toByte())
+        buf.put(TYPE_RESET.toByte())
         buf.putShort(PAYLOAD_LEN.toShort())
+        for (i in 0 until PAYLOAD_LEN) buf.put(0)
+        return buf.array()
+    }
+
+    /**
+     * 握手帧：连上后立刻发送，也用于设置变更后通知 PC。
+     * payload(28 字节):
+     *   [0]=surfaceW(float) 书写区宽  [4]=surfaceH(float) 书写区高
+     *   [8]=aspectMode(float)        [12]=workMode(float)
+     *   [16]=frameL [20]=frameT [24]=frameScale   ← 手机端操作框状态
+     * PC 据此恢复出**与手机端同形状同位置**的桌面范围框。
+     */
+    fun buildHello(
+        surfaceW: Float,
+        surfaceH: Float,
+        aspectMode: Int,
+        workMode: Int = MODE_TABLET,
+        frameL: Float = 0f,
+        frameT: Float = 0f,
+        frameScale: Float = 1f
+    ): ByteArray {
+        val buf = ByteBuffer.allocate(6 + HELLO_LEN).order(ByteOrder.LITTLE_ENDIAN)
+        buf.put(MAGIC1)
+        buf.put(MAGIC2)
+        buf.put(VERSION)
+        buf.put(TYPE_HELLO.toByte())
+        buf.putShort(HELLO_LEN.toShort())
         buf.putFloat(surfaceW)
         buf.putFloat(surfaceH)
         buf.putFloat(aspectMode.toFloat())
         buf.putFloat(workMode.toFloat())
-        for (i in 16 until PAYLOAD_LEN) buf.put(0)
+        buf.putFloat(frameL)
+        buf.putFloat(frameT)
+        buf.putFloat(frameScale)
         return buf.array()
     }
 }
