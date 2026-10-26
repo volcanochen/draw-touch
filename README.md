@@ -154,6 +154,7 @@ adb reverse tcp:6000 tcp:6000
 | **压感很弱（画线粗细几乎没变化）** | 内核 `ABS_PRESSURE` 声明量程 0~4095，但 S Pen 实际书写只到 ~500（`getPressure()` 仅 ~0.13）。App 内置**压感增益**（默认 3.0），点顶部状态条展开设置，用「增益 ±」调整，会记住在 prefs。可用 `adb shell getevent -l /dev/input/event14` 看 `ABS_PRESSURE` 原始值核对 |
 | **USB 调试授权框死活不弹** | PC 上 `~/.android/adbkey` 与手机记录的授权状态不匹配。备份后删除 `adbkey` / `adbkey.pub` 让 adb 重建密钥，手机会立刻弹窗。操作时**保持手机亮屏解锁**，息屏时三星会收起授权框 |
 | **adb daemon 活不过一条命令，`reverse` 规则总丢** | adb server 会随命令结束被回收，需起常驻后台任务保活（例如 `adb logcat > keepalive.log`）。另外**两个 adb 命令并发启动会撞车**（`could not read ok from ADB Server`），必须串行 |
+| **PC 端收到数据，但屏幕上笔迹没反应 / 完全没有压感** | 两个已修复的坑，若自行改动 `PenInjector.cs` 请务必保持：① `POINTER_INFO` 的 `sizeof` 是 **96**（x64 对齐 8，字段排到 92 后还有 4 字节尾部填充），写成 92 会让后面所有 pen 字段错位 4 字节，**Windows 会直接拒绝整个注入**；② 主机进程**必须 DPI 感知**（`SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`），否则 `GetSystemMetrics` 返回虚拟化尺寸，200% 缩放下坐标会差整整 2 倍 |
 | `adb install -r` 报 `INSTALL_FAILED_UPDATE_INCOMPATIBLE` | 旧包是别的机器签的名，先 `adb uninstall com.volcano.spentablet` 再装 |
 | 手机显示已连接、PC 却收不到任何数据（浮窗一直"等待笔数据"） | **adb server 处于半坏状态**（连接能建立但中继不转发数据）。执行 `adb kill-server` 后重新 `adb reverse tcp:6000 tcp:6000`，并重启手机端 App。本机装有多个 adb（如刷机工具 PhoenixSuit 自带老版 adb）时尤其容易发生——版本不匹配的客户端会让 adb server 反复自杀重启 |
 | `adb install -r` 重装后突然连不上 | **重装 APK 会清空 adb reverse 规则**，重跑一次 `adb reverse tcp:6000 tcp:6000` 即可 |

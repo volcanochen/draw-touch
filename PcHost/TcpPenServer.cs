@@ -26,6 +26,11 @@ public sealed class TcpPenServer : IDisposable
     private readonly IInjector _injector;
     private CancellationTokenSource? _cts;
 
+    /// <summary>各类型帧计数，用于控制台周期性汇报（确认链路是否真的在跑）。</summary>
+    public long CountDown, CountMove, CountUp, CountHover, CountNoop;
+    public double LastPressure;
+    public int LastX, LastY;
+
     /// <summary>每收到一帧并映射成 PenSample 后回调（用于调试浮窗）。</summary>
     public Action<PenSample>? OnSample { get; set; }
 
@@ -106,6 +111,14 @@ public sealed class TcpPenServer : IDisposable
         ushort buttons = BitConverter.ToUInt16(p, 20);
 
         var (px, py) = _cfg.ToPixels(x, y);
+        switch (type)
+        {
+            case TYPE_PEN_DOWN: CountDown++; break;
+            case TYPE_PEN_UP: CountUp++; break;
+            case TYPE_PEN_HOVER: CountHover++; break;
+            default: CountMove++; break;
+        }
+        LastX = px; LastY = py; LastPressure = pressure;
         var state = type switch
         {
             TYPE_PEN_DOWN => PenState.Down,

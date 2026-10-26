@@ -68,7 +68,9 @@ internal sealed class PenInjector : IInjector
     private const uint PEN_MASK_TILT_X = 0x00000004;
     private const uint PEN_MASK_TILT_Y = 0x00000008;
 
-    [StructLayout(LayoutKind.Explicit, Size = 92)]
+    // POINTER_INFO：实测 sizeof = 96（x64，对齐 8；字段排到 92 后补 4 字节尾部填充）。
+    // 注意：写成 92 会让后面所有 pen 字段整体错位 4 字节，Windows 会直接拒绝注入。
+    [StructLayout(LayoutKind.Explicit, Size = 96)]
     private struct POINTER_INFO
     {
         [FieldOffset(0)] public uint pointerType;
@@ -93,16 +95,17 @@ internal sealed class PenInjector : IInjector
         [FieldOffset(88)] public uint buttonChangeType;
     }
 
-    [StructLayout(LayoutKind.Explicit, Size = 116)]
+    // POINTER_PEN_INFO：sizeof = 96(POINTER_INFO) + 24 = 120
+    [StructLayout(LayoutKind.Explicit, Size = 120)]
     private struct POINTER_PEN_INFO
     {
         [FieldOffset(0)] public POINTER_INFO pointerInfo;
-        [FieldOffset(92)] public uint penFlags;
-        [FieldOffset(96)] public uint penMask;
-        [FieldOffset(100)] public uint pressure;
-        [FieldOffset(104)] public uint rotation;
-        [FieldOffset(108)] public int tiltX;
-        [FieldOffset(112)] public int tiltY;
+        [FieldOffset(96)] public uint penFlags;
+        [FieldOffset(100)] public uint penMask;
+        [FieldOffset(104)] public uint pressure;
+        [FieldOffset(108)] public uint rotation;
+        [FieldOffset(112)] public int tiltX;
+        [FieldOffset(116)] public int tiltY;
     }
 
     // union 含 POINTER_TOUCH_INFO(140B) 按 8 对齐 => 144B，type 占 4B 后再 4B 填充 => 152B
@@ -125,6 +128,7 @@ internal sealed class PenInjector : IInjector
     private static extern bool DestroySyntheticPointerDevice(IntPtr device);
 
     private IntPtr _device = IntPtr.Zero;
+    private uint _frame;
 
     public bool Initialize()
     {
@@ -147,8 +151,13 @@ internal sealed class PenInjector : IInjector
         ref var pi = ref pti.penInfo.pointerInfo;
         pi.pointerType = PT_PEN;
         pi.pointerId = 1;
+        pi.frameId = ++_frame;
+        pi.historyCount = 1;
         pi.pixelX = s.Px; pi.pixelY = s.Py;
         pi.pixelRawX = s.Px; pi.pixelRawY = s.Py;
+        // himetric 实测被 Windows 忽略（坐标以 pixelX/pixelY 为准），这里按 96 DPI 惯例填上保持一致
+        pi.himetricX = (int)(s.Px * 26.4583); pi.himetricY = (int)(s.Py * 26.4583);
+        pi.himetricRawX = pi.himetricX; pi.himetricRawY = pi.himetricY;
 
         uint pf = s.State switch
         {

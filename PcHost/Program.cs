@@ -10,6 +10,12 @@ internal static class Program
     {
         Console.WriteLine("=== SpenTablet Host (把三星 Note + S Pen 变成 PC 数位板) ===");
 
+        // 必须先开启 DPI 感知：合成笔注入用的是物理像素，
+        // 若进程处于 DPI 无感知状态，GetSystemMetrics 会返回虚拟化后的尺寸（如 200% 缩放下只有一半），
+        // 坐标映射就会整体错位一个缩放倍率。
+        if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
+            SetProcessDPIAware();
+
         var cfg = new MappingConfig();
         if (File.Exists("appsettings.json"))
         {
@@ -47,9 +53,23 @@ internal static class Program
 
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
+        int tick = 0;
         while (!cts.Token.IsCancellationRequested)
+        {
             Thread.Sleep(200);
+            if (++tick % 10 == 0)   // 每 2 秒汇报一次，便于确认链路在跑
+                Console.WriteLine($"[统计] DOWN={server.CountDown} MOVE={server.CountMove} UP={server.CountUp} " +
+                                  $"HOVER={server.CountHover} | 最新 ({server.LastX},{server.LastY}) p={server.LastPressure:F2}");
+        }
 
         Console.WriteLine("\n[Host] 正在退出…");
     }
+
+    private const int DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool SetProcessDpiAwarenessContext(int value);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool SetProcessDPIAware();
 }
