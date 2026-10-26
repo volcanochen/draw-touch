@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -14,7 +15,6 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
-import android.util.Log
 import android.widget.TextView
 
 class MainActivity : Activity() {
@@ -24,6 +24,9 @@ class MainActivity : Activity() {
     private lateinit var hostEdit: EditText
     private lateinit var bar: LinearLayout
     private lateinit var prefs: SharedPreferences
+    private lateinit var dbg: TextView
+    private lateinit var canvas: PenCanvasView
+    private lateinit var gainText: TextView
 
     private var host = "127.0.0.1"
     private val port = Protocol.DEFAULT_PORT
@@ -38,7 +41,8 @@ class MainActivity : Activity() {
 
         val root = FrameLayout(this)
 
-        val canvas = PenCanvasView(this)
+        canvas = PenCanvasView(this)
+        canvas.pressureGain = prefs.getFloat("gain", 3.0f)
         root.addView(canvas, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
         bar = LinearLayout(this).apply {
@@ -59,9 +63,25 @@ class MainActivity : Activity() {
             setHintTextColor(Color.parseColor("#AAAAAA"))
         }
         val connectBtn = Button(this).apply { text = "连接" }
+
+        // 压感增益调节
+        val gainRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        gainText = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 8)
+            text = "压感增益 ${String.format("%.1f", canvas.pressureGain)}"
+        }
+        val minusBtn = Button(this).apply { text = "增益 -" }
+        val plusBtn = Button(this).apply { text = "增益 +" }
+        gainRow.addView(minusBtn)
+        gainRow.addView(plusBtn)
+
         bar.addView(status)
         bar.addView(hostEdit)
         bar.addView(connectBtn)
+        bar.addView(gainText)
+        bar.addView(gainRow)
         bar.visibility = View.GONE
         root.addView(
             bar,
@@ -70,9 +90,25 @@ class MainActivity : Activity() {
             }
         )
 
+        dbg = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.parseColor("#FFDDDD"))
+            setBackgroundColor(Color.parseColor("#AA000000"))
+            setPadding(12, 8, 12, 8)
+            text = "等待事件…"
+        }
+        root.addView(
+            dbg,
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                gravity = Gravity.BOTTOM
+            }
+        )
+
         canvas.listener = { type, x, y, p, tx, ty, b ->
-            Log.d("SpenTablet", "listener type=$type x=$x y=$y p=$p -> send")
             net.send(Protocol.buildPen(type, x, y, p, tx, ty, b))
+        }
+        canvas.onDebug = { s ->
+            runOnUiThread { dbg.text = "$s\n${canvas.debugSummary()}" }
         }
 
         status.setOnClickListener {
@@ -85,10 +121,18 @@ class MainActivity : Activity() {
         })
         connectBtn.setOnClickListener {
             prefs.edit().putString("host", host).apply()
-            net.stop()
-            net = NetClient(host, port)
-            net.start()
+            restartNet()
             bar.visibility = View.GONE
+        }
+        minusBtn.setOnClickListener {
+            canvas.pressureGain = (canvas.pressureGain - 0.5f).coerceIn(0.5f, 8f)
+            prefs.edit().putFloat("gain", canvas.pressureGain).apply()
+            gainText.text = "压感增益 ${String.format("%.1f", canvas.pressureGain)}"
+        }
+        plusBtn.setOnClickListener {
+            canvas.pressureGain = (canvas.pressureGain + 0.5f).coerceIn(0.5f, 8f)
+            prefs.edit().putFloat("gain", canvas.pressureGain).apply()
+            gainText.text = "压感增益 ${String.format("%.1f", canvas.pressureGain)}"
         }
 
         setContentView(root)
@@ -98,17 +142,29 @@ class MainActivity : Activity() {
 
         Thread {
             while (alive) {
+                val sum = canvas.debugSummary()
+                val err = net.lastError
                 runOnUiThread {
-                    status.text = if (net.connected) "已连接 $host:$port" else "未连接（点我设置 PC IP）"
+                    val head = if (net.connected) "已连接 $host:$port" else "未连接（点我设置 PC IP）"
+                    val tail = " 发送${net.sentFrames} 丢弃${net.droppedFrames}" +
+                            (if (err != null) "\n错误: $err" else "")
+                    status.text = head
+                    dbg.text = "$tail\n$sum"
                 }
                 try { Thread.sleep(500) } catch (_: InterruptedException) { break }
             }
         }.start()
     }
 
+    private fun restartNet() {
+        if (::net.isInitialized) net.stop()
+        net = NetClient(host, port)
+        net.start()
+    }
+
     override fun onDestroy() {
         alive = false
-        net.stop()
+        if (::net.isInitialized) net.stop()
         super.onDestroy()
     }
 }

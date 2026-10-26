@@ -150,6 +150,11 @@ adb reverse tcp:6000 tcp:6000
 | 现象 | 排查 |
 |------|------|
 | 手机一直「未连接」 | PC 端是否已启动；IP/端口是否正确；防火墙是否放行 6000；USB 方式是否忘了 `adb reverse` |
+| **手机显示已连接、PC 却只收到悬停、收不到落笔**（最有迷惑性的一个） | 不是 S Pen 设置问题，也不是 `TOOL_TYPE_STYLUS` 过滤（实测 SM-S9080 上落笔事件会正常送达 `onTouchEvent`）。真凶是 **`NetClient` 在 UI 主线程上直接做阻塞式 socket 写**：笔事件 60~120Hz 突发时写入一抛异常，`catch` 就把 `out` 置 null 并关 socket，且**异常被静默吞掉**；之后所有帧走 `SEND skipped (out=null)` 被丢弃。悬停帧多，总有几帧撞上有效窗口；一次落笔只有几百毫秒，撞上断连窗口就整笔消失。现已改为 `send()` 只入队、独立写线程做 IO、异常全部打日志。自查：`adb logcat -s SpenTablet:D` 若刷出大量 `SEND skipped` 即为该问题 |
+| **压感很弱（画线粗细几乎没变化）** | 内核 `ABS_PRESSURE` 声明量程 0~4095，但 S Pen 实际书写只到 ~500（`getPressure()` 仅 ~0.13）。App 内置**压感增益**（默认 3.0），点顶部状态条展开设置，用「增益 ±」调整，会记住在 prefs。可用 `adb shell getevent -l /dev/input/event14` 看 `ABS_PRESSURE` 原始值核对 |
+| **USB 调试授权框死活不弹** | PC 上 `~/.android/adbkey` 与手机记录的授权状态不匹配。备份后删除 `adbkey` / `adbkey.pub` 让 adb 重建密钥，手机会立刻弹窗。操作时**保持手机亮屏解锁**，息屏时三星会收起授权框 |
+| **adb daemon 活不过一条命令，`reverse` 规则总丢** | adb server 会随命令结束被回收，需起常驻后台任务保活（例如 `adb logcat > keepalive.log`）。另外**两个 adb 命令并发启动会撞车**（`could not read ok from ADB Server`），必须串行 |
+| `adb install -r` 报 `INSTALL_FAILED_UPDATE_INCOMPATIBLE` | 旧包是别的机器签的名，先 `adb uninstall com.volcano.spentablet` 再装 |
 | 手机显示已连接、PC 却收不到任何数据（浮窗一直"等待笔数据"） | **adb server 处于半坏状态**（连接能建立但中继不转发数据）。执行 `adb kill-server` 后重新 `adb reverse tcp:6000 tcp:6000`，并重启手机端 App。本机装有多个 adb（如刷机工具 PhoenixSuit 自带老版 adb）时尤其容易发生——版本不匹配的客户端会让 adb server 反复自杀重启 |
 | `adb install -r` 重装后突然连不上 | **重装 APK 会清空 adb reverse 规则**，重跑一次 `adb reverse tcp:6000 tcp:6000` 即可 |
 | PC 端报错 `CreateSyntheticPointerDevice 失败` | Windows 版本低于 1809；或其进程无桌面会话。程序会自动回退到鼠标模式 |
