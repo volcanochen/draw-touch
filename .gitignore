@@ -1,0 +1,25 @@
+# Android
+PhoneTablet/.gradle/
+PhoneTablet/build/
+PhoneTablet/app/build/
+PhoneTablet/local.properties
+PhoneTablet/.idea/
+*.iml
+*.apk
+*.aab
+
+# .NET
+PcHost/bin/
+PcHost/obj/
+PcHost/publish/
+*.pdb
+host.log
+
+# 日志/临时
+spen_log.txt
+*.log
+
+# IDE
+.idea/
+.vs/
+.vscode/
