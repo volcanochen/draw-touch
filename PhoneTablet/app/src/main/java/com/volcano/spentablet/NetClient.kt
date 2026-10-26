@@ -20,7 +20,12 @@ import java.util.concurrent.TimeUnit
  * 2) 所有异常都打日志，不再静默吞掉。
  * 3) 队列满时优先丢弃 MOVE/HOVER，绝不丢 DOWN/UP（否则 PC 端笔状态机会错乱）。
  */
-class NetClient(private val host: String, private val port: Int) {
+class NetClient(
+    private val host: String,
+    private val port: Int,
+    /** 握手帧的构造回调：每次连上、以及调用 sendHelloNow() 时都会取一次，保证拿到的是最新设置 */
+    private val hello: () -> ByteArray
+) {
 
     @Volatile
     var connected: Boolean = false
@@ -38,6 +43,13 @@ class NetClient(private val host: String, private val port: Int) {
         private set
     @Volatile var lastError: String? = null
         private set
+
+    /** 设置变更后主动重发握手帧，通知 PC 采用新的比例模式（无需断开重连）。 */
+    fun sendHelloNow() {
+        val f = hello()
+        send(f)
+        Log.i(TAG, "NET 重发 HELLO")
+    }
 
     fun start() {
         if (running) return
@@ -89,6 +101,12 @@ class NetClient(private val host: String, private val port: Int) {
                 connected = true
                 lastError = null
                 Log.i(TAG, "NET 已连接 $host:$port")
+
+                // 握手：把绘制面尺寸与比例偏好交给 PC，让它做正确的等比映射
+                val hf = hello()
+                out.write(hf)
+                out.flush()
+                Log.i(TAG, "NET 发送 HELLO（比例 ${hf[3]}）")
 
                 var lastBeat = 0L
                 while (running) {

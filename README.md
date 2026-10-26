@@ -29,6 +29,33 @@ PC 端实时收到**带压感、带倾斜**的笔信号，可在 Photoshop / Kri
 笔事件 payload：`x(float) y(float) pressure(float) tiltX(float) tiltY(float) buttons(uint16) reserved(uint16)`，
 坐标均为 0..1 归一化，压感 0..1，倾斜角度 -90..90。
 
+帧类型：
+
+| type | 含义 | payload |
+|------|------|---------|
+| 0x01~0x04 | 笔 按下/移动/抬起/悬停 | x,y,pressure,tiltX,tiltY,buttons |
+| 0x05 | HELLO 握手 | surfaceW,surfaceH,aspectMode,workMode |
+| 0x06 | PAN 平移（数位板模式拖框） | dx,dy |
+| 0x07 | MOUSE 鼠标动作 | kind,dx,dy（kind: 0=移动 3=左键 4=右键） |
+| 0x08 | MODE 模式切换 | mode（0=数位板 1=鼠标） |
+
+### 两种工作模式（手指的用途互斥）
+
+手机上点顶部状态栏展开设置即可切换，PC 端托盘右键菜单也能切：
+
+| | 数位板模式（默认） | 鼠标模式 |
+|---|---|---|
+| 桌面范围框 | **显示** | **取消** |
+| S Pen | 在框内作画（带压感/倾斜） | 绝对定位的鼠标笔，按下=左键拖动 |
+| 手指滑动 | 移动桌面上的操作范围框 | 移动光标（当触摸板） |
+| 手指单击 | — | 鼠标左键 |
+| 手指双击 | — | 鼠标右键 |
+
+关键点：两种模式**互斥**。手指在数位板模式下只发 PAN 帧、在鼠标模式下只发 MOUSE 帧，
+不会出现「既拖框又控鼠标」。PC 端还留了一道保险：鼠标模式下即使收到 PAN 帧也会忽略并记 WARN。
+
+单击会在 280ms 的双击窗口过后才发出（否则双击会先误触发一次左键）。
+
 ---
 
 ## 目录结构
@@ -47,14 +74,21 @@ SpenTablet/
 │       └── res/values/strings.xml
 └── PcHost/                 # PC 端（.NET 8，纯 Win32 P/Invoke，无 NuGet 依赖）
     ├── SpenTabletHost.csproj
-    ├── Program.cs
+    ├── Program.cs          # 托盘常驻入口
+    ├── TrayApp.cs          # 系统托盘 + 右键菜单
+    ├── ConfigForm.cs       # 设置窗口
     ├── PenInjector.cs      # 合成笔注入 + 鼠标回退
+    ├── MouseControl.cs     # 鼠标模式：光标移动/左键/右键
     ├── TcpPenServer.cs     # TCP 帧解析
-    ├── MappingConfig.cs    # 坐标映射/虚拟屏幕
+    ├── MappingConfig.cs    # 坐标映射/等比/范围框/工作模式
+    ├── RegionFrame.cs      # 桌面操作范围框（可穿透点击）
     ├── DebugOverlay.cs     # 调试浮窗(无绘画软件时验证笔数据)
     ├── appsettings.json    # 端口/模式/映射区域/Debug 开关
     └── publish.cmd         # 发布单文件 EXE
 ```
+
+根目录的 `test_protocol.py` 是 PC 端协议自测脚本：直连 127.0.0.1:6000 模拟手机发帧，
+可验证模式切换、范围框显隐、光标位移与左右键，排错时很有用。
 
 ---
 
@@ -162,14 +196,19 @@ adb reverse tcp:6000 tcp:6000
 | 有移动但无压感 | 确认 `Mode` 为 `Pen`；软件是否支持 Windows Ink/指针输入；个别软件需在设置里开启笔压 |
 | 笔迹位置偏 | 检查 `Mapping` 与多显示器布局是否匹配；手机横竖屏方向 |
 | 延迟高 | 改用 USB（方式 A/B）而非 WiFi；关闭手机端其它网络负载 |
+| **找不到设置面板 / 点了没反应** | 设置面板的容器必须常驻可见，只有里面的正文可折叠。若把整个 `panel` 设为 `GONE`，「点标题展开」这个开关自己也被藏起来了，用户永远打不开 |
+| 手机上手指滑动，PC 上框和光标一起动 | 不应发生。两种模式互斥：手机端按 `workMode` 二选一发帧；PC 端鼠标模式下收到 PAN 还会忽略并打 WARN。检查手机状态栏显示的当前模式 |
+| 单击有延迟感 | 正常。单击要等 280ms 的双击窗口过去才发，否则双击会先误触发一次左键 |
+| `adb devices` 突然列出空设备 | 有残留的 adb 进程（如刷机工具自带的老版 adb）占着设备。`taskkill //F //IM adb.exe` 全部清掉再用指定路径的 adb 重连 |
 
 ---
 
 ## 已知限制 / 后续可加
 
 - 当前为单笔（单指 S Pen），未做多指/触摸作为第二输入。
+- 鼠标模式暂时只做「移动 + 左键 + 右键」，没有滚轮 / 拖拽（长按拖动）。
 - 手机端目前是「所见即所得」白板反馈；可改为仅传输、手机屏熄屏省电。
-- 可加：快捷键（S Pen 按键映射为 Ctrl/Alt/右键）、配置文件 UI、蓝牙低延迟模式、笔迹平滑滤波。
+- 可加：S Pen 侧键映射为 Ctrl/Alt/橡皮、长按拖动、双指滚动、蓝牙低延迟模式、笔迹平滑滤波。
 - 若你的绘画软件不吃合成笔（极少数），可在 `appsettings.json` 切 `"Mode":"Mouse"` 先用起来。
 
 ---

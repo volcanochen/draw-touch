@@ -1,31 +1,31 @@
 using System;
-using System.Text.Json;
-using System.Threading;
+using System.Windows.Forms;
 
 namespace SpenTabletHost;
 
 internal static class Program
 {
+    [STAThread]
     private static void Main()
     {
-        Console.WriteLine("=== SpenTablet Host (把三星 Note + S Pen 变成 PC 数位板) ===");
-
         // 必须先开启 DPI 感知：合成笔注入用的是物理像素，
         // 若进程处于 DPI 无感知状态，GetSystemMetrics 会返回虚拟化后的尺寸（如 200% 缩放下只有一半），
         // 坐标映射就会整体错位一个缩放倍率。
         if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
             SetProcessDPIAware();
 
-        var cfg = new MappingConfig();
-        if (File.Exists("appsettings.json"))
-        {
-            try { cfg = JsonSerializer.Deserialize<MappingConfig>(File.ReadAllText("appsettings.json")) ?? cfg; }
-            catch (Exception ex) { Console.Error.WriteLine($"读取 appsettings.json 失败，使用默认配置：{ex.Message}"); }
-        }
+        // 必须在创建任何控件之前调用，否则桌面范围框的视觉样式不对
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+
+        var cfg = ConfigStore.Load();
         cfg.ResolveVirtualScreen();
 
-        Console.WriteLine($"虚拟屏幕范围: X={cfg.VirtualX} Y={cfg.VirtualY} W={cfg.VirtualW} H={cfg.VirtualH}");
-        Console.WriteLine($"映射模式: {cfg.Mode}");
+        AppLog.Info("=== SpenTablet Host（把三星 Note + S Pen 变成 PC 数位板）===");
+        AppLog.Info($"虚拟屏幕: X={cfg.VirtualX} Y={cfg.VirtualY} W={cfg.VirtualW} H={cfg.VirtualH}");
+        AppLog.Info($"注入模式: {cfg.Mode}｜比例: {cfg.Aspect}｜工作模式: {cfg.WorkMode}｜端口: {cfg.ListenPort}");
+        AppLog.Info($"配置文件: {ConfigStore.Path}");
+        AppLog.Info($"日志文件: {AppLog.FilePath}");
 
         IInjector injector = cfg.Mode.Equals("Mouse", StringComparison.OrdinalIgnoreCase)
             ? new MouseInjector(cfg.VirtualX, cfg.VirtualY, cfg.VirtualW, cfg.VirtualH)
@@ -33,36 +33,43 @@ internal static class Program
 
         if (!injector.Initialize())
         {
-            Console.WriteLine("[Host] 合成笔设备创建失败，自动回退到鼠标模式（无压感）。");
+            AppLog.Warn("合成笔设备创建失败，自动回退到鼠标模式（无压感）。");
             injector.Dispose();
             injector = new MouseInjector(cfg.VirtualX, cfg.VirtualY, cfg.VirtualW, cfg.VirtualH);
             injector.Initialize();
         }
 
         using var server = new TcpPenServer(cfg, injector);
-        if (cfg.Debug)
+
+        void SetDebug(bool on)
         {
-            var overlay = DebugOverlay.Start();
-            server.OnSample = s => overlay.UpdateSample(in s);
-            Console.WriteLine("[Host] 调试浮窗已开启");
+            if (on)
+            {
+                var overlay = DebugOverlay.Start();
+                server.OnSample = s => overlay.UpdateSample(in s);
+                AppLog.Info("[Host] 调试浮窗已开启");
+            }
+            else
+            {
+                DebugOverlay.HideOverlay();
+                server.OnSample = null;
+                AppLog.Info("[Host] 调试浮窗已关闭");
+            }
         }
+
+        if (cfg.Debug) SetDebug(true);
         server.Start();
 
-        Console.WriteLine("提示：PC 端先执行  adb reverse tcp:6000 tcp:6000  （USB 连接时）。Ctrl+C 退出。");
-        Console.WriteLine("手机端打开 SpenTablet，默认连 127.0.0.1:6000；USB 共享/WiFi 时改成 PC 的 IP。");
+        // 桌面上的「操作范围框」：标出笔能覆盖的区域；映射变化或模式切换时自动跟随
+        cfg.Changed += () => RegionFrame.Refresh(cfg);
+        RegionFrame.Create(cfg);
+        AppLog.Info($"操作范围框: {(cfg.ShowRegion && !cfg.IsMouseMode ? "显示" : "隐藏")}");
 
-        using var cts = new CancellationTokenSource();
-        Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
-        int tick = 0;
-        while (!cts.Token.IsCancellationRequested)
-        {
-            Thread.Sleep(200);
-            if (++tick % 10 == 0)   // 每 2 秒汇报一次，便于确认链路在跑
-                Console.WriteLine($"[统计] DOWN={server.CountDown} MOVE={server.CountMove} UP={server.CountUp} " +
-                                  $"HOVER={server.CountHover} | 最新 ({server.LastX},{server.LastY}) p={server.LastPressure:F2}");
-        }
+        AppLog.Info("提示：USB 连接时在 PC 上执行  adb reverse tcp:6000 tcp:6000");
+        AppLog.Info("数位板模式：手指在手机屏上滑动平移操作范围框，S Pen 才用于绘制。");
+        AppLog.Info("鼠标模式：取消范围框，手指=触摸板，单击=左键，双击=右键。");
 
-        Console.WriteLine("\n[Host] 正在退出…");
+        Application.Run(new TrayApp(cfg, server, SetDebug));
     }
 
     private const int DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4;

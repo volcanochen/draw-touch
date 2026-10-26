@@ -1,7 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <!-- WinExe：常驻系统托盘，不再弹出控制台窗口 -->
+    <OutputType>WinExe</OutputType>
     <!-- net8.0-windows 提供 Windows 桌面 SDK，P/Invoke user32 无需任何 NuGet 依赖 -->
     <TargetFramework>net8.0-windows</TargetFramework>
     <Nullable>enable</Nullable>

@@ -20,6 +20,15 @@ public sealed class TcpPenServer : IDisposable
     private const byte TYPE_PEN_MOVE = 0x02;
     private const byte TYPE_PEN_UP = 0x03;
     private const byte TYPE_PEN_HOVER = 0x04;
+    private const byte TYPE_HELLO = 0x05;
+    private const byte TYPE_PAN = 0x06;
+    private const byte TYPE_MOUSE = 0x07;
+    private const byte TYPE_MODE = 0x08;
+
+    // 鼠标帧 kind（与手机端 Protocol.MOUSE_* 一致）
+    private const int MOUSE_MOVE = 0;
+    private const int MOUSE_LEFT_CLICK = 3;
+    private const int MOUSE_RIGHT_CLICK = 4;
 
     private readonly TcpListener _listener;
     private readonly MappingConfig _cfg;
@@ -85,8 +94,30 @@ public sealed class TcpPenServer : IDisposable
                     var payload = new byte[len];
                     if (!ReadExactly(ns, payload, len)) break;
 
-                    if (header[3] >= TYPE_PEN_DOWN && header[3] <= TYPE_PEN_HOVER)
-                        Dispatch(header[3], payload);
+                    switch (header[3])
+                    {
+                        case TYPE_HELLO:
+                            HandleHello(payload);
+                            break;
+                        case TYPE_PAN:
+                            HandlePan(payload);
+                            break;
+                        case TYPE_MOUSE:
+                            HandleMouse(payload);
+                            break;
+                        case TYPE_MODE:
+                            HandleMode(payload);
+                            break;
+                        case TYPE_PEN_DOWN:
+                        case TYPE_PEN_MOVE:
+                        case TYPE_PEN_UP:
+                        case TYPE_PEN_HOVER:
+                            Dispatch(header[3], payload);
+                            break;
+                        default:
+                            CountNoop++;
+                            break;
+                    }
                 }
             }
         }
@@ -100,6 +131,91 @@ public sealed class TcpPenServer : IDisposable
         }
     }
 
+    /// <summary>握手帧：手机上报绘制面像素尺寸与比例偏好，用于做正确的等比映射。</summary>
+    private void HandleHello(byte[] p)
+    {
+        if (p.Length < 12) return;
+        float w = BitConverter.ToSingle(p, 0);
+        float h = BitConverter.ToSingle(p, 4);
+        float mode = BitConverter.ToSingle(p, 8);
+        float work = p.Length >= 16 ? BitConverter.ToSingle(p, 12) : 0f;
+        _cfg.SetPhoneHello(w, h, mode, work);
+        var r = _cfg.GetActiveRect();
+        AppLog.Info($"[Hello] 手机绘制面 {w:0}×{h:0} 宽高比={(_cfg.PhoneAspect > 0 ? _cfg.PhoneAspect : 0):0.###} " +
+                    $"偏好={(mode >= 1f ? "保持等比" : "拉伸")} → 实际映射区域 {r.x},{r.y} {r.w}×{r.h}");
+        AppLog.Info($"[Hello] 手机工作模式 = {(_cfg.IsMouseMode ? "鼠标" : "数位板")}");
+    }
+
+    private int _panLog;
+    private int _panIgnored;
+
+    /// <summary>手指滑动平移：移动桌面上的“操作范围框”。</summary>
+    private void HandlePan(byte[] p)
+    {
+        if (p.Length < 8) return;
+        float dx = BitConverter.ToSingle(p, 0);
+        float dy = BitConverter.ToSingle(p, 4);
+        // 互斥保险：鼠标模式下手指是触摸板，绝不再去拖动范围框
+        if (_cfg.IsMouseMode)
+        {
+            if (_panIgnored++ % 20 == 0)
+                AppLog.Warn("[Pan] 收到平移帧，但当前是鼠标模式，已忽略（手指应只控鼠标）");
+            return;
+        }
+        _cfg.Pan(dx, dy);
+        // 滑动会产生大量帧，抽样打日志避免刷屏（第一条一定打，方便确认链路）
+        if (_panLog++ % 12 == 0)
+        {
+            var r = _cfg.GetActiveRect();
+            AppLog.Info($"[Pan] 平移 dx={dx:F3} dy={dy:F3} → 操作范围 {r.x},{r.y} {r.w}×{r.h}");
+        }
+    }
+
+    /// <summary>模式帧：手机在数位板 / 鼠标之间切换。</summary>
+    private void HandleMode(byte[] p)
+    {
+        if (p.Length < 4) return;
+        bool mouse = BitConverter.ToSingle(p, 0) >= 1f;
+        if (mouse == _cfg.IsMouseMode) return;
+        _cfg.SetWorkMode(mouse);
+        MouseControl.ReleaseAll();     // 避免左键卡在按下状态
+        AppLog.Info(mouse
+            ? "[Mode] 切换到【鼠标模式】：取消操作范围框，手指=触摸板，单击=左键，双击=右键，S Pen=绝对定位鼠标笔"
+            : "[Mode] 切换到【数位板模式】：显示操作范围框，S Pen 在框内作画，手指滑动=移动范围框");
+    }
+
+    private int _mouseLog;
+
+    /// <summary>鼠标帧：手指当触摸板（相对移动 / 左键 / 右键）。</summary>
+    private void HandleMouse(byte[] p)
+    {
+        if (p.Length < 12) return;
+        int kind = (int)BitConverter.ToSingle(p, 0);
+        float dx = BitConverter.ToSingle(p, 4);
+        float dy = BitConverter.ToSingle(p, 8);
+
+        switch (kind)
+        {
+            case MOUSE_MOVE:
+                int mx = (int)Math.Round(dx * _cfg.VirtualW * _cfg.MouseSpeed);
+                int my = (int)Math.Round(dy * _cfg.VirtualH * _cfg.MouseSpeed);
+                MouseControl.MoveBy(_cfg, mx, my);
+                if (_mouseLog++ % 20 == 0)
+                    AppLog.Info($"[Mouse] 移动 dx={dx:F3} dy={dy:F3} → 光标位移 ({mx},{my}) 增益={_cfg.MouseSpeed:0.##}");
+                break;
+            case MOUSE_LEFT_CLICK:
+                MouseControl.LeftClick();
+                AppLog.Info("[Mouse] 单击 → 左键");
+                break;
+            case MOUSE_RIGHT_CLICK:
+                MouseControl.RightClick();
+                AppLog.Info("[Mouse] 双击 → 右键");
+                break;
+            default:
+                break;
+        }
+    }
+
     private void Dispatch(byte type, byte[] p)
     {
         if (p.Length < 24) return;
@@ -110,6 +226,28 @@ public sealed class TcpPenServer : IDisposable
         float tiltY = BitConverter.ToSingle(p, 16);
         ushort buttons = BitConverter.ToUInt16(p, 20);
 
+        var state = type switch
+        {
+            TYPE_PEN_DOWN => PenState.Down,
+            TYPE_PEN_UP => PenState.Up,
+            TYPE_PEN_HOVER => PenState.Hover,
+            _ => PenState.Move,
+        };
+
+        // 鼠标模式：S Pen 当绝对定位的鼠标笔（覆盖整块虚拟屏幕），不再走合成笔注入
+        if (_cfg.IsMouseMode)
+        {
+            var (mx, my) = _cfg.ToPixelsFull(x, y);
+            LastX = mx; LastY = my; LastPressure = pressure;
+            CountMousePen(state);
+            MouseControl.MoveTo(_cfg, mx, my);
+            if (state == PenState.Down) MouseControl.Down();
+            else if (state == PenState.Up) MouseControl.Up();
+            if (state == PenState.Down || state == PenState.Up)
+                AppLog.Info($"[MousePen] {(state == PenState.Down ? "按下" : "抬起")} ({mx},{my}) p={pressure:F2}");
+            return;
+        }
+
         var (px, py) = _cfg.ToPixels(x, y);
         switch (type)
         {
@@ -119,13 +257,6 @@ public sealed class TcpPenServer : IDisposable
             default: CountMove++; break;
         }
         LastX = px; LastY = py; LastPressure = pressure;
-        var state = type switch
-        {
-            TYPE_PEN_DOWN => PenState.Down,
-            TYPE_PEN_UP => PenState.Up,
-            TYPE_PEN_HOVER => PenState.Hover,
-            _ => PenState.Move,
-        };
         var sample = new PenSample(px, py, pressure, tiltX, tiltY, 0f,
                                    barrel: (buttons & 0x1) != 0,
                                    eraser: (buttons & 0x2) != 0,
@@ -134,6 +265,17 @@ public sealed class TcpPenServer : IDisposable
             Console.WriteLine($"[Pen] {(type == TYPE_PEN_DOWN ? "DOWN" : "UP")} x={px} y={py} pressure={pressure:F2} tilt=({tiltX:F0},{tiltY:F0})");
         OnSample?.Invoke(sample);
         _injector.Inject(in sample);
+    }
+
+    private void CountMousePen(PenState s)
+    {
+        switch (s)
+        {
+            case PenState.Down: CountDown++; break;
+            case PenState.Up: CountUp++; break;
+            case PenState.Hover: CountHover++; break;
+            default: CountMove++; break;
+        }
     }
 
     private static bool ReadExactly(Stream stream, byte[] buffer, int count)

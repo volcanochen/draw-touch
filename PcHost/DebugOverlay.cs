@@ -46,12 +46,17 @@ internal sealed class DebugOverlay : Form
         BeginInvoke((Action)(() => { _lbl.Text = txt; }));
     }
 
+    /// <summary>当前浮窗实例（由 Start 创建，Hide 关闭）。</summary>
+    public static DebugOverlay? Current { get; private set; }
+
     public static DebugOverlay Start()
     {
+        if (Current != null && !Current.IsDisposed) return Current;
         DebugOverlay? form = null;
         var t = new Thread(() =>
         {
             form = new DebugOverlay();
+            Current = form;
             Application.Run(form);
         });
         t.SetApartmentState(ApartmentState.STA);
@@ -60,5 +65,19 @@ internal sealed class DebugOverlay : Form
         // 等待实例与窗口句柄就绪，确保后续 BeginInvoke 安全
         while (form == null || !form.IsHandleCreated) Thread.Sleep(10);
         return form;
+    }
+
+    /// <summary>关闭浮窗（可在设置里反复开关）。</summary>
+    public static void HideOverlay()
+    {
+        var f = Current;
+        Current = null;
+        if (f == null || f.IsDisposed) return;
+        try
+        {
+            if (f.IsHandleCreated)
+                f.BeginInvoke((Action)(() => { f.Close(); f.Dispose(); }));
+        }
+        catch { /* 窗口已销毁则忽略 */ }
     }
 }
