@@ -166,6 +166,19 @@ class PenCanvasView(context: Context) : View(context) {
     private val tapSlopPx: Float get() = 12f * resources.displayMetrics.density
     private val doubleTapSlopPx: Float get() = 48f * resources.displayMetrics.density
 
+    // ---- 鼠标模式：多点触控（模拟笔记本触摸板）----
+    /** 本次手势中出现过的最多手指数：1=单指 2=双指 3=三指 */
+    private var tpMaxPointers = 0
+    private var tpLastCx = 0f
+    private var tpLastCy = 0f
+    private var tpLastSpan = 0f
+    private var tpStartX = 0f
+    private var tpStartY = 0f
+    private var tpStartTime = 0L
+    private var tpMoved = 0f
+    private var tpSingleX = 0f
+    private var tpSingleY = 0f
+
     // ---- 诊断计数：index = toolType(0..4)，第二维 = down/move/up/hover ----
     private val counters = Array(5) { IntArray(4) }
 
@@ -231,11 +244,18 @@ class PenCanvasView(context: Context) : View(context) {
         val n = e.pointerCount
         val action = e.actionMasked
 
+        // 鼠标模式：手指要**整体**处理（多点触控必须拿到所有手指的坐标）
+        if (contact && workMode == Protocol.MODE_MOUSE && countFingers(e) > 0) {
+            handleTrackpad(e)
+        }
+
         for (i in 0 until n) {
             val tt = e.getToolType(i)
 
             // 手指：不绘制。用途由工作模式决定，两种模式互斥
             if (tt == MotionEvent.TOOL_TYPE_FINGER || tt == MotionEvent.TOOL_TYPE_MOUSE) {
+                // 鼠标模式已在上面整体处理过了
+                if (workMode == Protocol.MODE_MOUSE) continue
                 // 两指及以上：交给双指捏合检测器，单指拖框让位，避免两个手势互相打架
                 if (n >= 2) {
                     panning = false
@@ -243,8 +263,7 @@ class PenCanvasView(context: Context) : View(context) {
                 }
                 val px = e.getX(i)
                 val py = e.getY(i)
-                if (workMode == Protocol.MODE_MOUSE) handleFingerMouse(action, px, py)
-                else handleFingerPan(action, px, py)
+                handleFingerPan(action, px, py)
                 continue
             }
 
@@ -443,73 +462,167 @@ class PenCanvasView(context: Context) : View(context) {
         }
     }
 
-    // ---------- 鼠标模式：手指 = 触摸板（滑动移动光标 / 单击=左键 / 双击=右键） ----------
-    private fun handleFingerMouse(action: Int, px: Float, py: Float) {
-        val now = android.os.SystemClock.uptimeMillis()
+    // ---------- 鼠标模式：手指 = 笔记本触摸板（多点触控） ----------
+    private fun countFingers(e: MotionEvent): Int {
+        var c = 0
+        for (i in 0 until e.pointerCount) {
+            val tt = e.getToolType(i)
+            if (tt == MotionEvent.TOOL_TYPE_FINGER || tt == MotionEvent.TOOL_TYPE_MOUSE) c++
+        }
+        return c
+    }
+
+    /**
+     * 触摸板手势（全部用手指，多点一起处理）：
+     *   单指滑动   → 移动光标
+     *   单指点击   → 左键；单指双击 → 右键
+     *   双指滑动   → 滚轮（上下=纵向滚动，左右=横向滚动）
+     *   双指捏合   → 缩放（映射成 Ctrl+滚轮，绘图软件里就是缩放画布）
+     *   双指点击   → 右键（同 Windows 精密触摸板）
+     *   三指点击   → 中键
+     *   三指左右滑 → 后退 / 前进
+     */
+    private fun handleTrackpad(e: MotionEvent) {
+        val action = e.actionMasked
+        var cnt = 0
+        var sumX = 0f
+        var sumY = 0f
+        var minX = Float.MAX_VALUE
+        var maxX = -Float.MAX_VALUE
+        var minY = Float.MAX_VALUE
+        var maxY = -Float.MAX_VALUE
+        for (i in 0 until e.pointerCount) {
+            val tt = e.getToolType(i)
+            if (tt != MotionEvent.TOOL_TYPE_FINGER && tt != MotionEvent.TOOL_TYPE_MOUSE) continue
+            val x = e.getX(i)
+            val y = e.getY(i)
+            cnt++
+            sumX += x
+            sumY += y
+            if (x < minX) minX = x
+            if (x > maxX) maxX = x
+            if (y < minY) minY = y
+            if (y > maxY) maxY = y
+        }
+        if (cnt == 0) return
+        val cx = sumX / cnt
+        val cy = sumY / cnt
+        val span = kotlin.math.hypot((maxX - minX).toDouble(), (maxY - minY).toDouble()).toFloat()
+        val w = if (width > 0) width else 1
+        val h = if (height > 0) height else 1
+
         when (action) {
             MotionEvent.ACTION_DOWN -> {
-                fingerDown = true
-                fingerLastX = px; fingerLastY = py
-                fingerMoved = 0f
-                fingerDownAt = now
-                tapCandidate = true
-                // 上一次待发的单击先撤掉：如果这是双击的第二下，就不该再发左键
-                handler.removeCallbacks(singleTapAction)
-
-                val nearInTime = now - lastTapAt <= DOUBLE_TAP_WINDOW_MS
-                val nearInSpace = kotlin.math.hypot(
-                    (px - lastTapX).toDouble(), (py - lastTapY).toDouble()
-                ) <= doubleTapSlopPx
-                secondTap = nearInTime && nearInSpace
-                if (secondTap) {
-                    lastTapAt = 0L
-                    onDebug?.invoke("第二次敲击（抬手 → 右键）")
-                } else {
-                    onDebug?.invoke("手指按下：鼠标模式（滑动=移动光标）")
-                }
+                tpMaxPointers = 1
+                tpStartX = cx
+                tpStartY = cy
+                tpStartTime = android.os.SystemClock.uptimeMillis()
+                tpMoved = 0f
+                tpSingleX = cx
+                tpSingleY = cy
+                tpLastCx = cx
+                tpLastCy = cy
+                tpLastSpan = span
             }
+
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                if (cnt > tpMaxPointers) tpMaxPointers = cnt
+                tpLastCx = cx
+                tpLastCy = cy
+                tpLastSpan = span
+            }
+
             MotionEvent.ACTION_MOVE -> {
-                if (!fingerDown) return
-                val dx = px - fingerLastX
-                val dy = py - fingerLastY
-                fingerLastX = px; fingerLastY = py
-                fingerMoved += kotlin.math.hypot(dx.toDouble(), dy.toDouble()).toFloat()
-
-                if (fingerMoved > tapSlopPx) {
-                    // 已经滑动起来 → 就是移动光标，不是敲击
-                    tapCandidate = false
-                    secondTap = false
-                    lastTapAt = 0L
-                    handler.removeCallbacks(singleTapAction)
-                }
-                val nx = dx / (if (width > 0) width else 1)
-                val ny = dy / (if (height > 0) height else 1)
-                onMouse?.invoke(Protocol.MOUSE_MOVE, nx, ny)
-                onDebug?.invoke("移动光标 dx=${String.format("%.3f", nx)} dy=${String.format("%.3f", ny)}")
-            }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                fingerDown = false
-                val dur = now - fingerDownAt
-                val isTap = tapCandidate && fingerMoved <= tapSlopPx && dur <= TAP_TIMEOUT_MS
-                if (!isTap) {
-                    onDebug?.invoke("手指抬起（滑动，已当触摸板移动）")
-                    return
-                }
-                if (secondTap) {
-                    secondTap = false
-                    lastTapAt = 0L
-                    onMouse?.invoke(Protocol.MOUSE_RIGHT_CLICK, 0f, 0f)
-                    onDebug?.invoke("双击 → 鼠标右键")
+                if (cnt >= 2) {
+                    val dCx = cx - tpLastCx
+                    val dCy = cy - tpLastCy
+                    val dSpan = span - tpLastSpan
+                    tpMoved += kotlin.math.abs(dCx) + kotlin.math.abs(dCy) + kotlin.math.abs(dSpan)
+                    if (cnt >= 3) {
+                        // 三指左右滑 → 后退/前进
+                        val totalDx = cx - tpStartX
+                        if (kotlin.math.abs(totalDx) > SWIPE_PX &&
+                            kotlin.math.abs(cy - tpStartY) < SWIPE_PX) {
+                            val back = totalDx > 0
+                            onMouse?.invoke(
+                                if (back) Protocol.MOUSE_BACK else Protocol.MOUSE_FORWARD, 0f, 0f)
+                            onDebug?.invoke("三指${if (back) "右" else "左"}滑 → ${if (back) "后退" else "前进"}")
+                            tpStartX = cx
+                        }
+                    } else {
+                        val relSpan = if (tpLastSpan > 1f) kotlin.math.abs(dSpan) / tpLastSpan else 0f
+                        if (relSpan > PINCH_REL) {
+                            // 捏合 → 缩放
+                            val factor = if (tpLastSpan > 1f) span / tpLastSpan else 1f
+                            onMouse?.invoke(Protocol.MOUSE_ZOOM, factor, 0f)
+                            onDebug?.invoke("双指捏合 ×${String.format("%.3f", factor)} → 缩放")
+                        } else if (kotlin.math.abs(dCx) > 0.5f || kotlin.math.abs(dCy) > 0.5f) {
+                            // 双指滑动 → 滚轮
+                            onMouse?.invoke(Protocol.MOUSE_SCROLL, dCx / w, dCy / h)
+                            onDebug?.invoke("双指滑动 dx=${String.format("%.3f", dCx / w)} dy=${String.format("%.3f", dCy / h)} → 滚动")
+                        }
+                    }
+                    tpLastCx = cx
+                    tpLastCy = cy
+                    tpLastSpan = span
                 } else {
-                    // 单击要等一个双击窗口，避免误判成双击时已经把左键发出去了
-                    lastTapAt = now
-                    lastTapX = px; lastTapY = py
-                    handler.postDelayed(singleTapAction, DOUBLE_TAP_WINDOW_MS)
-                    onDebug?.invoke("单击待定（${DOUBLE_TAP_WINDOW_MS}ms 内再敲一下 = 右键）")
+                    // 单指 → 移动光标
+                    val dx = cx - tpSingleX
+                    val dy = cy - tpSingleY
+                    tpSingleX = cx
+                    tpSingleY = cy
+                    tpMoved += kotlin.math.abs(dx) + kotlin.math.abs(dy)
+                    if (kotlin.math.abs(dx) > 0.01f || kotlin.math.abs(dy) > 0.01f) {
+                        onMouse?.invoke(Protocol.MOUSE_MOVE, dx / w, dy / h)
+                    }
                 }
+            }
+
+            MotionEvent.ACTION_POINTER_UP -> {
+                // 从多指回到单指：重置单指基准，避免光标突然跳一下
+                tpSingleX = cx
+                tpSingleY = cy
+                tpLastCx = cx
+                tpLastCy = cy
+                tpLastSpan = span
+            }
+
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                val dur = android.os.SystemClock.uptimeMillis() - tpStartTime
+                val isTap = tpMoved < tapSlopPx * 1.5f && dur < TAP_TIMEOUT_MS
+                when {
+                    isTap && tpMaxPointers >= 3 -> {
+                        onMouse?.invoke(Protocol.MOUSE_MIDDLE_CLICK, 0f, 0f)
+                        onDebug?.invoke("三指点击 → 鼠标中键")
+                    }
+                    isTap && tpMaxPointers == 2 -> {
+                        onMouse?.invoke(Protocol.MOUSE_RIGHT_CLICK, 0f, 0f)
+                        onDebug?.invoke("双指点击 → 鼠标右键")
+                    }
+                    isTap && tpMaxPointers == 1 -> {
+                        // 单击=左键；快速双击=右键（与原有行为一致）
+                        val now = android.os.SystemClock.uptimeMillis()
+                        val nearInTime = now - lastTapAt <= DOUBLE_TAP_WINDOW_MS
+                        val nearInSpace = kotlin.math.hypot(
+                            (cx - lastTapX).toDouble(), (cy - lastTapY).toDouble()
+                        ) <= doubleTapSlopPx
+                        if (nearInTime && nearInSpace) {
+                            lastTapAt = 0L
+                            onMouse?.invoke(Protocol.MOUSE_RIGHT_CLICK, 0f, 0f)
+                            onDebug?.invoke("双击 → 鼠标右键")
+                        } else {
+                            lastTapAt = now
+                            lastTapX = cx
+                            lastTapY = cy
+                            handler.postDelayed(singleTapAction, DOUBLE_TAP_WINDOW_MS)
+                        }
+                    }
+                }
+                tpMaxPointers = 0
             }
         }
     }
+
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         // 先喂给双指捏合检测器（只有真接触的事件才有意义，悬停不参与）
@@ -529,5 +642,9 @@ class PenCanvasView(context: Context) : View(context) {
         private const val DOUBLE_TAP_WINDOW_MS = 280L // 双击窗口；同时也是单击的延迟
         /** 操作框最小缩放（与 PC 端 MappingConfig.MIN_SCALE 保持一致） */
         private const val MIN_FRAME = 0.05f
+        /** 三指左右滑的触发阈值(px) */
+        private const val SWIPE_PX = 140f
+        /** 判定为「捏合」而不是「滚动」的相对跨度变化阈值 */
+        private const val PINCH_REL = 0.12f
     }
 }

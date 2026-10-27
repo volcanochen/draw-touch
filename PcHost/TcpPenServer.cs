@@ -32,6 +32,16 @@ public sealed class TcpPenServer : IDisposable
     private const int MOUSE_MOVE = 0;
     private const int MOUSE_LEFT_CLICK = 3;
     private const int MOUSE_RIGHT_CLICK = 4;
+    private const int MOUSE_SCROLL = 5;
+    private const int MOUSE_ZOOM = 6;
+    private const int MOUSE_MIDDLE_CLICK = 7;
+    private const int MOUSE_BACK = 8;
+    private const int MOUSE_FORWARD = 9;
+
+    /// <summary>手指划过整个书写区高度 = 多少格滚轮。</summary>
+    private const double SCROLL_NOTCHES_PER_SCREEN = 30.0;
+    /// <summary>捏合放大 100% = 多少格 Ctrl+滚轮（绘图软件里即缩放画布）。</summary>
+    private const double ZOOM_NOTCHES_PER_FULL = 8.0;
 
     private readonly TcpListener _listener;
     private readonly MappingConfig _cfg;
@@ -272,7 +282,39 @@ public sealed class TcpPenServer : IDisposable
                 break;
             case MOUSE_RIGHT_CLICK:
                 MouseControl.RightClick();
-                AppLog.Info("[Mouse] 双击 → 右键");
+                AppLog.Info("[Mouse] 右键");
+                break;
+            case MOUSE_SCROLL:
+            {
+                // 手指上滑(dy<0) → 滚轮向上（内容跟着手指走）
+                int v = (int)Math.Round(-dy * SCROLL_NOTCHES_PER_SCREEN);
+                int h = (int)Math.Round(dx * SCROLL_NOTCHES_PER_SCREEN);
+                if (v != 0) MouseControl.Wheel(v);
+                if (h != 0) MouseControl.HWheel(h);
+                if (v != 0 || h != 0) AppLog.Info($"[Mouse] 滚动 v={v} h={h}");
+                break;
+            }
+            case MOUSE_ZOOM:
+            {
+                // 捏合张开(factor>1) → Ctrl+滚轮向上 = 放大
+                // 手机端把缩放系数放在 dx 字段里
+                double factor = dx;
+                int n = (int)Math.Round((factor - 1.0) * ZOOM_NOTCHES_PER_FULL);
+                if (n != 0) MouseControl.CtrlWheel(n);
+                AppLog.Info($"[Mouse] 缩放 ×{factor:F3} → Ctrl+滚轮 {n}");
+                break;
+            }
+            case MOUSE_MIDDLE_CLICK:
+                MouseControl.MiddleClick();
+                AppLog.Info("[Mouse] 中键");
+                break;
+            case MOUSE_BACK:
+                MouseControl.Back();
+                AppLog.Info("[Mouse] 后退");
+                break;
+            case MOUSE_FORWARD:
+                MouseControl.Forward();
+                AppLog.Info("[Mouse] 前进");
                 break;
             default:
                 break;

@@ -49,6 +49,16 @@ object Protocol {
     const val MOUSE_LEFT_UP: Int = 2
     const val MOUSE_LEFT_CLICK: Int = 3
     const val MOUSE_RIGHT_CLICK: Int = 4
+    /** 滚轮：dx/dy 是相对书写区的位移（手指上滑为负） */
+    const val MOUSE_SCROLL: Int = 5
+    /** 捏合缩放：factor>1 放大（双指张开），<1 缩小 */
+    const val MOUSE_ZOOM: Int = 6
+    /** 中键点击 */
+    const val MOUSE_MIDDLE_CLICK: Int = 7
+    /** 后退（浏览器） */
+    const val MOUSE_BACK: Int = 8
+    /** 前进（浏览器） */
+    const val MOUSE_FORWARD: Int = 9
 
     const val DEFAULT_PORT: Int = 6000
 

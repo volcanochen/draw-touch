@@ -23,8 +23,19 @@ internal static class MouseControl
     private const uint MOUSEEVENTF_LEFTUP = 0x0004;
     private const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
     private const uint MOUSEEVENTF_RIGHTUP = 0x0010;
+    private const uint MOUSEEVENTF_MIDDLEDOWN = 0x0020;
+    private const uint MOUSEEVENTF_MIDDLEUP = 0x0040;
+    private const uint MOUSEEVENTF_WHEEL = 0x0800;
+    private const uint MOUSEEVENTF_HWHEEL = 0x1000;
     private const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
     private const uint MOUSEEVENTF_VIRTUALDESKTOP = 0x4000;
+    private const uint KEYEVENTF_KEYUP = 0x0002;
+
+    private const int INPUT_KEYBOARD = 1;
+    private const int WHEEL_DELTA = 120;
+    private const int VK_CONTROL = 0x11;
+    private const int VK_BROWSER_BACK = 0xA6;
+    private const int VK_BROWSER_FORWARD = 0xA7;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct MOUSEINPUT
@@ -38,10 +49,22 @@ internal static class MouseControl
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    private struct KEYBDINPUT
+    {
+        public ushort wVk;
+        public ushort wScan;
+        public uint dwFlags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+
+    // INPUT 是联合体：type(4) + 4 字节对齐 + {MOUSEINPUT(32) | KEYBDINPUT(24)}
+    [StructLayout(LayoutKind.Explicit)]
     private struct INPUT
     {
-        public int type;
-        public MOUSEINPUT mi;
+        [FieldOffset(0)] public int type;
+        [FieldOffset(8)] public MOUSEINPUT mi;
+        [FieldOffset(8)] public KEYBDINPUT ki;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -97,6 +120,74 @@ internal static class MouseControl
     {
         Send(MOUSEEVENTF_RIGHTDOWN);
         Send(MOUSEEVENTF_RIGHTUP);
+    }
+
+    // ================= 触摸板手势支持 =================
+
+    /// <summary>垂直滚轮。notches &gt; 0 = 向上滚（内容跟着手指方向走）。</summary>
+    public static void Wheel(int notches)
+    {
+        if (notches == 0) return;
+        SendWheel(MOUSEEVENTF_WHEEL, notches * WHEEL_DELTA);
+    }
+
+    /// <summary>水平滚轮。</summary>
+    public static void HWheel(int notches)
+    {
+        if (notches == 0) return;
+        SendWheel(MOUSEEVENTF_HWHEEL, notches * WHEEL_DELTA);
+    }
+
+    /// <summary>Ctrl + 滚轮 —— 绘图软件（PS/Krita）里就是缩放画布。</summary>
+    public static void CtrlWheel(int notches)
+    {
+        if (notches == 0) return;
+        SendKey(VK_CONTROL, up: false);
+        SendWheel(MOUSEEVENTF_WHEEL, notches * WHEEL_DELTA);
+        SendKey(VK_CONTROL, up: true);
+    }
+
+    /// <summary>中键点击（浏览器里=新标签页打开链接；绘图软件里常用来平移画布）。</summary>
+    public static void MiddleClick()
+    {
+        Send(MOUSEEVENTF_MIDDLEDOWN);
+        Send(MOUSEEVENTF_MIDDLEUP);
+    }
+
+    public static void Back() => TapKey(VK_BROWSER_BACK);
+
+    public static void Forward() => TapKey(VK_BROWSER_FORWARD);
+
+    private static void SendWheel(uint flag, int delta)
+    {
+        var inputs = new[]
+        {
+            new INPUT
+            {
+                type = INPUT_MOUSE,
+                mi = new MOUSEINPUT { mouseData = unchecked((uint)delta), dwFlags = flag }
+            }
+        };
+        SendInput(1, inputs, Marshal.SizeOf<INPUT>());
+    }
+
+    private static void SendKey(int vk, bool up)
+    {
+        var inputs = new[]
+        {
+            new INPUT
+            {
+                type = INPUT_KEYBOARD,
+                ki = new KEYBDINPUT { wVk = (ushort)vk, dwFlags = up ? KEYEVENTF_KEYUP : 0u }
+            }
+        };
+        SendInput(1, inputs, Marshal.SizeOf<INPUT>());
+    }
+
+    private static void TapKey(int vk)
+    {
+        SendKey(vk, up: false);
+        SendKey(vk, up: true);
     }
 
     /// <summary>切换模式 / 断线时调用，避免左键卡在按下状态。</summary>
