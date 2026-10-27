@@ -44,6 +44,9 @@ class NetClient(
     @Volatile var lastError: String? = null
         private set
 
+    /** 收到 PC 主机下发的 INFO 帧（版本号/计算机名/候选 IP 文本）时回调。 */
+    var onInfo: ((String) -> Unit)? = null
+
     /** 设置变更后主动重发握手帧，通知 PC 采用新的比例模式（无需断开重连）。 */
     fun sendHelloNow() {
         val f = hello()
@@ -127,7 +130,9 @@ class NetClient(
                 socket = Socket()
                 socket.connect(InetSocketAddress(host, port), 4000)
                 socket.tcpNoDelay = true          // 笔迹要低延迟，禁用 Nagle
-                socket.soTimeout = 3000
+                // 读线程用无限超时：没有服务器下行帧时就一直阻塞等待，
+                // 断线由写线程的写异常触发重连，避免每 3s 刷一条「读超时」日志
+                socket.soTimeout = 0
                 val out = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 4096))
                 connected = true
                 lastError = null
@@ -138,6 +143,12 @@ class NetClient(
                 out.write(hf)
                 out.flush()
                 Log.i(TAG, "NET 发送 HELLO（比例 ${hf[3]}）")
+
+                // 启动读线程：接收 PC 下发的 INFO 帧（版本号/计算机名/候选 IP 等）
+                val reader = Thread({ readLoop(socket) }, "net-reader").apply {
+                    isDaemon = true
+                    start()
+                }
 
                 var lastBeat = 0L
                 while (running) {
@@ -179,5 +190,47 @@ class NetClient(
     companion object {
         private const val TAG = "SpenTablet"
         private const val CAPACITY = 512
+    }
+
+    /**
+     * 读线程：解析 PC → 手机下发的帧。当前只关心 INFO 帧（版本号/计算机名/候选 IP），
+     * 其它类型（目前 PC 不下发别的）忽略。与写线程共用同一个 socket 的两个独立流，互不影响。
+     */
+    private fun readLoop(socket: Socket) {
+        try {
+            val ins = socket.getInputStream()
+            val header = ByteArray(6)
+            while (running) {
+                if (!readExactly(ins, header, 6)) break
+                if (header[0] != Protocol.MAGIC1.toByte() || header[1] != Protocol.MAGIC2.toByte()) {
+                    Log.w(TAG, "NET 收到非法帧头，断开读线程")
+                    break
+                }
+                val len = (header[4].toInt() and 0xFF) or ((header[5].toInt() and 0xFF) shl 8)
+                if (len < 0 || len > 65535) break
+                val payload = ByteArray(len)
+                if (!readExactly(ins, payload, len)) break
+                when (header[3].toInt() and 0xFF) {
+                    Protocol.TYPE_INFO -> {
+                        val text = payload.toString(Charsets.UTF_8)
+                        Log.i(TAG, "NET 收到 INFO：$text")
+                        onInfo?.invoke(text)
+                    }
+                    else -> { /* 其它类型暂忽略 */ }
+                }
+            }
+        } catch (e: Exception) {
+            if (running) Log.w(TAG, "NET 读线程异常：${e.message}")
+        }
+    }
+
+    private fun readExactly(ins: java.io.InputStream, buf: ByteArray, count: Int): Boolean {
+        var off = 0
+        while (off < count) {
+            val r = ins.read(buf, off, count - off)
+            if (r <= 0) return false
+            off += r
+        }
+        return true
     }
 }

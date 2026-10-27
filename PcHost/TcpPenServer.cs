@@ -27,6 +27,8 @@ public sealed class TcpPenServer : IDisposable
     private const byte TYPE_ZOOM = 0x09;
     private const byte TYPE_RESET = 0x0A;
     private const byte TYPE_STATUS = 0x0B;
+    /// <summary>INFO 帧：连接握手后主机主动下发给手机，携带版本号/计算机名/候选 IP。</summary>
+    private const byte TYPE_INFO = 0x0C;
 
     // 鼠标帧 kind（与手机端 Protocol.MOUSE_* 一致）
     private const int MOUSE_MOVE = 0;
@@ -53,6 +55,8 @@ public sealed class TcpPenServer : IDisposable
     private readonly IInjector _injector;
     private CancellationTokenSource? _cts;
     private MdnsAdvertiser? _mdns;
+    /// <summary>当前连接手机的流（握手后下发 INFO 帧用）。</summary>
+    private NetworkStream? _clientStream;
 
     /// <summary>各类型帧计数，用于控制台周期性汇报（确认链路是否真的在跑）。</summary>
     public long CountDown, CountMove, CountUp, CountHover, CountNoop;
@@ -114,6 +118,7 @@ public sealed class TcpPenServer : IDisposable
             using (var ns = client.GetStream())
             {
                 ns.ReadTimeout = Timeout.Infinite;
+                _clientStream = ns;
                 var header = new byte[6];
                 while (!token.IsCancellationRequested)
                 {
@@ -150,6 +155,10 @@ public sealed class TcpPenServer : IDisposable
                         case TYPE_STATUS:
                             HandleStatus(payload);
                             break;
+                        case TYPE_INFO:
+                            // 手机端主动查询主机信息（一般不需要，握手时主机会主动下发）
+                            SendInfo(ns);
+                            break;
                         case TYPE_PEN_DOWN:
                         case TYPE_PEN_MOVE:
                         case TYPE_PEN_UP:
@@ -185,6 +194,8 @@ public sealed class TcpPenServer : IDisposable
         float frameT = p.Length >= 24 ? BitConverter.ToSingle(p, 20) : -1f;
         float frameScale = p.Length >= 28 ? BitConverter.ToSingle(p, 24) : -1f;
         _cfg.SetPhoneHello(w, h, mode, work, frameL, frameT, frameScale);
+        // 握手成功后立刻把主机信息（版本号/计算机名/候选 IP）下发给手机，供拓扑图展示
+        SendInfo(_clientStream!);
         _zoomLog = 0;
         var r = _cfg.GetActiveRect();
         AppLog.Info($"[Hello] 手机书写区 {w:0}×{h:0} 宽高比={(_cfg.PhoneAspect > 0 ? _cfg.PhoneAspect : 0):0.###} " +
@@ -265,6 +276,34 @@ public sealed class TcpPenServer : IDisposable
         var r = _cfg.GetActiveRect();
         AppLog.Info($"[Status] 缩放={_cfg.Scale:F6} 位置=({_cfg.FrameL:F6},{_cfg.FrameT:F6}) " +
                     $"桌面范围 {r.x},{r.y} {r.w}×{r.h} 宽高比={(r.h > 0 ? (double)r.w / r.h : 0):F6}");
+    }
+
+    /// <summary>
+    /// 把主机信息（版本号 / 计算机名 / 候选 IP）封装成 INFO 帧下发给手机。
+    /// 手机端据此在拓扑图里展示「客户端版本号」「桌面 PC IP」「网络连接方式」等。
+    /// </summary>
+    private void SendInfo(Stream ns)
+    {
+        try
+        {
+            var ips = string.Join(",", NetInfo.ConnectionCandidates());
+            var text = $"ver={AppVersion.Version}&name={Uri.EscapeDataString(Environment.MachineName)}&ips={Uri.EscapeDataString(ips)}";
+            var body = System.Text.Encoding.UTF8.GetBytes(text);
+            var buf = new byte[6 + body.Length];
+            buf[0] = MAGIC1;
+            buf[1] = MAGIC2;
+            buf[2] = 0x01;            // protocol version
+            buf[3] = TYPE_INFO;
+            buf[4] = (byte)(body.Length & 0xFF);
+            buf[5] = (byte)((body.Length >> 8) & 0xFF);
+            Array.Copy(body, 0, buf, 6, body.Length);
+            lock (ns) { ns.Write(buf, 0, buf.Length); }
+            AppLog.Info($"[Info] 下发主机信息：ver={AppVersion.Version} 候选IP={ips}");
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"[Info] 下发失败：{ex.Message}");
+        }
     }
 
     /// <summary>复位帧：手机端把操作框恢复到整个书写区。</summary>

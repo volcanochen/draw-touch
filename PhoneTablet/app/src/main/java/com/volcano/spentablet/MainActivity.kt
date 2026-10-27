@@ -3,6 +3,7 @@ package com.volcano.spentablet
 import android.app.Activity
 import android.content.SharedPreferences
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
@@ -15,6 +16,7 @@ import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
@@ -22,14 +24,12 @@ import android.widget.ScrollView
 import android.widget.TextView
 
 /**
- * 手机端主界面：全屏画布 + 可折叠的设置面板。
+ * 手机端主界面：全屏画布 + 主界面顶部一排图标按钮（方向切换 / 连接状态 / 设置）。
  *
- * 设置面板提供：
- *  - PC 主机 IP / 端口
- *  - 比例模式：保持手机宽高比（居中留边） vs 拉伸铺满桌面区域
- *  - 是否转发悬停事件（关掉可显著降低数据量）
- *  - S Pen 压感增益
- * 所有设置持久化到 SharedPreferences；比例模式变更会通过 HELLO 帧即时通知 PC。
+ * 连接状态：左上角一个绿/红小圆点（连上绿、未连红），点「连接状态」按钮弹出网络拓扑图，
+ * 展示 PC IP、客户端版本号、网络连接方式、手机 IP 与手机名，并列出局域网里其它桌面，点击可切换。
+ *
+ * 设置：独立全屏页面，点齿轮打开、按返回或点「完成」关闭（不再有「收起」折叠逻辑）。
  */
 class MainActivity : Activity() {
 
@@ -37,22 +37,30 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var hostEdit: EditText
     private lateinit var portEdit: EditText
-    private lateinit var panel: LinearLayout
-    /** 设置面板里可折叠的正文部分（标题栏 status 始终可见，用它来展开/收起） */
-    private lateinit var details: LinearLayout
     private lateinit var topBar: LinearLayout
-    private lateinit var bottomBar: LinearLayout
+
+    /** 主界面顶部左侧的连接状态点（绿=已连 红=未连） */
+    private lateinit var statusDot: View
+    /** 方向切换图标按钮（主界面独立按钮） */
+    private lateinit var rotateBtn: ImageButton
+    /** 连接状态（拓扑图）按钮 */
+    private lateinit var topologyBtn: ImageButton
+    /** 设置（齿轮）按钮 */
+    private lateinit var settingsBtn: ImageButton
+
+    /** 独立设置页（全屏覆盖层，默认隐藏；返回键 / 完成按钮关闭） */
+    private lateinit var settingsPage: LinearLayout
+    /** 设置页里的可滚动正文（所有设置控件都在这里） */
+    private lateinit var details: LinearLayout
 
     /** 当前是否横屏（决定控制栏的紧凑度） */
     private var landscape = false
 
-    /** 屏幕方向模式：0=跟随系统 1=强制横屏 2=强制竖屏 */
+    /** 屏幕方向模式：0=跟随陀螺仪(四向) 1=横屏(双向陀螺仪) 2=竖屏(双向陀螺仪) */
     private var orientMode = 0
     private lateinit var prefs: SharedPreferences
-    private lateinit var dbg: TextView
     private lateinit var canvas: PenCanvasView
     private lateinit var gainText: TextView
-    private lateinit var infoText: TextView
     /** 设置面板里的 IP 提示行（mDNS 发现结果也显示在这里） */
     private lateinit var ipText: TextView
     /** 「发现 PC（mDNS 自动）」按钮 */
@@ -68,6 +76,11 @@ class MainActivity : Activity() {
     /** 见 Protocol.MODE_*：数位板（默认）/ 鼠标。决定手指的用途，两者互斥 */
     private var workMode = Protocol.MODE_TABLET
 
+    /** PC 主机下发的 INFO：版本号 / 计算机名 / 候选 IP（拓扑图展示用） */
+    private var pcVersion = "—"
+    private var pcName = "—"
+    private var pcIps = ""
+
     @Volatile
     private var alive = true
 
@@ -75,19 +88,16 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         prefs = getSharedPreferences("spentablet", MODE_PRIVATE)
+        DebugLog.init(this)
         host = prefs.getString("host", "127.0.0.1") ?: "127.0.0.1"
         port = prefs.getInt("port", Protocol.DEFAULT_PORT)
         aspectMode = prefs.getInt("aspect", Protocol.ASPECT_KEEP)
         workMode = prefs.getInt("mode", Protocol.MODE_TABLET)
         orientMode = prefs.getInt("orient", 0)
 
-        // 结构：FrameLayout 里放两层
-        //   ① content —— 上控制栏(固定高) + 中间书写区(weight=1) + 下状态栏(固定高)
-        //   ② panel   —— 设置详情，**浮在书写区之上**（展开/收起不改变书写区尺寸）
-        //
-        // 为什么设置面板要浮起来：如果面板参与布局，展开时会把书写区挤扁，
-        // 手机端宽高比一变，PC 上的桌面框形状就跟着突变（实测会被压成横条）。
-        // 浮起来之后，书写区尺寸恒定 → 两端的框形状永远稳定一致。
+        // 结构：FrameLayout
+        //   content —— 上控制栏(fixed) + 书写区(weight=1) + 下状态栏(fixed)
+        //   settingsPage —— 全屏设置页，浮在 content 之上，默认 GONE
         val root = FrameLayout(this)
         val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
@@ -95,37 +105,187 @@ class MainActivity : Activity() {
         canvas.pressureGain = prefs.getFloat("gain", 3.0f)
         canvas.sendHover = prefs.getBoolean("hover", true)
         canvas.workMode = workMode
-        // 恢复上次保存的操作框（手机框与桌面框形状/位置保持一致）
         canvas.restoreFrame(
             prefs.getFloat("frameL", 0f),
             prefs.getFloat("frameT", 0f),
             prefs.getFloat("frameS", 1f)
         )
-        // weight=1 让书写区吃掉除上下控制栏以外的全部剩余高度
         content.addView(canvas, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
         ))
 
-        // ---------- 顶部设置面板 ----------
-        // 注意：面板容器本身必须常驻可见，否则“点标题展开”这个开关自己也被藏起来了，
-        // 用户就永远打不开设置。真正收起的是里面的 details。
-        panel = LinearLayout(this).apply {
+        // ---------- 顶部控制栏 ----------
+        topBar = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(16, 16, 16, 16)
+            setPadding(16, 10, 16, 6)
             setBackgroundColor(Color.parseColor("#E6222222"))
         }
-        details = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            visibility = View.GONE
+        // 第一行：状态点 + 状态文字 + 右侧一排图标按钮
+        val topRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
         }
-
+        statusDot = View(this).apply {
+            val s = dp(14)
+            layoutParams = LinearLayout.LayoutParams(s, s).apply { setMargins(0, 0, 10, 0) }
+            setBackgroundColor(Color.parseColor("#FF4444")) // 默认红：未连接
+        }
         status = TextView(this).apply {
             textSize = 14f
             setTextColor(Color.WHITE)
-            text = "设置（点此展开/收起）"
-            setPadding(0, 0, 0, 8)
+            text = "未连接（点此设置）"
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        rotateBtn = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_rotate)
+            background = null
+            setPadding(8, 8, 8, 8)
+            layoutParams = LinearLayout.LayoutParams(dp(40), dp(40))
+            contentDescription = "屏幕方向"
+            setOnClickListener { cycleOrientation() }
+        }
+        val rotateCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            addView(rotateBtn)
+        }
+        topologyBtn = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_topology)
+            background = null
+            setPadding(8, 8, 8, 8)
+            layoutParams = LinearLayout.LayoutParams(dp(40), dp(40))
+            contentDescription = "连接状态 / 网络拓扑"
+            setOnClickListener { openTopology() }
+        }
+        settingsBtn = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_settings)
+            background = null
+            setPadding(8, 8, 8, 8)
+            layoutParams = LinearLayout.LayoutParams(dp(40), dp(40))
+            contentDescription = "设置"
+            setOnClickListener { openSettings() }
+        }
+        topRow.addView(statusDot)
+        topRow.addView(status)
+        topRow.addView(rotateCol)
+        topRow.addView(topologyBtn)
+        topRow.addView(settingsBtn)
+        // 固定满宽：状态文字(weight=1)占中间，三个图标恒定右对齐
+        topRow.layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        )
+
+        // 顶部栏只有一行：状态点 + 图标按钮。原来的书写区信息行 / 底部调试栏已移除，
+        // 这些调试信息改为后台定量循环写入文件（见 DebugLog）。
+        topBar.addView(topRow)
+        content.addView(
+            topBar, 0,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        )
+
+        // ---------- 独立设置页（默认隐藏）----------
+        settingsPage = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#F2222222"))
+            visibility = View.GONE
+        }
+        val setHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(16, 14, 16, 10)
+            setBackgroundColor(Color.parseColor("#CC111111"))
+        }
+        val setTitle = TextView(this).apply {
+            text = "设置"
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val doneBtn = Button(this).apply { text = "完成" }
+        setHeader.addView(setTitle)
+        setHeader.addView(doneBtn)
+        settingsPage.addView(setHeader)
+
+        details = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(16, 8, 16, 16)
+        }
+        buildSettingsControls()
+        val setScroll = ScrollView(this).apply {
+            isFillViewport = true
+            addView(details)
+        }
+        settingsPage.addView(setScroll)
+
+        root.addView(content, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        root.addView(settingsPage, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+        // 画布事件回调（与之前一致）
+        canvas.listener = { type, x, y, p, tx, ty, b -> net.send(Protocol.buildPen(type, x, y, p, tx, ty, b)) }
+        // 原来显示在底部调试栏的笔/手指事件 → 后台日志（按事件节流）
+        canvas.onDebug = { s -> DebugLog.writeThrottled("evt", s.replace("\n", " | ")) }
+        canvas.onPan = { dx, dy -> net.send(Protocol.buildPan(dx, dy)) }
+        canvas.onMouse = { kind, dx, dy -> net.send(Protocol.buildMouse(kind, dx, dy)) }
+        canvas.onZoom = { scale, fx, fy -> net.send(Protocol.buildZoom(scale, fx, fy)) }
+        canvas.onSurfaceSizeChanged = { _, _ -> if (::net.isInitialized) net.sendHelloNow() }
+        canvas.onFrameChanged = { l, t, s ->
+            prefs.edit().putFloat("frameL", l).putFloat("frameT", t).putFloat("frameS", s).apply()
         }
 
+        status.setOnClickListener { openSettings() }
+        statusDot.setOnClickListener { openSettings() } // 绿点也可点开设置
+        doneBtn.setOnClickListener { closeSettings() }
+
+        setContentView(root)
+        applyOrientationMode()
+
+        net = NetClient(host, port) { helloFrame() }
+        // 接收 PC 下发的 INFO（版本号 / 计算机名 / 候选 IP）
+        net.onInfo = { text -> parsePcInfo(text) }
+        net.start()
+
+        // 开机静默 mDNS 发现：找到唯一一台 PC 且当前没连上 → 直接连上，用户零操作
+        startMdnsDiscovery(manual = false)
+
+        Thread {
+            var tick = 0
+            while (alive) {
+                val sum = canvas.debugSummary()
+                val err = net.lastError
+                val w = surfaceW(); val h = surfaceH()
+                val aspect = if (h > 0) String.format("%.3f", w / h) else "?"
+                val modeName = if (workMode == Protocol.MODE_MOUSE) "鼠标" else "数位板"
+                runOnUiThread {
+                    if (net.connected) {
+                        statusDot.setBackgroundColor(Color.parseColor("#33DD55")) // 绿：已连
+                        status.text = "" // 绿点即已连接，无需文字
+                        status.setTextColor(Color.WHITE)
+                    } else {
+                        statusDot.setBackgroundColor(Color.parseColor("#FF4444")) // 红：未连
+                        val friendly = net.friendlyError(err)
+                        status.text = if (friendly.isEmpty()) "未连接｜$modeName（点此设置）"
+                                      else "未连接：${friendly.substringBefore('\n')}"
+                        status.setTextColor(Color.parseColor("#FFFF6B6B"))
+                    }
+                }
+                // 原来 infoText / dbg 两行字的内容 → 每 2 秒定量写入后台日志文件
+                if (tick++ % 4 == 0) {
+                    val state = if (net.connected) "已连接" else "未连接"
+                    val errPart = if (err != null) "｜错误详情：$err" else ""
+                    DebugLog.write(
+                        "[stat] $state $host:$port｜书写区 ${w.toInt()}x${h.toInt()} 宽高比 $aspect｜模式 $modeName｜" +
+                                "${canvas.frameSummary()}｜发送 ${net.sentFrames} 丢弃 ${net.droppedFrames}｜" +
+                                sum.replace("\n", " | ") + errPart
+                    )
+                }
+                try { Thread.sleep(500) } catch (_: InterruptedException) { break }
+            }
+        }.start()
+    }
+
+    /** 构建设置页里的所有控件（IP / 比例 / 模式 / 增益 / 复位 等，不再含方向切换与捏合按钮） */
+    private fun buildSettingsControls() {
         val rowHost = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         hostEdit = EditText(this).apply {
             setText(host)
@@ -153,15 +313,13 @@ class MainActivity : Activity() {
             setPadding(0, 4, 0, 4)
         }
 
-        // ---- 比例模式 ----
         val aspectTitle = TextView(this).apply {
-            textSize = 13f
-            setTextColor(Color.WHITE)
+            textSize = 13f; setTextColor(Color.WHITE)
             text = "比例映射（决定笔在 PC 上的覆盖范围）"
             setPadding(0, 8, 0, 2)
         }
         val radioKeep = RadioButton(this).apply {
-            id = View.generateViewId()   // 必须显式给 id，否则 RadioGroup.check() 不生效
+            id = View.generateViewId()
             text = "保持手机比例（居中留边，笔迹不变形）"
             setTextColor(Color.WHITE)
         }
@@ -171,15 +329,12 @@ class MainActivity : Activity() {
             setTextColor(Color.WHITE)
         }
         val aspectGroup = RadioGroup(this).apply {
-            addView(radioKeep)
-            addView(radioStretch)
+            addView(radioKeep); addView(radioStretch)
             check(if (aspectMode == Protocol.ASPECT_KEEP) radioKeep.id else radioStretch.id)
         }
 
-        // ---- 工作模式（手指的用途，两种互斥） ----
         val modeTitle = TextView(this).apply {
-            textSize = 13f
-            setTextColor(Color.WHITE)
+            textSize = 13f; setTextColor(Color.WHITE)
             text = "手指的作用（两种模式互斥）"
             setPadding(0, 10, 0, 2)
         }
@@ -194,15 +349,11 @@ class MainActivity : Activity() {
             setTextColor(Color.WHITE)
         }
         val modeGroup = RadioGroup(this).apply {
-            addView(radioTablet)
-            addView(radioMouse)
+            addView(radioTablet); addView(radioMouse)
             check(if (workMode == Protocol.MODE_MOUSE) radioMouse.id else radioTablet.id)
         }
 
         val resetFrameBtn = Button(this).apply { text = "复位操作框（恢复整个书写区）" }
-        val orientBtn = Button(this).apply { text = orientText(0) }
-        val pinchBtn = Button(this).apply { text = "模拟一次捏合（缩小 25%）" }
-        val collapseBtn = Button(this).apply { text = "收起设置（回到书写）" }
 
         val hoverBox = CheckBox(this).apply {
             text = "转发悬停移动（关掉更省资源）"
@@ -211,11 +362,9 @@ class MainActivity : Activity() {
             setPadding(0, 4, 0, 4)
         }
 
-        // ---- 压感增益 ----
         val gainRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         gainText = TextView(this).apply {
-            textSize = 13f
-            setTextColor(Color.WHITE)
+            textSize = 13f; setTextColor(Color.WHITE)
             setPadding(0, 4, 8, 4)
             text = "压感增益 ${String.format("%.1f", canvas.pressureGain)}"
         }
@@ -223,14 +372,6 @@ class MainActivity : Activity() {
         val plusBtn = Button(this).apply { text = "增益 +" }
         gainRow.addView(minusBtn)
         gainRow.addView(plusBtn)
-
-        infoText = TextView(this).apply {
-            textSize = 12f
-            setTextColor(Color.parseColor("#FFBBBBBB"))
-            setPadding(0, 4, 0, 4)
-            text = ""
-            setLines(2)   // 固定两行 → 上控制栏高度恒定 → 书写区尺寸不会被挤变形
-        }
 
         details.addView(rowHost)
         details.addView(connectBtn)
@@ -242,106 +383,16 @@ class MainActivity : Activity() {
         details.addView(modeTitle)
         details.addView(modeGroup)
         details.addView(resetFrameBtn)
-        details.addView(orientBtn)
-        details.addView(pinchBtn)
-        details.addView(collapseBtn)
         details.addView(hoverBox)
         details.addView(gainText)
         details.addView(gainRow)
 
-        // ---- 上控制栏（固定高度）----
-        val topBar = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(16, 10, 16, 6)
-            setBackgroundColor(Color.parseColor("#E6222222"))
-        }
-        this.topBar = topBar
-        topBar.addView(status)
-        topBar.addView(infoText)
-        // index 0：上控制栏必须在画布**之前**，否则会被 weight=1 的画布挤到屏幕外
-        content.addView(
-            topBar, 0,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        )
-
-        // ---- 下状态栏（固定高度）----
-        dbg = TextView(this).apply {
-            textSize = 12f
-            setTextColor(Color.parseColor("#FFDDDD"))
-            setBackgroundColor(Color.parseColor("#AA000000"))
-            setPadding(12, 6, 12, 6)
-            setLines(4)   // 固定四行 → 下状态栏高度恒定
-            text = if (workMode == Protocol.MODE_MOUSE)
-                "鼠标模式：手指滑动=移动光标，单击=左键，双击=右键\n等待事件…"
-            else
-                "数位板模式：S Pen 作画｜单指滑动=移动范围框，双指捏合=缩放\n等待事件…"
-        }
-        val bottomBar = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, 0, 0, 0)
-        }
-        this.bottomBar = bottomBar
-        bottomBar.addView(
-            dbg,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        )
-        content.addView(
-            bottomBar,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        )
-
-        // 内容层铺满；设置面板作为覆盖层浮在书写区上方
-        root.addView(
-            content,
-            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-        )
-
-        // ---- 设置详情（浮层，默认收起）----
-        // 横屏时屏幕只有 720 高，面板内容装不下 → 套一层 ScrollView 才够得着底部
-        val detailScroll = ScrollView(this).apply {
-            isFillViewport = true
-            addView(details)
-        }
-        panel.addView(detailScroll)
-        root.addView(
-            panel,
-            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                gravity = Gravity.TOP
-            }
-        )
-
-        canvas.listener = { type, x, y, p, tx, ty, b ->
-            net.send(Protocol.buildPen(type, x, y, p, tx, ty, b))
-        }
-        canvas.onDebug = { s ->
-            runOnUiThread { dbg.text = "$s\n${canvas.debugSummary()}" }
-        }
-        // 手指滑动 → 数位板模式下移动 PC 上的操作范围框
-        canvas.onPan = { dx, dy -> net.send(Protocol.buildPan(dx, dy)) }
-        // 手指 → 鼠标模式下的触摸板动作（移动 / 左键 / 右键）
-        canvas.onMouse = { kind, dx, dy -> net.send(Protocol.buildMouse(kind, dx, dy)) }
-        // 双指捏合 → 缩放 PC 上的操作范围框
-        canvas.onZoom = { scale, fx, fy -> net.send(Protocol.buildZoom(scale, fx, fy)) }
-        // 书写区尺寸变了（展开/收起设置面板会挤压中间区域）→ 重发握手帧让 PC 重算等比映射。
-        // 注意：首次布局发生在 setContentView() 里，那时 net 还没初始化，必须判空。
-        canvas.onSurfaceSizeChanged = { _, _ -> if (::net.isInitialized) net.sendHelloNow() }
-        // 操作框状态变化 → 存到 prefs（重开 App 后能恢复，手机框与桌面框形状仍然一致）
-        canvas.onFrameChanged = { l, t, s ->
-            prefs.edit().putFloat("frameL", l).putFloat("frameT", t).putFloat("frameS", s).apply()
-        }
-
-        status.setOnClickListener {
-            details.visibility = if (details.visibility == View.GONE) View.VISIBLE else View.GONE
-            if (details.visibility == View.VISIBLE) {
-                ipText.text = "本机 IP：${NetworkScan.describeLocalIps()}"
-            }
-        }
-        // 注意：展开时面板是浮层，会盖住顶部状态栏，所以**不能**靠「点空白处收起」，
-        // 必须在面板底部放一个明确的「收起设置」按钮。
         hostEdit.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-            override fun afterTextChanged(s: Editable?) { host = s?.toString()?.ifBlank { "127.0.0.1" } ?: "127.0.0.1" }
+            override fun afterTextChanged(s: Editable?) {
+                host = s?.toString()?.ifBlank { "127.0.0.1" } ?: "127.0.0.1"
+            }
         })
         findBtn.setOnClickListener {
             findBtn.isEnabled = false
@@ -376,18 +427,17 @@ class MainActivity : Activity() {
             port = portEdit.text?.toString()?.toIntOrNull() ?: Protocol.DEFAULT_PORT
             prefs.edit().putString("host", host).putInt("port", port).apply()
             restartNet()
-            details.visibility = View.GONE
         }
         aspectGroup.setOnCheckedChangeListener { _, id ->
             aspectMode = if (id == radioKeep.id) Protocol.ASPECT_KEEP else Protocol.ASPECT_STRETCH
             prefs.edit().putInt("aspect", aspectMode).apply()
-            net.sendHelloNow()          // 立即通知 PC，不用断线重连
+            net.sendHelloNow()
         }
         modeGroup.setOnCheckedChangeListener { _, id ->
             val m = if (id == radioMouse.id) Protocol.MODE_MOUSE else Protocol.MODE_TABLET
             if (m == workMode) return@setOnCheckedChangeListener
             workMode = m
-            canvas.workMode = m          // setter 会清掉上一种模式的手势状态
+            canvas.workMode = m
             prefs.edit().putInt("mode", m).apply()
             net.send(Protocol.buildMode(m))
             Log.i("SpenTablet", "切换工作模式 -> ${if (m == Protocol.MODE_MOUSE) "鼠标" else "数位板"}")
@@ -397,99 +447,87 @@ class MainActivity : Activity() {
             net.send(Protocol.buildReset())
             Log.i("SpenTablet", "操作框已复位")
         }
-        collapseBtn.setOnClickListener { details.visibility = View.GONE }
-        orientBtn.setOnClickListener {
-            orientMode = (orientMode + 1) % 3
-            applyOrientationMode()
-            orientBtn.text = orientText(orientMode)
-            prefs.edit().putInt("orient", orientMode).apply()
-        }
-        pinchBtn.setOnClickListener {
-            canvas.simulatePinch(0.75f)
-            Log.i("SpenTablet", "模拟捏合 → ${canvas.frameSummary()}")
-        }
         hoverBox.setOnCheckedChangeListener { _, checked ->
             canvas.sendHover = checked
             prefs.edit().putBoolean("hover", checked).apply()
         }
         minusBtn.setOnClickListener { setGain(canvas.pressureGain - 0.5f) }
         plusBtn.setOnClickListener { setGain(canvas.pressureGain + 0.5f) }
-
-        setContentView(root)
-        applyOrientationMode()
-
-        net = NetClient(host, port) { helloFrame() }
-        net.start()
-
-        // 开机静默 mDNS 发现：找到唯一一台 PC 且当前没连上 → 直接连上，用户零操作
-        startMdnsDiscovery(manual = false)
-
-        Thread {
-            while (alive) {
-                val sum = canvas.debugSummary()
-                val err = net.lastError
-                val w = surfaceW(); val h = surfaceH()
-                val aspect = if (h > 0) String.format("%.3f", w / h) else "?"
-                val modeName = if (workMode == Protocol.MODE_MOUSE) "鼠标" else "数位板"
-                runOnUiThread {
-                    if (net.connected) {
-                        status.text = "已连接 $host:$port｜$modeName（点此设置）"
-                        status.setTextColor(Color.WHITE)
-                        infoText.text = "书写区 ${w.toInt()}×${h.toInt()} 宽高比 $aspect｜模式 $modeName\n" +
-                                "${canvas.frameSummary()}｜发送 ${net.sentFrames} 丢弃 ${net.droppedFrames}"
-                        dbg.text = sum
-                    } else {
-                        // 未连接：把「可操作的排查建议」直接摆在最上面，别只丢一个异常名
-                        val friendly = net.friendlyError(err)
-                        status.text = if (friendly.isEmpty()) "未连接｜$modeName（点此设置）"
-                                      else "未连接：${friendly.substringBefore('\n')}"
-                        status.setTextColor(Color.parseColor("#FFFF6B6B"))
-                        infoText.text = if (friendly.isEmpty()) {
-                            "书写区 ${w.toInt()}×${h.toInt()} 宽高比 $aspect｜模式 $modeName"
-                        } else {
-                            friendly
-                        }
-                        dbg.text = if (err != null) "错误详情：$err" else sum
-                    }
-                }
-                try { Thread.sleep(500) } catch (_: InterruptedException) { break }
-            }
-        }.start()
     }
 
-    /**
-     * 屏幕旋转。manifest 声明了 configChanges，所以 Activity 不会被重建，
-     * TCP 连接不会断；画布尺寸变化会触发 onSizeChanged → 重发 HELLO → PC 重算等比映射。
-     * 这里只负责把控制栏压扁一点，把竖直空间让给书写区（横屏时屏幕只有 720 高）。
-     */
+    // ---------- 设置页开关 ----------
+    private fun openSettings() {
+        settingsPage.visibility = View.VISIBLE
+    }
+
+    private fun closeSettings() {
+        settingsPage.visibility = View.GONE
+    }
+
+    override fun onBackPressed() {
+        if (settingsPage.visibility == View.VISIBLE) {
+            closeSettings()
+            return
+        }
+        super.onBackPressed()
+    }
+
+    // ---------- 屏幕方向（主界面图标按钮）----------
+    private fun cycleOrientation() {
+        orientMode = (orientMode + 1) % 3
+        applyOrientationMode()
+        prefs.edit().putInt("orient", orientMode).apply()
+    }
+
+    private fun parsePcInfo(text: String) {
+        val map = text.split("&").mapNotNull { kv ->
+            val p = kv.split("=", limit = 2)
+            if (p.size == 2) p[0] to p[1] else null
+        }.toMap()
+        pcVersion = map["ver"] ?: pcVersion
+        pcName = map["name"]?.let { try { java.net.URLDecoder.decode(it, "UTF-8") } catch (_: Throwable) { it } }
+            ?: pcName
+        pcIps = map["ips"]?.let { try { java.net.URLDecoder.decode(it, "UTF-8") } catch (_: Throwable) { it } } ?: pcIps
+        Log.i("SpenTablet", "PC INFO → ver=$pcVersion name=$pcName ips=$pcIps")
+    }
+
+    private fun openTopology() {
+        val method = NetworkScan.networkMethod(host)
+        val phoneIp = NetworkScan.primaryLocalIp()
+        val phoneName = Build.MODEL ?: "Android"
+        val others = MdnsDiscovery.current()
+        TopologyDialog.show(
+            this,
+            TopologyDialog.TopologyData(
+                pcIp = host, pcName = pcName, pcVersion = pcVersion,
+                method = method, phoneIp = phoneIp, phoneName = phoneName,
+                otherPcs = others
+            )
+        ) { pc -> connectToPc(pc, "拓扑切换") }
+    }
+
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
         val land = newConfig.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
         if (land == landscape) return
         landscape = land
-        infoText.setLines(if (land) 1 else 2)
-        dbg.setLines(if (land) 1 else 4)
         topBar.setPadding(if (land) 12 else 16, if (land) 2 else 10, if (land) 12 else 16, if (land) 2 else 6)
-        infoText.text = "书写区 ${surfaceW().toInt()}×${surfaceH().toInt()}｜${canvas.frameSummary()}"
+        DebugLog.write("[orient] ${if (land) "横屏" else "竖屏"}｜书写区 ${surfaceW().toInt()}x${surfaceH().toInt()}｜${canvas.frameSummary()}")
     }
 
-    /** 方向按钮上的文字 */
+    /** 方向说明文字（设置页/提示用） */
     private fun orientText(mode: Int) = when (mode) {
-        1 -> "屏幕方向：强制横屏（点此切换）"
-        2 -> "屏幕方向：强制竖屏（点此切换）"
-        else -> "屏幕方向：跟随系统（点此切换）"
+        1 -> "屏幕方向：横屏（陀螺仪在两个横屏朝向间自动翻转，点此切换）"
+        2 -> "屏幕方向：竖屏（陀螺仪在两个竖屏朝向间自动翻转，点此切换）"
+        else -> "屏幕方向：跟随系统陀螺仪（四个朝向，点此切换）"
     }
 
-    /**
-     * 应用屏幕方向。
-     * 「跟随系统」= SCREEN_ORIENTATION_USER：系统锁了旋转就不转（尊重用户习惯），
-     * 「强制横/竖屏」= LANDSCAPE / PORTRAIT：不看传感器也不看系统旋转锁，直接锁定。
-     */
     private fun applyOrientationMode() {
         requestedOrientation = when (orientMode) {
-            1 -> android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-            2 -> android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-            else -> android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER
+            // 横屏/竖屏均带 SENSOR：同组两个朝向由陀螺仪自动切换
+            1 -> android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            2 -> android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+            else -> android.content.pm.ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
         }
     }
 
@@ -498,6 +536,8 @@ class MainActivity : Activity() {
         prefs.edit().putFloat("gain", canvas.pressureGain).apply()
         gainText.text = "压感增益 ${String.format("%.1f", canvas.pressureGain)}"
     }
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     private fun surfaceW(): Float {
         val w = canvas.width
@@ -516,12 +556,6 @@ class MainActivity : Activity() {
             canvas.frameLeft, canvas.frameTop, canvas.frameScale
         )
 
-    /**
-     * mDNS 自动发现 PC。
-     *
-     * @param manual true = 用户点了「发现 PC」按钮（找到多台时弹列表让用户选）
-     *               false = 启动时的静默发现（找到唯一一台且当前未连接 → 直接连上）
-     */
     private fun startMdnsDiscovery(manual: Boolean) {
         MdnsDiscovery.start(this, object : MdnsDiscovery.Listener {
             override fun onServicesChanged(list: List<MdnsDiscovery.Found>) {
@@ -531,7 +565,6 @@ class MainActivity : Activity() {
                         return@runOnUiThread
                     }
                     if (manual) {
-                        // 多台时让用户选；只有一台就直接连
                         discoverBtn.isEnabled = true
                         discoverBtn.text = "发现 PC（mDNS 自动，推荐）"
                         if (list.size == 1) {
@@ -558,7 +591,6 @@ class MainActivity : Activity() {
         })
     }
 
-    /** 弹列表让用户选择要连的 PC */
     private fun showPcChooser(list: List<MdnsDiscovery.Found>) {
         val names = list.map { it.label }.toTypedArray()
         android.app.AlertDialog.Builder(this)
@@ -571,9 +603,7 @@ class MainActivity : Activity() {
     /** 连到发现到的 PC：候选地址逐个探测 → 填 IP/端口 → 记 prefs → 重连 */
     private fun connectToPc(f: MdnsDiscovery.Found, tag: String) {
         val candidates = f.candidates.ifEmpty { listOf(f.host) }
-        // 探测要走网络，不能卡 UI 线程
         Thread {
-            // PC 可能同时开着 USB 共享和 WiFi，手机只能走其中一条 → 逐个试，第一个能连上的就是对的
             var picked: String? = null
             for (c in candidates) {
                 if (probeTcp(c, f.port)) {
@@ -601,7 +631,6 @@ class MainActivity : Activity() {
         }.apply { isDaemon = true }.start()
     }
 
-    /** 快速 TCP 探测：这个地址能不能连上 PC 的端口 */
     private fun probeTcp(hostStr: String, portNum: Int, timeoutMs: Int = 1200): Boolean = try {
         java.net.Socket().use {
             it.connect(java.net.InetSocketAddress(hostStr, portNum), timeoutMs)
@@ -614,12 +643,15 @@ class MainActivity : Activity() {
     private fun restartNet() {
         if (::net.isInitialized) net.stop()
         net = NetClient(host, port) { helloFrame() }
+        net.onInfo = { text -> parsePcInfo(text) }
         net.start()
         Log.i("SpenTablet", "重连 $host:$port")
     }
 
     override fun onDestroy() {
         alive = false
+        DebugLog.write("[life] onDestroy")
+        DebugLog.flush()
         MdnsDiscovery.stop()
         if (::net.isInitialized) net.stop()
         super.onDestroy()

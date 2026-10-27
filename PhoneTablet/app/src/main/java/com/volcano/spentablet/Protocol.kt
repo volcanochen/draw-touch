@@ -38,6 +38,8 @@ object Protocol {
     const val TYPE_ZOOM: Int = 0x09
     /** 复位帧：把操作范围框恢复成整个书写区 */
     const val TYPE_RESET: Int = 0x0A
+    /** INFO 帧：PC 主机主动下发的版本号/计算机名/候选 IP（供手机端拓扑图展示） */
+    const val TYPE_INFO: Int = 0x0C
 
     // ---- 工作模式 ----
     const val MODE_TABLET: Int = 0   // 数位板：S Pen 在框内作画，手指拖动框

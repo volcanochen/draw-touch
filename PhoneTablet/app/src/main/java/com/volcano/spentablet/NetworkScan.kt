@@ -133,4 +133,36 @@ object NetworkScan {
         if (ips.isEmpty()) return "（未发现可用网卡）"
         return ips.joinToString("、") { (ip, name) -> "$ip($name)" }
     }
+
+    /** 手机主 IP（拓扑图展示用）。优先 WiFi / USB 共享网卡。 */
+    fun primaryLocalIp(): String {
+        val all = localIpv4().filterNot { it.first.startsWith("169.254.") }
+        if (all.isEmpty()) return "（无）"
+        val prefer = all.firstOrNull { it.second.lowercase().let { n -> n.contains("wlan") || n.contains("wifi") } }
+            ?: all.firstOrNull { it.second.lowercase().let { n -> n.contains("rndis") || n.contains("usb") || n.contains("tether") } }
+            ?: all.firstOrNull()
+        return prefer?.first ?: all.first().first
+    }
+
+    /**
+     * 推断手机到 PC 的「网络连接方式」，供拓扑图展示。
+     * 127.0.0.1 → USB + adb 转发；否则看 PC 的 IP 落在手机哪张网卡的同网段，
+     * 据此判断是 USB 网络共享 / WiFi 局域网 / 其它局域网。
+     */
+    fun networkMethod(host: String): String {
+        val h = host.trim()
+        if (h == "127.0.0.1" || h == "localhost") return "USB + adb 转发"
+        val prefix = h.substringBeforeLast('.')
+        for ((ip, name) in localIpv4()) {
+            if (ip.substringBeforeLast('.') == prefix) {
+                val n = name.lowercase()
+                return when {
+                    n.contains("rndis") || n.contains("usb") || n.contains("tether") -> "USB 网络共享"
+                    n.contains("wlan") || n.contains("wifi") -> "WiFi 局域网"
+                    else -> "局域网"
+                }
+            }
+        }
+        return "局域网（跨网段）"
+    }
 }

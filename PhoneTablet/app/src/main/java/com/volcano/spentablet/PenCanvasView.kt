@@ -89,8 +89,10 @@ class PenCanvasView(context: Context) : View(context) {
     /** 恢复之前保存的操作框（重开 App 时用） */
     fun restoreFrame(l: Float, t: Float, s: Float) {
         frameS = s.coerceIn(MIN_FRAME, 1f)
-        frameL = l.coerceIn(0f, 1f - frameS)
-        frameT = t.coerceIn(0f, 1f - frameS)
+        // 不钳制 frameL/frameT 到 [0,1]：操作框要能移出书写区、去到任意显示器，
+        // 真正的边界由 PC 端按虚拟屏幕约束，两端只保持「相对量」一致即可。
+        frameL = l
+        frameT = t
         invalidate()
     }
 
@@ -416,8 +418,9 @@ class PenCanvasView(context: Context) : View(context) {
 
         // 以焦点为锚点收缩桌面框：焦点处的桌面位置保持不动
         // （公式与 PC 端 MappingConfig.Zoom 完全一致）
-        val nl = (frameL + rfx * (sOld - s2)).coerceIn(0f, 1f - s2)
-        val nt = (frameT + rfy * (sOld - s2)).coerceIn(0f, 1f - s2)
+        // 不钳制到 [0,1]：锚点收缩后框可能落到书写区外（去了别的显示器），由 PC 端按虚拟屏幕约束
+        val nl = frameL + rfx * (sOld - s2)
+        val nt = frameT + rfy * (sOld - s2)
         frameL = nl; frameT = nt
         invalidate()
 
@@ -460,9 +463,10 @@ class PenCanvasView(context: Context) : View(context) {
                     // 位移相对书写区 → 与桌面框 1:1 跟随
                     val dx = (px - panLastX) / width.toFloat()
                     val dy = (py - panLastY) / height.toFloat()
-                    val nl = (frameL + dx).coerceIn(0f, 1f - frameS)
-                    val nt = (frameT + dy).coerceIn(0f, 1f - frameS)
-                    // 只把**实际生效**的位移发给 PC，保证两端框位置完全同步
+                    // 不钳制到 [0,1]：让操作框能移出书写区、去到屏幕任意位置（含其它显示器）。
+                    // PC 端会按虚拟屏幕约束实际位置；这里只把原始位移发给 PC，保证两端相对量一致。
+                    val nl = frameL + dx
+                    val nt = frameT + dy
                     val adx = nl - frameL
                     val ady = nt - frameT
                     frameL = nl; frameT = nt

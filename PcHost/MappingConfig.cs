@@ -172,7 +172,12 @@ public sealed class MappingConfig
         return (w, h);
     }
 
-    /// <summary>实际生效的映射矩形（操作框），保证不越出基准矩形（基准矩形必在虚拟屏幕内）。</summary>
+    /// <summary>
+    /// 实际生效的映射矩形（操作框）。
+    /// 不再夹在「基准矩形」内 —— 操作框可移动到**整个虚拟屏幕**的任意位置，
+    /// 包括把框拖到第二块显示器上（多屏场景）。
+    /// 仅做最后一道兜底：把整块框夹在虚拟屏幕范围内，避免框被拖到完全看不见的虚空里。
+    /// </summary>
     public (int x, int y, int w, int h) GetActiveRect()
     {
         var (bx, by, bw, bh) = BaseRect();
@@ -180,22 +185,36 @@ public sealed class MappingConfig
         var (w, h) = BoxSize(bw, s);
         int x = (int)Math.Round(bx + FrameL * bw);
         int y = (int)Math.Round(by + FrameT * bh);
-        // 夹在基准矩形内：与手机端「框必须留在书写区内」的规则完全一致
-        x = Math.Clamp(x, bx, Math.Max(bx, bx + bw - w));
-        y = Math.Clamp(y, by, Math.Max(by, by + bh - h));
+        // 夹在虚拟屏幕（多显示器合并范围）内：框可落到任意显示器，但不会被拖到屏幕外完全消失
+        x = Math.Clamp(x, VirtualX, Math.Max(VirtualX, VirtualX + VirtualW - w));
+        y = Math.Clamp(y, VirtualY, Math.Max(VirtualY, VirtualY + VirtualH - h));
         return (x, y, w, h);
     }
 
     /// <summary>
     /// 把 FrameL/FrameT 夹回合法区间。
-    /// 规则与手机端完全一致：[0, 1-Scale]，两端数值逐位相同。
+    /// 规则：操作框的**整块**必须留在虚拟屏幕内（可落在任意显示器，包括第二块屏），
+    /// 因此 FrameL/FrameT 的上下限由「框尺寸」与「虚拟屏幕」推导，
+    /// 而不是手机端那种 [0, 1-Scale] 的书写区相对量。
+    /// 这样手指滑动平移时不会有「撞到隐形墙」的死区。
     /// </summary>
     private void ClampFrame()
     {
+        var (bx, by, bw, bh) = BaseRect();
         double s = Math.Clamp(Scale, MIN_SCALE, 1.0);
-        double lim = Math.Max(0.0, 1.0 - s);
-        FrameL = Math.Clamp(FrameL, 0.0, lim);
-        FrameT = Math.Clamp(FrameT, 0.0, lim);
+        var (w, h) = BoxSize(bw, s);
+        if (bw > 0 && VirtualW > 0)
+        {
+            double minL = (double)(VirtualX - bx) / bw;
+            double maxL = (double)(VirtualX + VirtualW - w - bx) / bw;
+            FrameL = Math.Clamp(FrameL, Math.Min(minL, maxL), Math.Max(minL, maxL));
+        }
+        if (bh > 0 && VirtualH > 0)
+        {
+            double minT = (double)(VirtualY - by) / bh;
+            double maxT = (double)(VirtualY + VirtualH - h - by) / bh;
+            FrameT = Math.Clamp(FrameT, Math.Min(minT, maxT), Math.Max(minT, maxT));
+        }
     }
 
     /// <summary>手指单指滑动平移：dx/dy 是「操作框宽度/高度」的相对位移。</summary>

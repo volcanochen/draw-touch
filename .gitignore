@@ -23,3 +23,6 @@ spen_log.txt
 .idea/
 .vs/
 .vscode/
+
+# 截图临时文件
+shot_*.png
