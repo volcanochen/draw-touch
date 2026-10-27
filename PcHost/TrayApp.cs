@@ -18,7 +18,7 @@ internal sealed class TrayApp : ApplicationContext
     private ConfigForm? _form;
     private ToolStripMenuItem? _mWork;
 
-    public TrayApp(MappingConfig cfg, TcpPenServer server, Action<bool> setDebug)
+    public TrayApp(MappingConfig cfg, TcpPenServer server, Action<bool> setDebug, bool openConfig = false)
     {
         _cfg = cfg;
         _server = server;
@@ -52,7 +52,23 @@ internal sealed class TrayApp : ApplicationContext
         _tick.Start();
 
         AppLog.Info("[Host] 已驻留系统托盘，右键图标可打开配置。");
-        _tray.ShowBalloonTip(3000, "SpenTablet", "已启动，右键托盘图标可打开配置", ToolTipIcon.Info);
+
+        // 气泡提示里直接把「手机端该填什么」说清楚，省得用户去翻文档
+        string ip = NetInfo.GuessTetheringIp();
+        bool fw = NetInfo.HasFirewallRule(cfg.ListenPort);
+        string tip = string.IsNullOrEmpty(ip)
+            ? $"已启动，监听端口 {cfg.ListenPort}\n右键托盘图标 → 配置 / 网络诊断"
+            : $"已启动，监听端口 {cfg.ListenPort}\n手机端 PC IP 填：{ip}" +
+              (fw ? "" : "\n⚠ 防火墙尚未放行该端口，请右键 → 配置 → 允许防火墙");
+        _tray.ShowBalloonTip(6000, "SpenTablet 已就绪", tip, ToolTipIcon.Info);
+
+        if (openConfig)
+        {
+            // 消息循环起来之后再开窗，否则窗体句柄还没建好
+            var t = new System.Windows.Forms.Timer { Interval = 300 };
+            t.Tick += (_, _) => { t.Stop(); OpenConfig(); };
+            t.Start();
+        }
     }
 
     private ContextMenuStrip BuildMenu()
@@ -87,6 +103,20 @@ internal sealed class TrayApp : ApplicationContext
             ConfigStore.Save(_cfg);
         };
         menu.Items.Add(mDebug);
+
+        var mCopyIp = new ToolStripMenuItem("复制手机端要填的 IP");
+        mCopyIp.Click += (_, _) =>
+        {
+            try
+            {
+                string ip = NetInfo.GuessTetheringIp();
+                Clipboard.SetText(string.IsNullOrEmpty(ip) ? NetInfo.DescribeAll() : ip);
+                _tray.ShowBalloonTip(2500, "SpenTablet",
+                    string.IsNullOrEmpty(ip) ? "没有检测到可用 IP" : $"已复制：{ip}", ToolTipIcon.Info);
+            }
+            catch (Exception ex) { MessageBox.Show($"复制失败：{ex.Message}", "SpenTablet"); }
+        };
+        menu.Items.Add(mCopyIp);
 
         var mLog = new ToolStripMenuItem("打开日志");
         mLog.Click += (_, _) =>

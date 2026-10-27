@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Windows.Forms;
 
 namespace SpenTabletHost;
@@ -6,13 +7,25 @@ namespace SpenTabletHost;
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
-        // 必须先开启 DPI 感知：合成笔注入用的是物理像素，
-        // 若进程处于 DPI 无感知状态，GetSystemMetrics 会返回虚拟化后的尺寸（如 200% 缩放下只有一半），
-        // 坐标映射就会整体错位一个缩放倍率。
-        if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
-            SetProcessDPIAware();
+        // --config：启动后直接打开设置窗口（方便双击排障，也方便截图核对界面）
+        bool openConfig = args != null && args.Any(a =>
+            a.Equals("--config", StringComparison.OrdinalIgnoreCase) ||
+            a.Equals("/config", StringComparison.OrdinalIgnoreCase));
+        // ---- DPI 感知：必须让 WinForms 自己接管 ----
+        // 合成笔注入用的是物理像素，进程一定要 DPI 感知，否则 GetSystemMetrics
+        // 返回的是虚拟化尺寸，坐标映射会整体错位一个缩放倍率。
+        //
+        // 但**不能**自己用 P/Invoke 先设进程感知：那样 WinForms 仍会按 SystemAware
+        // 做布局，窗口被系统按 96/168 缩小，而文字仍按 168DPI 渲染，
+        // 结果就是「窗口很小、内容全被裁掉」（用户截图就是这个问题）。
+        // 让 Application.SetHighDpiMode 统一处理，WinForms 才知道自己是 PerMonitorV2。
+        if (!Application.SetHighDpiMode(HighDpiMode.PerMonitorV2))
+        {
+            if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
+                SetProcessDPIAware();
+        }
 
         // 必须在创建任何控件之前调用，否则桌面范围框的视觉样式不对
         Application.EnableVisualStyles();
@@ -69,7 +82,7 @@ internal static class Program
         AppLog.Info("数位板模式：手指在手机屏上滑动平移操作范围框，S Pen 才用于绘制。");
         AppLog.Info("鼠标模式：取消范围框，手指=触摸板，单击=左键，双击=右键。");
 
-        Application.Run(new TrayApp(cfg, server, SetDebug));
+        Application.Run(new TrayApp(cfg, server, SetDebug, openConfig));
     }
 
     private const int DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4;

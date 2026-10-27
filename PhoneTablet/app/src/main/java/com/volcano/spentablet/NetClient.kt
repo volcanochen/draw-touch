@@ -51,6 +51,37 @@ class NetClient(
         Log.i(TAG, "NET 重发 HELLO")
     }
 
+    /**
+     * 把底层异常翻译成「看得懂 + 能行动」的中文提示。
+     * 之前只显示 "ConnectException: Connection refused"，用户完全不知道该做什么。
+     */
+    fun friendlyError(raw: String?): String {
+        if (raw.isNullOrBlank()) return ""
+        val s = raw.lowercase()
+        return when {
+            s.contains("refused") ->
+                "连接被拒绝：PC 端没在监听，或被 Windows 防火墙拦了。\n" +
+                        "→ 确认 PC 上 SpenTabletHost 已启动（托盘图标在右下角）\n" +
+                        "→ 在 PC 端配置窗口点「允许防火墙」并同意 UAC 提权"
+            s.contains("timeout") || s.contains("timed out") ->
+                "连接超时：请求发出去了但没回应。\n" +
+                        "→ USB 网络共享时 IP 要填 **PC 上那张 USB 网卡的 IP**（不是 WiFi IP）\n" +
+                        "→ **最常见原因：PC 的 Windows 防火墙把入站连接静默丢了**\n" +
+                        "   （表现是超时而不是「拒绝」）。请在 PC 端点「允许防火墙」\n" +
+                        "→ 点「自动查找 PC」让手机自己扫出 PC 的地址"
+            s.contains("no route") || s.contains("unreachable") || s.contains("network is unreachable") ->
+                "网络不可达：PC 的 IP 在当前网络里根本不存在。\n" +
+                        "→ 点「自动查找 PC」，或用 ipconfig 在 PC 上确认网卡 IP"
+            s.contains("econnreset") || s.contains("reset by peer") ->
+                "连接被重置：可能是 adb 隧道断了。\n" +
+                        "→ 在 PC 上重跑 adb reverse tcp:6000 tcp:6000，并重启本 App"
+            s.contains("bind") ->
+                "本机端口被占用：把端口换一个（比如 6001）再试"
+            else ->
+                "连接失败：$raw\n→ 确认 PC IP/端口正确，且防火墙放行"
+        }
+    }
+
     fun start() {
         if (running) return
         running = true

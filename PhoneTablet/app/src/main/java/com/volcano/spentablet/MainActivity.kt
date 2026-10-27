@@ -128,6 +128,12 @@ class MainActivity : Activity() {
         rowHost.addView(portEdit, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
         val connectBtn = Button(this).apply { text = "连接" }
+        val findBtn = Button(this).apply { text = "自动查找 PC（USB 网络共享用）" }
+        val ipText = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.parseColor("#FFBBBBBB"))
+            setPadding(0, 4, 0, 4)
+        }
 
         // ---- 比例模式 ----
         val aspectTitle = TextView(this).apply {
@@ -209,6 +215,8 @@ class MainActivity : Activity() {
 
         details.addView(rowHost)
         details.addView(connectBtn)
+        details.addView(findBtn)
+        details.addView(ipText)
         details.addView(aspectTitle)
         details.addView(aspectGroup)
         details.addView(modeTitle)
@@ -296,6 +304,9 @@ class MainActivity : Activity() {
 
         status.setOnClickListener {
             details.visibility = if (details.visibility == View.GONE) View.VISIBLE else View.GONE
+            if (details.visibility == View.VISIBLE) {
+                ipText.text = "本机 IP：${NetworkScan.describeLocalIps()}"
+            }
         }
         // 注意：展开时面板是浮层，会盖住顶部状态栏，所以**不能**靠「点空白处收起」，
         // 必须在面板底部放一个明确的「收起设置」按钮。
@@ -304,6 +315,29 @@ class MainActivity : Activity() {
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(s: Editable?) { host = s?.toString()?.ifBlank { "127.0.0.1" } ?: "127.0.0.1" }
         })
+        findBtn.setOnClickListener {
+            findBtn.isEnabled = false
+            findBtn.text = "正在扫描本机 USB 网卡所在网段…"
+            ipText.text = "本机 IP：${NetworkScan.describeLocalIps()}\n扫描中，请稍候…"
+            NetworkScan.findHost(port) { found ->
+                runOnUiThread {
+                    findBtn.isEnabled = true
+                    findBtn.text = "自动查找 PC（USB 网络共享用）"
+                    if (found != null) {
+                        host = found
+                        hostEdit.setText(found)
+                        prefs.edit().putString("host", found).apply()
+                        ipText.text = "找到 PC：$found（已填入）\n正在连接…"
+                        restartNet()
+                    } else {
+                        ipText.text = "本机 IP：${NetworkScan.describeLocalIps()}\n" +
+                                "没扫到开着 $port 端口的电脑。\n" +
+                                "请确认：① PC 上已启动 SpenTabletHost；② 已开 USB 网络共享；" +
+                                "③ PC 防火墙已放行该端口（PC 端配置窗口点「允许防火墙」）。"
+                    }
+                }
+            }
+        }
         connectBtn.setOnClickListener {
             port = portEdit.text?.toString()?.toIntOrNull() ?: Protocol.DEFAULT_PORT
             prefs.edit().putString("host", host).putInt("port", port).apply()
@@ -354,12 +388,25 @@ class MainActivity : Activity() {
                 val aspect = if (h > 0) String.format("%.3f", w / h) else "?"
                 val modeName = if (workMode == Protocol.MODE_MOUSE) "鼠标" else "数位板"
                 runOnUiThread {
-                    status.text = (if (net.connected) "已连接 $host:$port" else "未连接") +
-                            "｜$modeName（点此设置）"
-                    infoText.text = "书写区 ${w.toInt()}×${h.toInt()} 宽高比 $aspect｜模式 $modeName\n" +
-                            "${canvas.frameSummary()}｜发送 ${net.sentFrames} 丢弃 ${net.droppedFrames}"
-                    val tail = if (err != null) "错误: $err" else canvas.debugSummary().let { "" }
-                    dbg.text = if (err != null) tail else "$sum"
+                    if (net.connected) {
+                        status.text = "已连接 $host:$port｜$modeName（点此设置）"
+                        status.setTextColor(Color.WHITE)
+                        infoText.text = "书写区 ${w.toInt()}×${h.toInt()} 宽高比 $aspect｜模式 $modeName\n" +
+                                "${canvas.frameSummary()}｜发送 ${net.sentFrames} 丢弃 ${net.droppedFrames}"
+                        dbg.text = sum
+                    } else {
+                        // 未连接：把「可操作的排查建议」直接摆在最上面，别只丢一个异常名
+                        val friendly = net.friendlyError(err)
+                        status.text = if (friendly.isEmpty()) "未连接｜$modeName（点此设置）"
+                                      else "未连接：${friendly.substringBefore('\n')}"
+                        status.setTextColor(Color.parseColor("#FFFF6B6B"))
+                        infoText.text = if (friendly.isEmpty()) {
+                            "书写区 ${w.toInt()}×${h.toInt()} 宽高比 $aspect｜模式 $modeName"
+                        } else {
+                            friendly
+                        }
+                        dbg.text = if (err != null) "错误详情：$err" else sum
+                    }
                 }
                 try { Thread.sleep(500) } catch (_: InterruptedException) { break }
             }
