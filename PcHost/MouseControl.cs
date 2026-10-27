@@ -124,26 +124,51 @@ internal static class MouseControl
 
     // ================= 触摸板手势支持 =================
 
-    /// <summary>垂直滚轮。notches &gt; 0 = 向上滚（内容跟着手指方向走）。</summary>
+    /// <summary>垂直滚轮（按格）。notches &gt; 0 = 向上滚。</summary>
     public static void Wheel(int notches)
     {
         if (notches == 0) return;
         SendWheel(MOUSEEVENTF_WHEEL, notches * WHEEL_DELTA);
     }
 
-    /// <summary>水平滚轮。</summary>
+    /// <summary>水平滚轮（按格）。</summary>
     public static void HWheel(int notches)
     {
         if (notches == 0) return;
         SendWheel(MOUSEEVENTF_HWHEEL, notches * WHEEL_DELTA);
     }
 
-    /// <summary>Ctrl + 滚轮 —— 绘图软件（PS/Krita）里就是缩放画布。</summary>
+    /// <summary>Ctrl + 滚轮（按格）—— 绘图软件（PS/Krita）里就是缩放画布。</summary>
     public static void CtrlWheel(int notches)
     {
         if (notches == 0) return;
         SendKey(VK_CONTROL, up: false);
         SendWheel(MOUSEEVENTF_WHEEL, notches * WHEEL_DELTA);
+        SendKey(VK_CONTROL, up: true);
+    }
+
+    // ---- 高分辨率（像素级）滚动：Windows 会当成触摸板的 pan 一样平滑滚动 ----
+
+    /// <summary>像素级纵向滚动。pixels &gt; 0 = 向上。</summary>
+    public static void WheelPixels(int pixels)
+    {
+        if (pixels == 0) return;
+        SendWheel(MOUSEEVENTF_WHEEL, pixels);
+    }
+
+    /// <summary>像素级横向滚动。</summary>
+    public static void HWheelPixels(int pixels)
+    {
+        if (pixels == 0) return;
+        SendWheel(MOUSEEVENTF_HWHEEL, pixels);
+    }
+
+    /// <summary>Ctrl + 像素级滚轮（缩放画布）。</summary>
+    public static void CtrlWheelPixels(int pixels)
+    {
+        if (pixels == 0) return;
+        SendKey(VK_CONTROL, up: false);
+        SendWheel(MOUSEEVENTF_WHEEL, pixels);
         SendKey(VK_CONTROL, up: true);
     }
 

@@ -38,10 +38,15 @@ public sealed class TcpPenServer : IDisposable
     private const int MOUSE_BACK = 8;
     private const int MOUSE_FORWARD = 9;
 
-    /// <summary>手指划过整个书写区高度 = 多少格滚轮。</summary>
-    private const double SCROLL_NOTCHES_PER_SCREEN = 30.0;
-    /// <summary>捏合放大 100% = 多少格 Ctrl+滚轮（绘图软件里即缩放画布）。</summary>
-    private const double ZOOM_NOTCHES_PER_FULL = 8.0;
+    /// <summary>
+    /// 手指划过整个书写区高度 = 滚动多少**像素**。
+    /// 用像素而不是「格」，是因为 Windows 对「非 120 倍数」的滚轮增量会按
+    /// 高分辨率滚动处理（和真实触摸板发出的 pan 一样），应用会平滑地按像素滚动，
+    /// 而不会像鼠标滚轮那样一格一格跳。
+    /// </summary>
+    private const double SCROLL_PIXELS_PER_SCREEN = 360.0;
+    /// <summary>捏合放大 100% ≈ 多少像素的 Ctrl+滚轮（绘图软件里即缩放画布）。</summary>
+    private const double ZOOM_PIXELS_PER_FULL = 220.0;
 
     private readonly TcpListener _listener;
     private readonly MappingConfig _cfg;
@@ -259,6 +264,20 @@ public sealed class TcpPenServer : IDisposable
     private int _zoomIgnored;
     private int _mouseLog;
 
+    /// <summary>
+    /// 把像素量转成「高分辨率滚轮」增量。
+    /// Windows 的规则：滚轮增量是 120 的整数倍 = 普通鼠标滚轮（一格一格跳）；
+    /// 不是整数倍 = 高分辨率设备（触摸板），应用会按像素平滑滚动。
+    /// 所以这里保证结果永远不是 120 的倍数。
+    /// </summary>
+    private static int PreciseDelta(double pixels)
+    {
+        int v = (int)Math.Round(pixels);
+        if (v == 0 && Math.Abs(pixels) >= 0.5) v = pixels > 0 ? 1 : -1;
+        if (v != 0 && v % 120 == 0) v += (v > 0 ? 1 : -1);
+        return v;
+    }
+
     /// <summary>鼠标帧：手指当触摸板（相对移动 / 左键 / 右键）。</summary>
     private void HandleMouse(byte[] p)
     {
@@ -286,12 +305,14 @@ public sealed class TcpPenServer : IDisposable
                 break;
             case MOUSE_SCROLL:
             {
-                // 手指上滑(dy<0) → 滚轮向上（内容跟着手指走）
-                int v = (int)Math.Round(-dy * SCROLL_NOTCHES_PER_SCREEN);
-                int h = (int)Math.Round(dx * SCROLL_NOTCHES_PER_SCREEN);
-                if (v != 0) MouseControl.Wheel(v);
-                if (h != 0) MouseControl.HWheel(h);
-                if (v != 0 || h != 0) AppLog.Info($"[Mouse] 滚动 v={v} h={h}");
+                // 手指上滑(dy<0) → 向上滚动（内容跟着手指走）
+                // 单位是**像素**：Windows 收到非 120 倍数的滚轮增量时，
+                // 会当成高分辨率滚动（触摸板那样平滑），而不是一格一格跳。
+                int v = PreciseDelta(-dy * SCROLL_PIXELS_PER_SCREEN);
+                int h = PreciseDelta(dx * SCROLL_PIXELS_PER_SCREEN);
+                if (v != 0) MouseControl.WheelPixels(v);
+                if (h != 0) MouseControl.HWheelPixels(h);
+                if (v != 0 || h != 0) AppLog.Info($"[Mouse] 滚动 v={v}px h={h}px");
                 break;
             }
             case MOUSE_ZOOM:
@@ -299,9 +320,9 @@ public sealed class TcpPenServer : IDisposable
                 // 捏合张开(factor>1) → Ctrl+滚轮向上 = 放大
                 // 手机端把缩放系数放在 dx 字段里
                 double factor = dx;
-                int n = (int)Math.Round((factor - 1.0) * ZOOM_NOTCHES_PER_FULL);
-                if (n != 0) MouseControl.CtrlWheel(n);
-                AppLog.Info($"[Mouse] 缩放 ×{factor:F3} → Ctrl+滚轮 {n}");
+                int n = PreciseDelta((factor - 1.0) * ZOOM_PIXELS_PER_FULL);
+                if (n != 0) MouseControl.CtrlWheelPixels(n);
+                AppLog.Info($"[Mouse] 缩放 ×{factor:F3} → Ctrl+滚轮 {n}px");
                 break;
             }
             case MOUSE_MIDDLE_CLICK:

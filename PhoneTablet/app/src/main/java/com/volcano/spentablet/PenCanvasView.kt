@@ -178,6 +178,10 @@ class PenCanvasView(context: Context) : View(context) {
     private var tpMoved = 0f
     private var tpSingleX = 0f
     private var tpSingleY = 0f
+    /** 当前压在屏幕上的手指数量（>=2 时光标不许动） */
+    private var tpActiveFingers = 0
+    /** 鼠标模式下 S Pen 是否处于按下状态 */
+    private var tpPenDown = false
 
     // ---- 诊断计数：index = toolType(0..4)，第二维 = down/move/up/hover ----
     private val counters = Array(5) { IntArray(4) }
@@ -251,6 +255,16 @@ class PenCanvasView(context: Context) : View(context) {
 
         for (i in 0 until n) {
             val tt = e.getToolType(i)
+
+            // 鼠标模式：多指手势进行中，S Pen 绝不能动光标
+            //（笔在屏幕上一碰，光标就会跑，非常干扰双指滚动/捏合）
+            if (workMode == Protocol.MODE_MOUSE && tpActiveFingers >= 2 && contact) {
+                if (tpPenDown) {
+                    onMouse?.invoke(Protocol.MOUSE_LEFT_UP, 0f, 0f)
+                    tpPenDown = false
+                }
+                continue
+            }
 
             // 手指：不绘制。用途由工作模式决定，两种模式互斥
             if (tt == MotionEvent.TOOL_TYPE_FINGER || tt == MotionEvent.TOOL_TYPE_MOUSE) {
@@ -345,6 +359,9 @@ class PenCanvasView(context: Context) : View(context) {
                 "${EvtDump.actionName(e.action)} ${EvtDump.toolName(tt)} " +
                         "p=${String.format("%.2f", pressure)} gain=${String.format("%.1f", pressureGain)}"
             )
+            if (workMode == Protocol.MODE_MOUSE) {
+                tpPenDown = (type == Protocol.TYPE_PEN_DOWN)
+            }
             listener?.invoke(type, nx, ny, pressure, tiltX, tiltY, buttons)
         }
     }
@@ -491,7 +508,10 @@ class PenCanvasView(context: Context) : View(context) {
         var maxX = -Float.MAX_VALUE
         var minY = Float.MAX_VALUE
         var maxY = -Float.MAX_VALUE
+        // 抬起的那根手指在事件里仍占一个位置，必须排除，否则质心/跨度都会算错
+        val lifting = if (action == MotionEvent.ACTION_POINTER_UP) e.actionIndex else -1
         for (i in 0 until e.pointerCount) {
+            if (i == lifting) continue
             val tt = e.getToolType(i)
             if (tt != MotionEvent.TOOL_TYPE_FINGER && tt != MotionEvent.TOOL_TYPE_MOUSE) continue
             val x = e.getX(i)
@@ -513,6 +533,7 @@ class PenCanvasView(context: Context) : View(context) {
 
         when (action) {
             MotionEvent.ACTION_DOWN -> {
+                tpActiveFingers = 1
                 tpMaxPointers = 1
                 tpStartX = cx
                 tpStartY = cy
@@ -526,13 +547,20 @@ class PenCanvasView(context: Context) : View(context) {
             }
 
             MotionEvent.ACTION_POINTER_DOWN -> {
+                tpActiveFingers = cnt
                 if (cnt > tpMaxPointers) tpMaxPointers = cnt
+                // 第二根手指落下 = 进入多点手势：光标停住，并把笔可能按住的左键松开
+                if (cnt == 2 && tpPenDown) {
+                    onMouse?.invoke(Protocol.MOUSE_LEFT_UP, 0f, 0f)
+                    tpPenDown = false
+                }
                 tpLastCx = cx
                 tpLastCy = cy
                 tpLastSpan = span
             }
 
             MotionEvent.ACTION_MOVE -> {
+                tpActiveFingers = cnt
                 if (cnt >= 2) {
                     val dCx = cx - tpLastCx
                     val dCy = cy - tpLastCy
@@ -579,6 +607,7 @@ class PenCanvasView(context: Context) : View(context) {
             }
 
             MotionEvent.ACTION_POINTER_UP -> {
+                tpActiveFingers = maxOf(0, cnt - 1)
                 // 从多指回到单指：重置单指基准，避免光标突然跳一下
                 tpSingleX = cx
                 tpSingleY = cy
@@ -588,6 +617,7 @@ class PenCanvasView(context: Context) : View(context) {
             }
 
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                tpActiveFingers = 0
                 val dur = android.os.SystemClock.uptimeMillis() - tpStartTime
                 val isTap = tpMoved < tapSlopPx * 1.5f && dur < TAP_TIMEOUT_MS
                 when {
