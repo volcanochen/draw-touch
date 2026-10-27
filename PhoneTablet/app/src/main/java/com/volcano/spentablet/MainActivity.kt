@@ -18,6 +18,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
+import android.widget.ScrollView
 import android.widget.TextView
 
 /**
@@ -39,6 +40,14 @@ class MainActivity : Activity() {
     private lateinit var panel: LinearLayout
     /** 设置面板里可折叠的正文部分（标题栏 status 始终可见，用它来展开/收起） */
     private lateinit var details: LinearLayout
+    private lateinit var topBar: LinearLayout
+    private lateinit var bottomBar: LinearLayout
+
+    /** 当前是否横屏（决定控制栏的紧凑度） */
+    private var landscape = false
+
+    /** 屏幕方向模式：0=跟随系统 1=强制横屏 2=强制竖屏 */
+    private var orientMode = 0
     private lateinit var prefs: SharedPreferences
     private lateinit var dbg: TextView
     private lateinit var canvas: PenCanvasView
@@ -63,6 +72,7 @@ class MainActivity : Activity() {
         port = prefs.getInt("port", Protocol.DEFAULT_PORT)
         aspectMode = prefs.getInt("aspect", Protocol.ASPECT_KEEP)
         workMode = prefs.getInt("mode", Protocol.MODE_TABLET)
+        orientMode = prefs.getInt("orient", 0)
 
         // 结构：FrameLayout 里放两层
         //   ① content —— 上控制栏(固定高) + 中间书写区(weight=1) + 下状态栏(固定高)
@@ -182,6 +192,7 @@ class MainActivity : Activity() {
         }
 
         val resetFrameBtn = Button(this).apply { text = "复位操作框（恢复整个书写区）" }
+        val orientBtn = Button(this).apply { text = orientText(0) }
         val pinchBtn = Button(this).apply { text = "模拟一次捏合（缩小 25%）" }
         val collapseBtn = Button(this).apply { text = "收起设置（回到书写）" }
 
@@ -222,6 +233,7 @@ class MainActivity : Activity() {
         details.addView(modeTitle)
         details.addView(modeGroup)
         details.addView(resetFrameBtn)
+        details.addView(orientBtn)
         details.addView(pinchBtn)
         details.addView(collapseBtn)
         details.addView(hoverBox)
@@ -234,6 +246,7 @@ class MainActivity : Activity() {
             setPadding(16, 10, 16, 6)
             setBackgroundColor(Color.parseColor("#E6222222"))
         }
+        this.topBar = topBar
         topBar.addView(status)
         topBar.addView(infoText)
         // index 0：上控制栏必须在画布**之前**，否则会被 weight=1 的画布挤到屏幕外
@@ -258,6 +271,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(0, 0, 0, 0)
         }
+        this.bottomBar = bottomBar
         bottomBar.addView(
             dbg,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -274,7 +288,12 @@ class MainActivity : Activity() {
         )
 
         // ---- 设置详情（浮层，默认收起）----
-        panel.addView(details)
+        // 横屏时屏幕只有 720 高，面板内容装不下 → 套一层 ScrollView 才够得着底部
+        val detailScroll = ScrollView(this).apply {
+            isFillViewport = true
+            addView(details)
+        }
+        panel.addView(detailScroll)
         root.addView(
             panel,
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
@@ -364,6 +383,12 @@ class MainActivity : Activity() {
             Log.i("SpenTablet", "操作框已复位")
         }
         collapseBtn.setOnClickListener { details.visibility = View.GONE }
+        orientBtn.setOnClickListener {
+            orientMode = (orientMode + 1) % 3
+            applyOrientationMode()
+            orientBtn.text = orientText(orientMode)
+            prefs.edit().putInt("orient", orientMode).apply()
+        }
         pinchBtn.setOnClickListener {
             canvas.simulatePinch(0.75f)
             Log.i("SpenTablet", "模拟捏合 → ${canvas.frameSummary()}")
@@ -376,6 +401,7 @@ class MainActivity : Activity() {
         plusBtn.setOnClickListener { setGain(canvas.pressureGain + 0.5f) }
 
         setContentView(root)
+        applyOrientationMode()
 
         net = NetClient(host, port) { helloFrame() }
         net.start()
@@ -411,6 +437,42 @@ class MainActivity : Activity() {
                 try { Thread.sleep(500) } catch (_: InterruptedException) { break }
             }
         }.start()
+    }
+
+    /**
+     * 屏幕旋转。manifest 声明了 configChanges，所以 Activity 不会被重建，
+     * TCP 连接不会断；画布尺寸变化会触发 onSizeChanged → 重发 HELLO → PC 重算等比映射。
+     * 这里只负责把控制栏压扁一点，把竖直空间让给书写区（横屏时屏幕只有 720 高）。
+     */
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val land = newConfig.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        if (land == landscape) return
+        landscape = land
+        infoText.setLines(if (land) 1 else 2)
+        dbg.setLines(if (land) 1 else 4)
+        topBar.setPadding(if (land) 12 else 16, if (land) 2 else 10, if (land) 12 else 16, if (land) 2 else 6)
+        infoText.text = "书写区 ${surfaceW().toInt()}×${surfaceH().toInt()}｜${canvas.frameSummary()}"
+    }
+
+    /** 方向按钮上的文字 */
+    private fun orientText(mode: Int) = when (mode) {
+        1 -> "屏幕方向：强制横屏（点此切换）"
+        2 -> "屏幕方向：强制竖屏（点此切换）"
+        else -> "屏幕方向：跟随系统（点此切换）"
+    }
+
+    /**
+     * 应用屏幕方向。
+     * 「跟随系统」= SCREEN_ORIENTATION_USER：系统锁了旋转就不转（尊重用户习惯），
+     * 「强制横/竖屏」= LANDSCAPE / PORTRAIT：不看传感器也不看系统旋转锁，直接锁定。
+     */
+    private fun applyOrientationMode() {
+        requestedOrientation = when (orientMode) {
+            1 -> android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            2 -> android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            else -> android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER
+        }
     }
 
     private fun setGain(v: Float) {
