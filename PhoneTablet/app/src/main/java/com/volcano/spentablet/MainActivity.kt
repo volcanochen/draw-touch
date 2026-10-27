@@ -39,12 +39,14 @@ class MainActivity : Activity() {
     private lateinit var portEdit: EditText
     private lateinit var topBar: LinearLayout
 
-    /** 主界面顶部左侧的连接状态点（绿=已连 红=未连） */
+    /** 主界面顶部左侧的连接状态点（绿=已连 红=未连），点击打开网络拓扑 */
     private lateinit var statusDot: View
     /** 方向切换图标按钮（主界面独立按钮） */
     private lateinit var rotateBtn: ImageButton
-    /** 连接状态（拓扑图）按钮 */
-    private lateinit var topologyBtn: ImageButton
+    /** 操作方式切换按钮：图标即当前模式（鼠标=触摸板 / 笔=数位板），点击切换 */
+    private lateinit var modeBtn: ImageButton
+    /** 使用指南（问号）按钮 */
+    private lateinit var helpBtn: ImageButton
     /** 设置（齿轮）按钮 */
     private lateinit var settingsBtn: ImageButton
 
@@ -74,7 +76,7 @@ class MainActivity : Activity() {
     /** 见 Protocol.ASPECT_* */
     private var aspectMode = Protocol.ASPECT_KEEP
     /** 见 Protocol.MODE_*：数位板（默认）/ 鼠标。决定手指的用途，两者互斥 */
-    private var workMode = Protocol.MODE_TABLET
+    private var workMode = Protocol.MODE_MOUSE
 
     /** PC 主机下发的 INFO：版本号 / 计算机名 / 候选 IP（拓扑图展示用） */
     private var pcVersion = "—"
@@ -92,7 +94,7 @@ class MainActivity : Activity() {
         host = prefs.getString("host", "127.0.0.1") ?: "127.0.0.1"
         port = prefs.getInt("port", Protocol.DEFAULT_PORT)
         aspectMode = prefs.getInt("aspect", Protocol.ASPECT_KEEP)
-        workMode = prefs.getInt("mode", Protocol.MODE_TABLET)
+        workMode = prefs.getInt("mode", Protocol.MODE_MOUSE) // 默认鼠标模式
         orientMode = prefs.getInt("orient", 0)
 
         // 结构：FrameLayout
@@ -136,6 +138,14 @@ class MainActivity : Activity() {
             text = "未连接（点此设置）"
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
+        // 操作方式切换按钮：图标即当前模式（鼠标 / 笔），点击切换（状态与按钮融合）
+        modeBtn = ImageButton(this).apply {
+            background = null
+            setPadding(8, 8, 8, 8)
+            layoutParams = LinearLayout.LayoutParams(dp(40), dp(40))
+            contentDescription = "操作方式"
+            setOnClickListener { cycleWorkMode() }
+        }
         rotateBtn = ImageButton(this).apply {
             setImageResource(R.drawable.ic_rotate)
             background = null
@@ -144,18 +154,13 @@ class MainActivity : Activity() {
             contentDescription = "屏幕方向"
             setOnClickListener { cycleOrientation() }
         }
-        val rotateCol = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            addView(rotateBtn)
-        }
-        topologyBtn = ImageButton(this).apply {
-            setImageResource(R.drawable.ic_topology)
+        helpBtn = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_help)
             background = null
             setPadding(8, 8, 8, 8)
             layoutParams = LinearLayout.LayoutParams(dp(40), dp(40))
-            contentDescription = "连接状态 / 网络拓扑"
-            setOnClickListener { openTopology() }
+            contentDescription = "使用指南"
+            setOnClickListener { showGuide() }
         }
         settingsBtn = ImageButton(this).apply {
             setImageResource(R.drawable.ic_settings)
@@ -167,10 +172,11 @@ class MainActivity : Activity() {
         }
         topRow.addView(statusDot)
         topRow.addView(status)
-        topRow.addView(rotateCol)
-        topRow.addView(topologyBtn)
+        topRow.addView(modeBtn)
+        topRow.addView(rotateBtn)
+        topRow.addView(helpBtn)
         topRow.addView(settingsBtn)
-        // 固定满宽：状态文字(weight=1)占中间，三个图标恒定右对齐
+        // 固定满宽：状态文字(weight=1)占中间，四个图标恒定右对齐
         topRow.layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         )
@@ -233,12 +239,13 @@ class MainActivity : Activity() {
             prefs.edit().putFloat("frameL", l).putFloat("frameT", t).putFloat("frameS", s).apply()
         }
 
-        status.setOnClickListener { openSettings() }
-        statusDot.setOnClickListener { openSettings() } // 绿点也可点开设置
+        status.setOnClickListener { openSettings() }             // 文字（未连接原因）→ 设置
+        statusDot.setOnClickListener { openTopology() }           // 绿/红点 → 网络拓扑
         doneBtn.setOnClickListener { closeSettings() }
 
         setContentView(root)
         applyOrientationMode()
+        updateModeBtn() // 模式按钮图标 = 当前模式
 
         net = NetClient(host, port) { helloFrame() }
         // 接收 PC 下发的 INFO（版本号 / 计算机名 / 候选 IP）
@@ -387,6 +394,33 @@ class MainActivity : Activity() {
         details.addView(gainText)
         details.addView(gainRow)
 
+        // ---------- 版本信息与更新 ----------
+        verText = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.parseColor("#FF999999"))
+            setPadding(0, dp(14), 0, 2)
+            text = versionLine()
+        }
+        val updateBtn = Button(this).apply { text = "检查更新（打开浏览器）" }
+        val homeBtn = Button(this).apply { text = "项目主页 / PC 端下载" }
+        updateBtn.setOnClickListener {
+            try {
+                startActivity(android.content.Intent(
+                    android.content.Intent.ACTION_VIEW,
+                    android.net.Uri.parse("https://github.com/volcanochen/drawing-phone/releases/latest")))
+            } catch (e: Throwable) { Log.w("SpenTablet", "打开浏览器失败: $e") }
+        }
+        homeBtn.setOnClickListener {
+            try {
+                startActivity(android.content.Intent(
+                    android.content.Intent.ACTION_VIEW,
+                    android.net.Uri.parse("https://github.com/volcanochen/drawing-phone")))
+            } catch (e: Throwable) { Log.w("SpenTablet", "打开浏览器失败: $e") }
+        }
+        details.addView(verText)
+        details.addView(updateBtn)
+        details.addView(homeBtn)
+
         hostEdit.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
@@ -435,12 +469,7 @@ class MainActivity : Activity() {
         }
         modeGroup.setOnCheckedChangeListener { _, id ->
             val m = if (id == radioMouse.id) Protocol.MODE_MOUSE else Protocol.MODE_TABLET
-            if (m == workMode) return@setOnCheckedChangeListener
-            workMode = m
-            canvas.workMode = m
-            prefs.edit().putInt("mode", m).apply()
-            net.send(Protocol.buildMode(m))
-            Log.i("SpenTablet", "切换工作模式 -> ${if (m == Protocol.MODE_MOUSE) "鼠标" else "数位板"}")
+            setWorkMode(m) // 与主界面模式按钮共用：同步图标 + 通知 PC
         }
         resetFrameBtn.setOnClickListener {
             canvas.resetFrame()
@@ -456,7 +485,18 @@ class MainActivity : Activity() {
     }
 
     // ---------- 设置页开关 ----------
+    /** 设置页底部的版本信息行（打开时刷新，PC 版本来自 INFO 帧） */
+    private lateinit var verText: TextView
+
+    private fun versionLine(): String {
+        val verName = try {
+            packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
+        } catch (_: Throwable) { "?" }
+        return "SpenTablet 手机端 v$verName｜PC 端 v$pcVersion（$pcName）"
+    }
+
     private fun openSettings() {
+        if (::verText.isInitialized) verText.text = versionLine()
         settingsPage.visibility = View.VISIBLE
     }
 
@@ -473,6 +513,73 @@ class MainActivity : Activity() {
     }
 
     // ---------- 屏幕方向（主界面图标按钮）----------
+    // ---------- 操作方式切换（主界面按钮，图标即状态）----------
+    /** 点击切换 鼠标(触摸板) ↔ 数位板，按钮图标同步 */
+    private fun cycleWorkMode() {
+        val m = if (workMode == Protocol.MODE_MOUSE) Protocol.MODE_TABLET else Protocol.MODE_MOUSE
+        setWorkMode(m)
+    }
+
+    private fun setWorkMode(m: Int) {
+        if (m == workMode) return
+        workMode = m
+        canvas.workMode = m
+        prefs.edit().putInt("mode", m).apply()
+        if (::net.isInitialized) net.send(Protocol.buildMode(m))
+        updateModeBtn()
+        Log.i("SpenTablet", "切换工作模式 -> ${if (m == Protocol.MODE_MOUSE) "鼠标" else "数位板"}")
+    }
+
+    /** 模式按钮图标 = 当前模式（状态与按钮融合） */
+    private fun updateModeBtn() {
+        val mouse = workMode == Protocol.MODE_MOUSE
+        modeBtn.setImageResource(if (mouse) R.drawable.ic_mouse else R.drawable.ic_pen)
+        modeBtn.contentDescription = if (mouse) "当前：鼠标模式（点击切换为数位板）"
+                                   else "当前：数位板模式（点击切换为鼠标）"
+    }
+
+    /** 问号按钮：操作控制指南（含 PC 端下载链接） */
+    private fun showGuide() {
+        val link = "https://github.com/volcanochen/drawing-phone/releases"
+        val html = """
+            <b>【自动连接（通常什么都不用做）】</b><br>
+            · PC 端启动后，打开本 App 就会<b>自动连上</b>（mDNS 自动发现）<br>
+            · 左上角 <b><font color="#33DD55">绿点</font></b> = 已连接，<b><font color="#FF4444">红点</font></b> = 未连接<br>
+            · 点左上角圆点可查看<b>网络拓扑</b>、切换桌面 PC<br><br>
+            <b>【需要手动操作的场合（很少）】</b><br>
+            · <b>切换到另一台 PC</b>：点绿点 → 「局域网里的桌面」点击切换<br>
+            · <b>自动发现失败</b>（路由器禁用组播等）：点齿轮 → 填 IP → 连接，<br>
+              　或用「扫描网段找 PC」；USB 数据线 + adb 转发时填 127.0.0.1<br><br>
+            <b>【鼠标模式（默认，手指=触摸板）】</b><br>
+            · 单指滑动 = 移动光标；单击 = 左键；双击 = 右键<br>
+            · 双指滑动 = 滚动；双指捏合 = 缩放（Ctrl+滚轮）<br>
+            · 双指点击 = 右键；三指点击 = 中键；三指左右滑 = 前进/后退<br><br>
+            <b>【数位板模式（S Pen 作画）】</b><br>
+            · 笔在橙色框内 = 在 PC 上作画（压感 / 倾斜）<br>
+            · 单指滑动 = 移动范围框；双指捏合 = 缩放范围框<br>
+            · 框可以拖到任意显示器（含多屏）<br><br>
+            <b>【屏幕方向】</b>循环按钮：陀螺仪全向 / 横屏双朝向 / 竖屏双朝向<br><br>
+            <b>【PC 端下载】</b>（点击打开）：<br>
+            <a href="$link">$link</a>
+        """.trimIndent()
+        val tv = TextView(this).apply {
+            text = if (android.os.Build.VERSION.SDK_INT >= 24)
+                android.text.Html.fromHtml(html, android.text.Html.FROM_HTML_MODE_LEGACY)
+            else @Suppress("DEPRECATION") android.text.Html.fromHtml(html)
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setLinkTextColor(Color.parseColor("#66CCFF"))
+            movementMethod = android.text.method.LinkMovementMethod.getInstance()
+            setPadding(dp(20), dp(12), dp(20), dp(12))
+        }
+        val scroll = android.widget.ScrollView(this).apply { addView(tv) }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("使用指南")
+            .setView(scroll)
+            .setPositiveButton("知道了", null)
+            .show()
+    }
+
     private fun cycleOrientation() {
         orientMode = (orientMode + 1) % 3
         applyOrientationMode()
