@@ -69,9 +69,16 @@ object NetworkScan {
         Thread {
             var found: String? = null
             try {
+                // 关键：**排除本机自己的 IP**。
+                // 手机自己的 RNDIS 地址（比如 10.136.80.31）和 PC 是同一网段，
+                // 不排除的话会先「找到」自己 → 连自己 → Connection refused，白折腾。
+                val self = localIpv4().map { it.first }.toSet()
                 for (base in candidateSubnets()) {
                     val prefix = base.substringBeforeLast('.')
-                    val pool = (1..254).map { "$prefix.$it" }
+                    val pool = (1..254)
+                        .map { "$prefix.$it" }
+                        .filterNot { self.contains(it) }
+                    if (pool.isEmpty()) continue
                     found = scanPool(pool, port, timeoutMs)
                     if (found != null) break
                 }
