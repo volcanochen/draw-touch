@@ -23,6 +23,14 @@ namespace SpenTabletHost;
 /// </summary>
 public sealed class NoteOverlay : IDisposable
 {
+    /// <summary>
+    /// GDI+ 全局锁。GDI+（System.Drawing）**不是线程安全的**：
+    /// 截图线程（TcpPenServer：CopyFromScreen / PNG 编码）与这里的绘制线程并发调用 GDI+，
+    /// 偶发会把 GDI+ 内部状态写坏 → AccessViolation / 参数无效，进程直接消失且不留 WER 报告。
+    /// 截图与画笔迹这两条最重的 GDI+ 路径都拿这把锁，串行化之后就稳了。
+    /// </summary>
+    internal static readonly object GdiLock = new();
+
     private Thread? _thread;
     private OverlayForm? _form;
     private readonly ManualResetEventSlim _ready = new(false);
@@ -55,6 +63,8 @@ public sealed class NoteOverlay : IDisposable
         public readonly List<Stroke> Strokes = new();
         public readonly Pen Pen = new(Presets[0], 3.5f)
         { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round };
+        /// <summary>单点笔迹的实心圆（不直接用 Pen.Brush：那个属性每次取都会新建 GDI 笔刷，画多了会句柄泄漏）</summary>
+        private readonly SolidBrush DotBrush = new(Presets[0]);
         /// <summary>当前笔迹颜色（新起一笔时采用；已有笔画的颜色不变）</summary>
         public Color CurrentColor = Presets[0];
 
@@ -141,34 +151,48 @@ public sealed class NoteOverlay : IDisposable
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            // 窗口原点可能是负数（虚拟屏幕左/上边界），绘制前换算到客户区坐标
-            float ox = -Left;
-            float oy = -Top;
-            // 每笔用**自己的颜色**画（换色不会把已画的笔一起改掉）
-            foreach (var s in Strokes)
+            // 绘制异常绝不能抛出去：这里是消息循环线程，抛出去就是整个进程消失
+            try
             {
-                if (s.Points.Count == 0) continue;
-                Pen.Color = s.Color;
-                if (s.Points.Count == 1)
+                lock (GdiLock)
                 {
-                    var p = s.Points[0];
-                    e.Graphics.FillEllipse(Pen.Brush, ox + p.X - 2.5f, oy + p.Y - 2.5f, 5, 5);
-                }
-                else
-                {
-                    var pts = new PointF[s.Points.Count];
-                    for (int i = 0; i < s.Points.Count; i++)
-                        pts[i] = new PointF(ox + s.Points[i].X, oy + s.Points[i].Y);
-                    e.Graphics.DrawLines(Pen, pts);
+                    e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                    // 窗口原点可能是负数（虚拟屏幕左/上边界），绘制前换算到客户区坐标
+                    float ox = -Left;
+                    float oy = -Top;
+                    // 每笔用**自己的颜色**画（换色不会把已画的笔一起改掉）
+                    foreach (var s in Strokes)
+                    {
+                        if (s.Points.Count == 0) continue;
+                        Pen.Color = s.Color;
+                        if (s.Points.Count == 1)
+                        {
+                            var p = s.Points[0];
+                            DotBrush.Color = s.Color;
+                            e.Graphics.FillEllipse(DotBrush, ox + p.X - 2.5f, oy + p.Y - 2.5f, 5, 5);
+                        }
+                        else
+                        {
+                            var pts = new PointF[s.Points.Count];
+                            for (int i = 0; i < s.Points.Count; i++)
+                                pts[i] = new PointF(ox + s.Points[i].X, oy + s.Points[i].Y);
+                            e.Graphics.DrawLines(Pen, pts);
+                        }
+                    }
+                    Pen.Color = CurrentColor;
                 }
             }
-            Pen.Color = CurrentColor;
+            catch (Exception ex)
+            {
+                // 偶发一次就记一次，但不让它炸进程
+                AppLog.Error($"[NoteOverlay] 绘制异常：{ex.GetType().Name} {ex.Message}\n{ex.StackTrace}");
+            }
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             Pen.Dispose();
+            DotBrush.Dispose();
             base.OnFormClosed(e);
         }
     }
@@ -197,7 +221,19 @@ public sealed class NoteOverlay : IDisposable
         {
             var f = _form;
             if (f == null || f.IsDisposed || !f.IsHandleCreated) return;
-            try { f.BeginInvoke(() => a(f)); } catch { }
+            try
+            {
+                // 回调在消息循环线程上执行：里面再抛异常就是「进程悄悄消失」，必须兜住
+                f.BeginInvoke(() =>
+                {
+                    try { a(f); }
+                    catch (Exception ex)
+                    {
+                        AppLog.Error($"[NoteOverlay] 回调异常：{ex.GetType().Name} {ex.Message}\n{ex.StackTrace}");
+                    }
+                });
+            }
+            catch { }
         }
     }
 

@@ -82,18 +82,26 @@ internal sealed class RegionFrame : Form
         {
             BeginInvoke((Action)(() =>
             {
-                if (!show)
+                try
                 {
-                    if (Visible) Visible = false;
-                    return;
+                    if (!show)
+                    {
+                        if (Visible) Visible = false;
+                        return;
+                    }
+                    if (r.w > 0 && r.h > 0)
+                    {
+                        Bounds = new Rectangle(r.x, r.y, r.w, r.h);
+                        _lbl.Text = $"S Pen 操作范围 {r.w}×{r.h}  ×{cfg.Scale:0.##}" +
+                                    "（单指滑动=移动，双指捏合=缩放）";
+                    }
+                    if (!Visible) Visible = true;
                 }
-                if (r.w > 0 && r.h > 0)
+                catch (Exception ex)
                 {
-                    Bounds = new Rectangle(r.x, r.y, r.w, r.h);
-                    _lbl.Text = $"S Pen 操作范围 {r.w}×{r.h}  ×{cfg.Scale:0.##}" +
-                                "（单指滑动=移动，双指捏合=缩放）";
+                    // 范围框刷新失败不该炸掉整个进程（平移每秒几十次）
+                    AppLog.Error($"[RegionFrame] 刷新异常：{ex.GetType().Name} {ex.Message}");
                 }
-                if (!Visible) Visible = true;
             }));
         }
         catch { }

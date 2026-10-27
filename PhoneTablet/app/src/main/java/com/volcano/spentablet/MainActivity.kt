@@ -77,6 +77,12 @@ class MainActivity : Activity() {
     /** 当前是否横屏（决定控制栏的紧凑度） */
     private var landscape = false
 
+    /**
+     * 顶部任务栏**固定**高度(dp)：竖屏 56 / 横屏 44。
+     * 与滚轮条的 topMargin=56dp 对齐；绝不能随状态文字内容变化（用户明确要求过）。
+     */
+    private fun topBarHeightDp() = if (landscape) 44 else 56
+
     /** 屏幕方向模式：0=跟随陀螺仪(四向) 1=横屏(双向陀螺仪) 2=竖屏(双向陀螺仪) */
     private var orientMode = 0
     private lateinit var prefs: SharedPreferences
@@ -155,6 +161,9 @@ class MainActivity : Activity() {
             textSize = 14f
             setTextColor(Color.WHITE)
             text = "未连接（点此设置）"
+            // 单行 + 省略号：错误信息再长也不许把顶栏撑高（书写区尺寸一变，PC 端映射就跟着重算）
+            setSingleLine(true)
+            ellipsize = android.text.TextUtils.TruncateAt.END
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
         // 操作方式切换按钮：图标即当前模式（鼠标 / 笔），点击切换（状态与按钮融合）
@@ -203,9 +212,11 @@ class MainActivity : Activity() {
         // 顶部栏只有一行：状态点 + 图标按钮。原来的书写区信息行 / 底部调试栏已移除，
         // 这些调试信息改为后台定量循环写入文件（见 DebugLog）。
         topBar.addView(topRow)
+        // 高度**写死**（竖屏 56dp / 横屏 44dp）：以前 WRAP_CONTENT，状态文字一换行/变空，
+        // 顶栏就跟着变高变矮，书写区尺寸抖动 → PC 端宽高比重算 → 范围框跳一下。
         content.addView(
             topBar, 0,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(topBarHeightDp()))
         )
 
         // ---------- 独立设置页（默认隐藏）----------
@@ -458,10 +469,10 @@ class MainActivity : Activity() {
         details.addView(minusPlus("速度", { canvas.cursorSpeed }, {
             canvas.cursorSpeed = it; prefs.edit().putFloat("tpSpeed", it).apply()
         }, 0.1f, 0.2f, 3.0f))
-        details.addView(tpTitle("滚动比例"))
+        details.addView(tpTitle("滚动比例（0.2 ~ 30）"))
         details.addView(minusPlus("滚动", { canvas.scrollScale }, {
             canvas.scrollScale = it; prefs.edit().putFloat("tpScroll", it).apply()
-        }, 0.2f, 0.2f, 5.0f))
+        }, 0.5f, 0.2f, 30.0f))
 
         details.addView(tpTitle("触摸板手势（点击切换动作）"))
         fun gestureRow(name: String, key: String, def: Int, allowed: IntArray): Button =
@@ -474,11 +485,14 @@ class MainActivity : Activity() {
             }
         // 可配置动作：点击类（含音量/任务切换这类"按一下"的动作）
         val tapActions = intArrayOf(0, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14)
+        // 滑动类（左右滑）：8=后退/前进（按方向二选一），其余动作一次滑动触发一次
+        val swipeActions = intArrayOf(0, 8, 6, 7, 3, 4, 5, 9, 10, 11, 12, 13, 14)
         details.addView(gestureRow("双指滑动", "g2Swipe", 1, intArrayOf(0, 1, 2)))
         details.addView(gestureRow("双指捏合", "g2Pinch", 2, intArrayOf(0, 1, 2, 10, 11, 12, 13, 14)))
         details.addView(gestureRow("双指点击", "g2Tap", 4, tapActions))
         details.addView(gestureRow("三指点击", "g3Tap", 5, tapActions))
-        details.addView(gestureRow("三指左右滑", "g3Swipe", 8, intArrayOf(0, 8, 9)))
+        details.addView(gestureRow("三指左右滑", "g3Swipe", 8, swipeActions))
+        details.addView(gestureRow("四指左右滑", "g4Swipe", 0, swipeActions))
         details.addView(gestureRow("四指点击", "g4Tap", 9, intArrayOf(0, 9)))
 
         details.addView(tpTitle("右侧滚轮条"))
@@ -714,7 +728,7 @@ class MainActivity : Activity() {
             · 笔在橙色框内 = 在 PC 上作画（压感 / 倾斜）<br>
             · 单指滑动 = 移动范围框；双指捏合 = 缩放范围框<br>
             · 框可以拖到任意显示器（含多屏）<br>
-            · 底部浮动圆钮：<b>备注</b>（笔迹画在桌面固定位置，换色只影响之后的笔）/ <b>撤销</b>（点击撤一笔、长按清空）/ <b>捕获</b>（桌面框内容设为手机画布背景，可继续在上面画，再点清除）<br>
+            · 底部浮动圆钮：<b>备注</b>（笔迹画在桌面固定位置，换色只影响之后的笔，手机与桌面同步）/ <b>撤销</b>（点击撤一笔、长按清空）/ <b>$shotBtnLabel</b>（捕获：桌面框内容设为手机画布背景，可继续在上面画；再点完成恢复）<br>
             · 左侧浮出色板 = 选择备注笔迹颜色<br><br>
             <b>【屏幕方向】</b>循环按钮：陀螺仪全向 / 横屏双朝向 / 竖屏双朝向<br><br>
             <b>【PC 端下载】</b>（点击打开）：<br>
@@ -777,6 +791,11 @@ class MainActivity : Activity() {
         if (land == landscape) return
         landscape = land
         topBar.setPadding(if (land) 12 else 16, if (land) 2 else 10, if (land) 12 else 16, if (land) 2 else 6)
+        // 顶栏高度跟着方向换到另一档固定值（不随文字变化）
+        (topBar.layoutParams as? LinearLayout.LayoutParams)?.let {
+            it.height = dp(topBarHeightDp())
+            topBar.layoutParams = it
+        }
         DebugLog.write("[orient] ${if (land) "横屏" else "竖屏"}｜书写区 ${surfaceW().toInt()}x${surfaceH().toInt()}｜${canvas.frameSummary()}")
     }
 
@@ -891,19 +910,35 @@ class MainActivity : Activity() {
     /** 抬手瞬间的滚动速度（归一化/16ms） */
     private var wheelVel = 0f
     private val inertiaHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    /** 惯性开始时刻（用于硬性限时） */
+    private var inertiaStartAt = 0L
+    /** 本轮惯性的停止阈值（按起始速度比例算，甩多快都在同样时间内停） */
+    private var inertiaStopVel = 0.0006f
+
     private val inertiaTask = object : Runnable {
         override fun run() {
-            if (!wheelInertia || kotlin.math.abs(wheelVel) < 0.0002f) return
+            // 三个条件任一满足即停：关掉无极滚动 / 超过最长时长 / 速度掉到阈值以下。
+            // 以前只有 0.92 的衰减 + 极小阈值，甩一下要滚 1 秒多，手感像"不按停就一直滚"。
+            if (!wheelInertia) { stopInertia(); return }
+            val now = android.os.SystemClock.uptimeMillis()
+            if (now - inertiaStartAt > inertiaMaxMs ||
+                kotlin.math.abs(wheelVel) < inertiaStopVel) {
+                wheelVel = 0f
+                return
+            }
             canvas.sendWheel(wheelVel)
-            wheelVel *= 0.92f          // 每帧衰减，像触摸板惯性滚动一样慢慢停下
-            inertiaHandler.postDelayed(this, 16)
+            wheelVel *= inertiaDecay       // 每帧衰减（0.86：约 0.3 秒内滑停）
+            inertiaHandler.postDelayed(this, inertiaTickMs)
         }
     }
 
     private fun startInertia() {
         wheelVel *= wheelMomentum.coerceIn(0.2f, 3.0f)
+        // 起始速度越大，停止阈值按比例抬高 → 惯性时长与甩动幅度基本无关
+        inertiaStopVel = maxOf(0.0006f, kotlin.math.abs(wheelVel) * 0.04f)
+        inertiaStartAt = android.os.SystemClock.uptimeMillis()
         inertiaHandler.removeCallbacks(inertiaTask)
-        inertiaHandler.postDelayed(inertiaTask, 16)
+        inertiaHandler.postDelayed(inertiaTask, inertiaTickMs)
     }
 
     private fun stopInertia() {
@@ -1032,6 +1067,8 @@ class MainActivity : Activity() {
             visibility = View.GONE
         }
         noteColorIdx = prefs.getInt("noteColor", 0).coerceIn(0, noteColors.lastIndex)
+        // 手机屏上画的笔迹也用同一个颜色（落笔时锁定，之后换色不影响已画的笔）
+        canvas.strokeColor = noteColors[noteColorIdx]
         repeat(noteColors.size) { i ->
             val swatch = View(this).apply {
                 layoutParams = LinearLayout.LayoutParams(dp(26), dp(26)).apply {
@@ -1063,6 +1100,8 @@ class MainActivity : Activity() {
             }
         }
         prefs.edit().putInt("noteColor", idx).apply()
+        // 手机端本地笔迹同步换色（只影响之后落的新笔），并下发索引给 PC 端叠加层
+        canvas.strokeColor = noteColors[idx]
         if (::net.isInitialized) net.send(Protocol.buildNote(Protocol.NOTE_COLOR, idx.toFloat()))
         DebugLog.write("[note] 笔迹颜色 → 预设 #$idx")
     }
@@ -1083,12 +1122,12 @@ class MainActivity : Activity() {
         DebugLog.write("[note] ${if (on) "开启" else "关闭"}")
     }
 
-    /** 截图按钮状态机：捕获 → 清空 → 捕获…（捕获期间锁定范围框） */
+    /** 截图按钮状态机：捕获 → 完成 → 捕获…（捕获期间锁定范围框） */
     private fun onShotButton() {
         if (!shotCaptured) {
             if (::net.isInitialized) net.send(Protocol.buildShotReq())
             canvas.frameLocked = true
-            shotBtn.text = "清空"
+            shotBtn.text = "完成"
             shotCaptured = true
         } else {
             closeShot()
@@ -1119,14 +1158,24 @@ class MainActivity : Activity() {
         }
     }
 
+    /** 指南/其它文案里描述捕获按钮的当前名称 */
+    private val shotBtnLabel: String get() = if (shotCaptured) "完成" else "捕获"
+
     // ================= 触摸板配置（速度/滚动/手势/颜色）=================
     /** 无极滚动：抬手后按动量继续滚（双击右侧滚轮条切换） */
     private var wheelInertia = false
-    /** 无极滚动的动量倍率（越大惯性越久） */
+    /** 无极滚动的动量倍率（越大惯性滑得越远） */
     private var wheelMomentum = 1.0f
 
+    /** 惯性每帧衰减系数（越小停得越快） */
+    private val inertiaDecay = 0.86f
+    /** 惯性滑动的调度间隔(ms) */
+    private val inertiaTickMs = 16L
+    /** 惯性最长时长(ms)：到点无条件停，杜绝长尾滚动 */
+    private val inertiaMaxMs = 600L
+
     private fun applyTrackpadPrefs() {
-        // 默认值迁移：老版本装过的机器把旧的 1.0/1.0 升到新默认（1.5 / 3.0），只做一次
+        // 默认值迁移（只做一次）：tpDefaults2 → 速度 1.5 / 滚动 3.0；tpDefaults3 → 滚动上限放宽后默认 5.0
         if (!prefs.getBoolean("tpDefaults2", false)) {
             prefs.edit()
                 .putBoolean("tpDefaults2", true)
@@ -1134,8 +1183,14 @@ class MainActivity : Activity() {
                 .putFloat("tpScroll", 3.0f)
                 .apply()
         }
+        if (!prefs.getBoolean("tpDefaults3", false)) {
+            prefs.edit()
+                .putBoolean("tpDefaults3", true)
+                .putFloat("tpScroll", 5.0f)
+                .apply()
+        }
         canvas.cursorSpeed = prefs.getFloat("tpSpeed", 1.5f)
-        canvas.scrollScale = prefs.getFloat("tpScroll", 3.0f)
+        canvas.scrollScale = prefs.getFloat("tpScroll", 5.0f)
         canvas.trackpadColor = prefs.getInt("tpColor", 0xFF20242B.toInt())
         canvas.g2Swipe = prefs.getInt("g2Swipe", 1)
         canvas.g2Pinch = prefs.getInt("g2Pinch", 2)

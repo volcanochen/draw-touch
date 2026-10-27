@@ -45,6 +45,22 @@ internal static class Program
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
 
+        // ---- WinForms UI 线程异常：必须接住，否则就是「进程悄悄消失」----
+        // 托盘程序没有控制台，NoteOverlay / RegionFrame / TrayApp 这些 UI 线程上的异常
+        // 默认会弹一个「未处理的异常」对话框（后台线程上甚至直接退出），
+        // 而且这里若不注册 Application.ThreadException，日志里**一个字都不会有**，
+        // 事后既没有 WER 报告也没有转储，根本没法查。注册后：记日志 + 继续跑。
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) =>
+        {
+            var ex = e.Exception;
+            AppLog.Error($"[UI线程异常] {ex.GetType().FullName}: {ex.Message}\n{ex.StackTrace}");
+            if (ex.InnerException != null)
+                AppLog.Error($"[UI线程异常·内层] {ex.InnerException.GetType().FullName}: {ex.InnerException.Message}\n{ex.InnerException.StackTrace}");
+        };
+        // 进程退出轨迹：留下「是正常退出还是被外力终止」的证据（崩溃排查时能省掉一大圈猜测）
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => AppLog.Info("[Host] 进程退出（ProcessExit，属正常/托管退出）");
+
         var cfg = ConfigStore.Load();
         cfg.ResolveVirtualScreen();
 

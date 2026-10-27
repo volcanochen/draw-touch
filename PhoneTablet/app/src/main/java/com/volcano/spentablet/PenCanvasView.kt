@@ -122,6 +122,12 @@ class PenCanvasView(context: Context) : View(context) {
     /** 触摸板区域背景色 */
     var trackpadColor: Int = 0xFF20242B.toInt()
 
+    /**
+     * 手机屏上本地笔迹的颜色。落笔（DOWN）时取当时的值写进 paint，
+     * 所以换色只影响**之后的新笔**，已经画好的笔保留各自的颜色 —— 与 PC 端一致。
+     */
+    var strokeColor: Int = Color.BLACK
+
     // ---- 手势动作映射（槽位 → 动作码）----
     // 动作码：0=无 1=滚轮 2=缩放 3=左键 4=右键 5=中键 6=后退 7=前进 8=后退/前进(方向) 9=切换模式
     var g2Swipe: Int = 1   // 双指滑动：滚轮
@@ -236,6 +242,8 @@ class PenCanvasView(context: Context) : View(context) {
     private var tpFingerId = -1
     /** 捏合型一次性动作（音量/任务切换）的上次触发时间，用于节流 */
     private var lastPinchActionAt = 0L
+    /** 滑动型一次性动作（三指/四指左右滑）的上次触发时间，用于节流 */
+    private var lastSwipeActionAt = 0L
 
     // ---- 诊断计数：index = toolType(0..4)，第二维 = down/move/up/hover ----
     private val counters = Array(5) { IntArray(4) }
@@ -415,6 +423,8 @@ class PenCanvasView(context: Context) : View(context) {
                 if (workMode == Protocol.MODE_TABLET) {
                     when (type) {
                         Protocol.TYPE_PEN_DOWN -> {
+                            // 每一笔落笔时锁定当前颜色：这一笔整条都用这个颜色画
+                            paint.color = strokeColor
                             lastX = x; lastY = y; hasLast = true
                             canvas?.drawPoint(x, y, paint)
                         }
@@ -548,6 +558,21 @@ class PenCanvasView(context: Context) : View(context) {
             13 -> onMouse?.invoke(Protocol.MOUSE_TASK_NEXT, 0f, 0f)
             14 -> onMouse?.invoke(Protocol.MOUSE_TASK_PREV, 0f, 0f)
         }
+    }
+
+    /**
+     * 左右滑动专用分发：back = 手指向右滑。
+     * 动作 8「后退/前进」按滑动方向二选一；6/7 是固定方向；其余动作交给 [dispatchAction]。
+     */
+    private fun dispatchSwipe(code: Int, tag: String, back: Boolean) {
+        when (code) {
+            8 -> onMouse?.invoke(
+                if (back) Protocol.MOUSE_BACK else Protocol.MOUSE_FORWARD, 0f, 0f)
+            6 -> onMouse?.invoke(Protocol.MOUSE_BACK, 0f, 0f)
+            7 -> onMouse?.invoke(Protocol.MOUSE_FORWARD, 0f, 0f)
+            else -> dispatchAction(code, tag)
+        }
+        onDebug?.invoke("$tag${if (back) "（向右）" else "（向左）"} → ${actionName(code)}")
     }
 
     /** 捏合专用分发：factor 是本次的相对缩放量（>1 张开 / <1 捏拢） */
@@ -702,28 +727,27 @@ class PenCanvasView(context: Context) : View(context) {
                     val dSpan = span - tpLastSpan
                     tpMoved += kotlin.math.abs(dCx) + kotlin.math.abs(dCy) + kotlin.math.abs(dSpan)
                     if (cnt >= 4) {
-                        // 四指滑动（可配置动作）
+                        // 四指左右滑（可配置动作）
                         val totalDx = cx - tpStartX
-                        if (g4Swipe == 8 && kotlin.math.abs(totalDx) > SWIPE_PX &&
+                        if (g4Swipe != 0 && kotlin.math.abs(totalDx) > SWIPE_PX &&
                             kotlin.math.abs(cy - tpStartY) < SWIPE_PX) {
-                            val back = totalDx > 0
-                            onMouse?.invoke(
-                                if (back) Protocol.MOUSE_BACK else Protocol.MOUSE_FORWARD, 0f, 0f)
+                            val now = android.os.SystemClock.uptimeMillis()
+                            if (now - lastSwipeActionAt > SWIPE_ACTION_COOLDOWN_MS) {
+                                lastSwipeActionAt = now
+                                dispatchSwipe(g4Swipe, "四指滑动", totalDx > 0)
+                            }
                             tpStartX = cx
                         }
-                        // 其它四指滑动动作当前不实现
                     } else if (cnt == 3) {
-                        // 三指左右滑（可配置动作）
+                        // 三指左右滑（可配置动作：后退/前进、切换模式、音量、任务切换……）
                         val totalDx = cx - tpStartX
-                        if (g3Swipe == 8 && kotlin.math.abs(totalDx) > SWIPE_PX &&
+                        if (g3Swipe != 0 && kotlin.math.abs(totalDx) > SWIPE_PX &&
                             kotlin.math.abs(cy - tpStartY) < SWIPE_PX) {
-                            val back = totalDx > 0
-                            onMouse?.invoke(
-                                if (back) Protocol.MOUSE_BACK else Protocol.MOUSE_FORWARD, 0f, 0f)
-                            tpStartX = cx
-                        } else if (g3Swipe == 9 && kotlin.math.abs(totalDx) > SWIPE_PX &&
-                            kotlin.math.abs(cy - tpStartY) < SWIPE_PX) {
-                            onSwitchMode?.invoke()
+                            val now = android.os.SystemClock.uptimeMillis()
+                            if (now - lastSwipeActionAt > SWIPE_ACTION_COOLDOWN_MS) {
+                                lastSwipeActionAt = now
+                                dispatchSwipe(g3Swipe, "三指滑动", totalDx > 0)
+                            }
                             tpStartX = cx
                         }
                     } else {
@@ -856,5 +880,7 @@ class PenCanvasView(context: Context) : View(context) {
         private const val PINCH_REL = 0.12f
         /** 捏合触发一次性动作（音量/任务切换等）的冷却时间(ms) */
         private const val PINCH_ACTION_COOLDOWN_MS = 320L
+        /** 左右滑动触发一次性动作的冷却时间(ms)：一次滑动只触发一次，不会连发 */
+        private const val SWIPE_ACTION_COOLDOWN_MS = 450L
     }
 }

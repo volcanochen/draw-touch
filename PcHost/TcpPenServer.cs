@@ -379,22 +379,28 @@ public sealed class TcpPenServer : IDisposable
         {
             var r = _cfg.GetActiveRect();
             int w = Math.Max(1, r.w), h = Math.Max(1, r.h);
-            using var bmp = new System.Drawing.Bitmap(w, h);
-            using (var g = System.Drawing.Graphics.FromImage(bmp))
+            byte[] png;
+            // GDI+ 非线程安全：截图（CopyFromScreen / PNG 编码）必须与备注叠加层的绘制串行化，
+            // 否则两条线程并发用 GDI+ 偶发写坏内部状态 → 进程无提示消失（曾经的「捕获后崩溃」）
+            lock (NoteOverlay.GdiLock)
             {
-                g.CopyFromScreen(r.x, r.y, 0, 0, new System.Drawing.Size(w, h));
+                using var bmp = new System.Drawing.Bitmap(w, h);
+                using (var g = System.Drawing.Graphics.FromImage(bmp))
+                {
+                    g.CopyFromScreen(r.x, r.y, 0, 0, new System.Drawing.Size(w, h));
+                }
+                // 缩到宽 ≤720 再编码，减小传输量
+                System.Drawing.Bitmap send = bmp;
+                if (w > 720)
+                {
+                    int nh = Math.Max(1, h * 720 / w);
+                    send = new System.Drawing.Bitmap(bmp, 720, nh);
+                }
+                using var ms = new MemoryStream();
+                send.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+                png = ms.ToArray();
+                if (!ReferenceEquals(send, bmp)) send.Dispose();
             }
-            // 缩到宽 ≤720 再编码，减小传输量
-            System.Drawing.Bitmap send = bmp;
-            if (w > 720)
-            {
-                int nh = Math.Max(1, h * 720 / w);
-                send = new System.Drawing.Bitmap(bmp, 720, nh);
-            }
-            using var ms = new MemoryStream();
-            send.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
-            var png = ms.ToArray();
-            if (!ReferenceEquals(send, bmp)) send.Dispose();
             SendShot(ns, png);
             AppLog.Info($"[Shot] 截取范围框 ({r.x},{r.y}) {w}×{h} → PNG {png.Length}B 已下发");
         }
