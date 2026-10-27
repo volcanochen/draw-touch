@@ -18,6 +18,10 @@ public sealed class NicInfo
     public string Prefix = "";       // 掩码长度
     public bool IsUp = false;
     public bool IsLoopback = false;
+    /// <summary>无线网卡（WiFi）。手机开热点时，PC 连热点的这张网卡才是手机端该填的 IP。</summary>
+    public bool IsWifi = false;
+    /// <summary>有没有默认网关（手机热点的网关就是手机本身，可用来确认"PC 正连着热点"）。</summary>
+    public bool HasGateway = false;
     /// <summary>看起来像 USB 网络共享 / 热点网段（192.168.42.x / 192.168.43.x）</summary>
     public bool LooksLikeTether => IPv4.StartsWith("192.168.42.") || IPv4.StartsWith("192.168.43.");
 
@@ -50,7 +54,8 @@ public sealed class NicInfo
         {
             string d = (Description ?? "") + " " + (Name ?? "");
             string[] junk = { "Tunnel", "VPN", "OpenVPN", "TAP-Windows", "Wintun", "Hyper-V",
-                              "VirtualBox", "Host-Only", "vEthernet", "Bluetooth", "Loopback" };
+                              "VirtualBox", "Host-Only", "vEthernet", "Bluetooth", "Loopback",
+                              "Tailscale", "ZeroTier", "WireGuard", "vgate", "tun0", "tap0" };
             foreach (var k in junk)
                 if (d.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0) return true;
             return false;
@@ -84,6 +89,8 @@ internal static class NetInfo
                         IPv4 = ua.Address.ToString(),
                         Prefix = ua.PrefixLength.ToString(),
                         IsUp = props.GatewayAddresses.Count > 0 || ni.OperationalStatus == OperationalStatus.Up,
+                        IsWifi = ni.NetworkInterfaceType == NetworkInterfaceType.Wireless80211,
+                        HasGateway = props.GatewayAddresses.Count > 0,
                     });
                 }
             }
@@ -97,8 +104,9 @@ internal static class NetInfo
 
     /// <summary>
     /// 手机端该填的 PC IP。
-    /// 优先级：① 真正的 RNDIS/USB 网络共享网卡 ② 192.168.42/43 段 ③ 其它在用的、非虚拟的网卡。
-    /// 之前只按 192.168.42/43 判断，会把 VPN 虚拟网卡（vgate0）当成答案，必须修。
+    /// 优先级：① USB 网络共享（RNDIS）网卡 ② 192.168.42/43 热点段
+    /// ③ PC 连接的 WiFi 热点网卡（在用 + 有网关 + 非虚拟）④ 其它非虚拟网卡。
+    /// 场景覆盖：USB 共享、手机开热点 PC 连 WiFi、PC 与手机同连家里路由器。
     /// </summary>
     public static string GuessTetheringIp()
     {
@@ -110,6 +118,10 @@ internal static class NetInfo
         var tether = ips.FirstOrDefault(i => i.LooksLikeTether && i.IsUp)
                     ?? ips.FirstOrDefault(i => i.LooksLikeTether);
         if (tether != null) return tether.IPv4;
+
+        // 手机开热点、PC 用 WiFi 连上去：这张无线网卡在用且有网关（网关即手机）
+        var wifi = ips.FirstOrDefault(i => i.IsWifi && i.IsUp && i.HasGateway && !i.IsVirtual);
+        if (wifi != null) return wifi.IPv4;
 
         var any = ips.FirstOrDefault(i => i.IsUp && !i.IsVirtual);
         if (any != null) return any.IPv4;
@@ -123,6 +135,8 @@ internal static class NetInfo
         var ips = ListIps();
         var rndis = ips.FirstOrDefault(i => i.IsUsbTether && i.IsUp);
         if (rndis != null) return $"来自「{rndis.Name}」（{rndis.Description}）—— 这就是 USB 网络共享的网卡";
+        var wifi = ips.FirstOrDefault(i => i.IsWifi && i.IsUp && i.HasGateway && !i.IsVirtual);
+        if (wifi != null) return $"来自「{wifi.Name}」（WiFi）—— PC 正通过 WiFi 连接，手机开热点/同一 WiFi 时填这个";
         var any = ips.FirstOrDefault(i => i.IsUp && !i.IsVirtual);
         if (any != null) return $"来自「{any.Name}」—— 若用 USB 网络共享，请确认手机已开启共享并拔插一次 USB";
         return "未检测到在用的网卡";
@@ -146,6 +160,7 @@ internal static class NetInfo
             $"{i.IPv4,-16} {i.Name}" +
             (i.IsUsbTether ? "  ← USB 网络共享，手机端填这个" :
              i.LooksLikeTether ? "  ← 热点网段，手机端填这个" :
+             i.IsWifi && i.IsUp && i.HasGateway && !i.IsVirtual ? "  ← WiFi 在用（手机热点/同一 WiFi），手机端填这个" :
              i.IsVirtual ? "  （虚拟网卡/隧道，手机端不能用）" : "")).ToList();
     }
 
