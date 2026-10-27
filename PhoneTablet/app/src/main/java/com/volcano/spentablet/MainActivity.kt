@@ -846,30 +846,38 @@ class MainActivity : Activity() {
                     }
                     wheelLastDownAt = now
                     stopInertia()
+                    // 速度追踪：无极滚动以**手指离开当下**的速度为基础继续滚
+                    wheelVelocity?.recycle()
+                    wheelVelocity = android.view.VelocityTracker.obtain()
+                    wheelVelocity?.addMovement(ev)
                     v.tag = ev.y
-                    wheelLastY = ev.y
-                    wheelLastT = now
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
+                    wheelVelocity?.addMovement(ev)
                     val last = (v.tag as? Float) ?: ev.y
                     val dy = ev.y - last
                     v.tag = ev.y
                     if (canvas.height > 0) {
                         canvas.sendWheel(dy / canvas.height)
                         strip.scrollBy(dy)      // 横纹跟着手指走，像真的滚轮
-                        // 记录抬手瞬间的速度（用于无极滚动的惯性）
-                        val now = android.os.SystemClock.uptimeMillis()
-                        val dt = (now - wheelLastT).coerceAtLeast(1)
-                        wheelVel = (ev.y - wheelLastY) / canvas.height.toFloat() * (16f / dt)
-                        wheelLastY = ev.y
-                        wheelLastT = now
                     }
                     true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    // 无极滚动：抬手后按动量继续滚，逐渐衰减停下
-                    if (wheelInertia && kotlin.math.abs(wheelVel) > 0.0008f) startInertia()
+                    // 抬手瞬间用 VelocityTracker 取**最近 100ms** 的滑动速度——
+                    // 以前用「最后一次 MOVE 事件的瞬时差」，手指最后一下的位移经常丢，
+                    // 甩得快慢和惯性对不上。现在初始速度就是离开当下的真实速度。
+                    wheelVelocity?.addMovement(ev)
+                    wheelVelocity?.computeCurrentVelocity(1000)   // 单位：px / 秒
+                    val vy = wheelVelocity?.yVelocity ?: 0f
+                    wheelVelocity?.recycle()
+                    wheelVelocity = null
+                    if (canvas.height > 0) {
+                        // 归一化为「每 16ms 滚过的书写区高度」，并封顶防止暴力一甩滚飞
+                        wheelVel = (vy / canvas.height * 0.016f).coerceIn(-0.2f, 0.2f)
+                        if (wheelInertia && kotlin.math.abs(wheelVel) > 0.0005f) startInertia()
+                    }
                     true
                 }
                 else -> true
@@ -903,8 +911,8 @@ class MainActivity : Activity() {
 
     // ---- 无极滚动（惯性）----
     private var wheelLastDownAt = 0L
-    private var wheelLastY = 0f
-    private var wheelLastT = 0L
+    /** 滚轮条的速度追踪器：抬手瞬间取最近 100ms 的真实滑动速度，作为惯性初速 */
+    private var wheelVelocity: android.view.VelocityTracker? = null
     /** 抬手瞬间的滚动速度（归一化/16ms） */
     private var wheelVel = 0f
     private val inertiaHandler = android.os.Handler(android.os.Looper.getMainLooper())
