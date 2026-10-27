@@ -52,6 +52,7 @@ public sealed class TcpPenServer : IDisposable
     private readonly MappingConfig _cfg;
     private readonly IInjector _injector;
     private CancellationTokenSource? _cts;
+    private MdnsAdvertiser? _mdns;
 
     /// <summary>各类型帧计数，用于控制台周期性汇报（确认链路是否真的在跑）。</summary>
     public long CountDown, CountMove, CountUp, CountHover, CountNoop;
@@ -60,6 +61,9 @@ public sealed class TcpPenServer : IDisposable
 
     /// <summary>每收到一帧并映射成 PenSample 后回调（用于调试浮窗）。</summary>
     public Action<PenSample>? OnSample { get; set; }
+
+    /// <summary>mDNS 广播状态（配置窗口展示：手机端能否自动发现本机）。</summary>
+    public string MdnsStatus => _mdns?.Status ?? "未启动";
 
     public TcpPenServer(MappingConfig cfg, IInjector injector)
     {
@@ -74,6 +78,17 @@ public sealed class TcpPenServer : IDisposable
         _listener.Start();
         Console.WriteLine($"[Server] 监听端口 {_cfg.ListenPort}，等待手机连接（adb reverse tcp:{0} tcp:{0} 或填 PC IP）", _cfg.ListenPort);
         _ = AcceptLoop(_cts.Token);
+
+        // mDNS 广播：手机端自动发现本机，免手填 IP
+        try
+        {
+            _mdns = new MdnsAdvertiser(_cfg.ListenPort);
+            _mdns.Start();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[Server] mDNS 广播启动失败（不影响手动填 IP 连接）：{ex.Message}");
+        }
     }
 
     private async Task AcceptLoop(CancellationToken token)
@@ -419,6 +434,7 @@ public sealed class TcpPenServer : IDisposable
     public void Dispose()
     {
         _cts?.Cancel();
+        try { _mdns?.Dispose(); } catch { }
         try { _listener.Stop(); } catch { }
         _cts?.Dispose();
     }

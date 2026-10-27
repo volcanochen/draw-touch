@@ -103,6 +103,37 @@ internal static class NetInfo
     }
 
     /// <summary>
+    /// 本机**可被手机访问**的 IPv4 候选列表（按优先级排序）。
+    ///
+    /// mDNS 广告必须只包含真实网卡地址：默认的 GetLinkLocalAddresses() 会把
+    /// VPN/隧道虚拟网卡（vgate0 等）一起广告出去，手机解析到虚拟地址就永远连不上。
+    ///
+    /// 优先级：① USB 网络共享（RNDIS）② 192.168.42/43 热点段
+    /// ③ WiFi（在用 + 有网关 + 非虚拟）④ 其它非虚拟网卡。
+    /// </summary>
+    public static List<string> ConnectionCandidates()
+    {
+        var ips = ListIps()
+            .Where(i => !i.IsVirtual)
+            .Where(i => !i.IPv4.StartsWith("169.254.") && !i.IPv4.StartsWith("127."))
+            .ToList();
+
+        int Rank(NicInfo i)
+        {
+            if (i.IsUsbTether) return 0;                                   // USB 网络共享
+            if (i.LooksLikeTether) return 1;                                // 常见热点网段
+            if (i.IsWifi && i.IsUp && i.HasGateway) return 2;               // WiFi（热点 / 同一路由器）
+            if (i.IsUp) return 3;                                          // 其它在用的网卡
+            return 4;
+        }
+
+        return ips.OrderBy(Rank)
+                   .Select(i => i.IPv4)
+                   .Distinct()
+                   .ToList();
+    }
+
+    /// <summary>
     /// 手机端该填的 PC IP。
     /// 优先级：① USB 网络共享（RNDIS）网卡 ② 192.168.42/43 热点段
     /// ③ PC 连接的 WiFi 热点网卡（在用 + 有网关 + 非虚拟）④ 其它非虚拟网卡。
@@ -130,8 +161,7 @@ internal static class NetInfo
     }
 
     /// <summary>当前推荐的手机端 IP 是不是来自 RNDIS 网卡（UI 上可以据此给提示）。</summary>
-    public static string TetherHint()
-    {
+    public static string TetherHint()    {
         var ips = ListIps();
         var rndis = ips.FirstOrDefault(i => i.IsUsbTether && i.IsUp);
         if (rndis != null) return $"来自「{rndis.Name}」（{rndis.Description}）—— 这就是 USB 网络共享的网卡";

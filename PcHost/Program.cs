@@ -9,6 +9,20 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        // 托盘程序没有控制台，任何未捕获异常都会让进程**静默消失**（表现为"主机自己关了"）。
+        // 这里统一兜住并写日志，方便定位（mDNS / 网络线程最容易出这种问题）。
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            var ex = e.ExceptionObject as Exception;
+            AppLog.Error($"未捕获异常（IsTerminating={e.IsTerminating}）：{ex?.GetType().Name} {ex?.Message}");
+            if (ex != null) AppLog.Error(ex.StackTrace ?? "");
+        };
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            AppLog.Error($"未观察到的任务异常：{e.Exception.GetType().Name} {e.Exception.Message}");
+            e.SetObserved();
+        };
+
         // --config：启动后直接打开设置窗口（方便双击排障，也方便截图核对界面）
         bool openConfig = args != null && args.Any(a =>
             a.Equals("--config", StringComparison.OrdinalIgnoreCase) ||

@@ -397,6 +397,7 @@ internal sealed class ConfigForm : Form
         _lblNet.Text = "手机端要填的 PC IP：" +
                        (string.IsNullOrEmpty(tether) ? "（未检测到）" : tether) + "\n" +
                        "　" + NetInfo.TetherHint() + "\n" +
+                       "局域网自动发现（mDNS）：" + _server.MdnsStatus + "\n" +
                        $"防火墙入站端口 {_cfg.ListenPort}：{(fw ? "已放行 ✓" : "未放行 ✗（点上面「允许防火墙」）")}";
 
         // 注意：WinForms 的 TextBox 只认 \r\n 换行，用 \n 会全部挤在一行里

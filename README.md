@@ -140,10 +140,12 @@ SpenTablet/
 │       ├── java/com/volcano/spentablet/
 │       │   ├── Protocol.kt        # 二进制帧编解码
 │       │   ├── NetClient.kt       # TCP 长连接 + 自动重连
+│       │   ├── MdnsDiscovery.kt   # mDNS/NSD 自动发现 PC
+│       │   ├── NetworkScan.kt     # 兜底：扫描网段找 PC
 │       │   ├── PenCanvasView.kt   # S Pen 捕获 + 手机屏画轨迹
 │       │   └── MainActivity.kt    # 界面/连接/设置
 │       └── res/values/strings.xml
-└── PcHost/                 # PC 端（.NET 8，纯 Win32 P/Invoke，无 NuGet 依赖）
+└── PcHost/                 # PC 端（.NET 8，Win32 P/Invoke + mDNS 广播库）
     ├── SpenTabletHost.csproj
     ├── Program.cs          # 托盘常驻入口
     ├── TrayApp.cs          # 系统托盘 + 右键菜单
@@ -151,6 +153,7 @@ SpenTablet/
     ├── PenInjector.cs      # 合成笔注入 + 鼠标回退
     ├── MouseControl.cs     # 鼠标模式：光标移动/左键/右键
     ├── TcpPenServer.cs     # TCP 帧解析
+    ├── MdnsAdvertiser.cs   # mDNS 广播 _spentablet._tcp（手机端自动发现）
     ├── MappingConfig.cs    # 坐标映射/等比/范围框/工作模式
     ├── RegionFrame.cs      # 桌面操作范围框（可穿透点击）
     ├── NetInfo.cs          # 网卡枚举 / USB网络共享网卡识别 / 防火墙规则
@@ -201,9 +204,29 @@ gradlew.bat assembleDebug        # 需要先有 gradle wrapper；没有就直接
 
 > 没有 `gradlew`？在 Android Studio 里打开工程会自动生成；或用 `gradle wrapper` 生成。
 
-### 3) 连接（三种方式）
+### 3) 连接（推荐：mDNS 自动发现，零配置）
 
-**方式 A · USB + ADB 转发（默认，最稳）**
+**方式 0 · mDNS 自动发现（推荐，不用填 IP）**
+
+PC 端启动后会自动在局域网广播 `_spentablet._tcp` 服务，手机端用 Android 原生
+NSD（mDNS/DNS-SD）自动搜索 —— 和 Weylus、ZeroLink 等成熟方案是同一套机制。
+
+1. PC 上启动 `SpenTabletHost`（托盘图标出现即可）。
+2. 手机上打开 App，**什么都不用填**，它会自动发现 PC 并连上；
+   状态条变成「已连接 …」即成功。
+
+多点几台 PC 时会弹出列表让你选；也可以在设置面板里点「**发现 PC（mDNS 自动，推荐）**」手动触发。
+
+实现要点：
+- PC 端 `PcHost/MdnsAdvertiser.cs`（基于 `Makaretu.Dns.Multicast`），只广告**真实网卡**地址 ——
+  默认行为会把 VPN/隧道虚拟网卡也报出去，手机解析到虚拟地址就永远连不上。
+- 全部候选地址写进 mDNS 的 **TXT 属性 `ips`**（如 `ips=10.136.80.209,192.168.50.73`），
+  手机端逐个 TCP 探测，第一个能连上的就是真正走通的那条路
+  （PC 可能同时开着 USB 共享和 WiFi，手机只能走其中一条）。
+- 前提：**手机与 PC 必须在同一广播域**（同一路由器 / 手机开热点 / USB 网络共享）。
+  某些企业 WiFi 禁止组播，mDNS 会发现不到，这时退回下面的方式 B / C。
+
+**方式 A · USB + ADB 转发（延迟最低）**
 ```bat
 adb reverse tcp:6000 tcp:6000
 ```
@@ -216,10 +239,11 @@ adb reverse tcp:6000 tcp:6000
    弹出 UAC 时点「是」。不放开行的话，Windows 会**静默丢弃**入站连接，
    手机端表现为「连接超时」而不是「连接被拒绝」。
 2. **抄 IP**：同一个配置窗口顶部「手机端要填的 PC IP」就是答案，
-   下面还会写明它来自哪张网卡（本机实测：`以太网 2 / SAMSUNG Mobile USB Remote NDIS Network Device #2` → `10.136.80.112`）。
+   下面还会写明它来自哪张网卡（本机实测：`以太网 2 / SAMSUNG Mobile USB Remote NDIS Network Device #2` → `10.136.80.209`）。
    也可以点「复制 IP」直接复制。
 3. 手机端填这个 IP + 端口 6000 → 「连接」。
-   懒得找 IP 的话，手机端直接点「**自动查找 PC**」，它会扫本机各网卡的同网段、找出开着该端口的电脑并自动填好。
+   懒得找 IP 的话，手机端直接点「**发现 PC（mDNS 自动）**」（自动）；或点「**扫描网段找 PC（备用）**」，
+   它会扫本机各网卡的同网段、找出开着该端口的电脑并自动填好。
 
 > 注意：各家手机的 USB 共享网段不一样（可能是 `10.136.80.x`、`192.168.42.x`、`192.168.43.x`……），
 > 所以别照抄网上的固定 IP，以 PC 端显示的为准。

@@ -53,6 +53,13 @@ class MainActivity : Activity() {
     private lateinit var canvas: PenCanvasView
     private lateinit var gainText: TextView
     private lateinit var infoText: TextView
+    /** 设置面板里的 IP 提示行（mDNS 发现结果也显示在这里） */
+    private lateinit var ipText: TextView
+    /** 「发现 PC（mDNS 自动）」按钮 */
+    private lateinit var discoverBtn: Button
+
+    /** mDNS 自动发现：已经用发现结果连过 PC，避免反复切换目标 */
+    private var mdnsConnected = false
 
     private var host = "127.0.0.1"
     private var port = Protocol.DEFAULT_PORT
@@ -138,8 +145,9 @@ class MainActivity : Activity() {
         rowHost.addView(portEdit, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
         val connectBtn = Button(this).apply { text = "连接" }
-        val findBtn = Button(this).apply { text = "自动查找 PC（USB 网络共享用）" }
-        val ipText = TextView(this).apply {
+        val findBtn = Button(this).apply { text = "扫描网段找 PC（备用）" }
+        discoverBtn = Button(this).apply { text = "发现 PC（mDNS 自动，推荐）" }
+        ipText = TextView(this).apply {
             textSize = 12f
             setTextColor(Color.parseColor("#FFBBBBBB"))
             setPadding(0, 4, 0, 4)
@@ -226,6 +234,7 @@ class MainActivity : Activity() {
 
         details.addView(rowHost)
         details.addView(connectBtn)
+        details.addView(discoverBtn)
         details.addView(findBtn)
         details.addView(ipText)
         details.addView(aspectTitle)
@@ -341,7 +350,7 @@ class MainActivity : Activity() {
             NetworkScan.findHost(port) { found ->
                 runOnUiThread {
                     findBtn.isEnabled = true
-                    findBtn.text = "自动查找 PC（USB 网络共享用）"
+                    findBtn.text = "扫描网段找 PC（备用）"
                     if (found != null) {
                         host = found
                         hostEdit.setText(found)
@@ -356,6 +365,12 @@ class MainActivity : Activity() {
                     }
                 }
             }
+        }
+        discoverBtn.setOnClickListener {
+            discoverBtn.isEnabled = false
+            discoverBtn.text = "正在搜索局域网中的 PC…"
+            ipText.text = "mDNS 搜索中…（PC 上需已启动 SpenTabletHost）"
+            startMdnsDiscovery(manual = true)
         }
         connectBtn.setOnClickListener {
             port = portEdit.text?.toString()?.toIntOrNull() ?: Protocol.DEFAULT_PORT
@@ -405,6 +420,9 @@ class MainActivity : Activity() {
 
         net = NetClient(host, port) { helloFrame() }
         net.start()
+
+        // 开机静默 mDNS 发现：找到唯一一台 PC 且当前没连上 → 直接连上，用户零操作
+        startMdnsDiscovery(manual = false)
 
         Thread {
             while (alive) {
@@ -498,6 +516,101 @@ class MainActivity : Activity() {
             canvas.frameLeft, canvas.frameTop, canvas.frameScale
         )
 
+    /**
+     * mDNS 自动发现 PC。
+     *
+     * @param manual true = 用户点了「发现 PC」按钮（找到多台时弹列表让用户选）
+     *               false = 启动时的静默发现（找到唯一一台且当前未连接 → 直接连上）
+     */
+    private fun startMdnsDiscovery(manual: Boolean) {
+        MdnsDiscovery.start(this, object : MdnsDiscovery.Listener {
+            override fun onServicesChanged(list: List<MdnsDiscovery.Found>) {
+                runOnUiThread {
+                    if (list.isEmpty()) {
+                        if (manual) ipText.text = "没发现 PC。\n请确认 PC 上 SpenTabletHost 已启动，且手机与 PC 在同一网络（热点/同一 WiFi）。"
+                        return@runOnUiThread
+                    }
+                    if (manual) {
+                        // 多台时让用户选；只有一台就直接连
+                        discoverBtn.isEnabled = true
+                        discoverBtn.text = "发现 PC（mDNS 自动，推荐）"
+                        if (list.size == 1) {
+                            connectToPc(list[0], "mDNS 发现")
+                        } else {
+                            showPcChooser(list)
+                        }
+                    } else if (!mdnsConnected && (!::net.isInitialized || !net.connected)) {
+                        mdnsConnected = true
+                        connectToPc(list[0], "mDNS 自动发现")
+                    }
+                }
+            }
+
+            override fun onError(message: String) {
+                runOnUiThread {
+                    if (manual) {
+                        discoverBtn.isEnabled = true
+                        discoverBtn.text = "发现 PC（mDNS 自动，推荐）"
+                        ipText.text = "mDNS 自动发现不可用：$message\n可改用「扫描网段找 PC」。"
+                    }
+                }
+            }
+        })
+    }
+
+    /** 弹列表让用户选择要连的 PC */
+    private fun showPcChooser(list: List<MdnsDiscovery.Found>) {
+        val names = list.map { it.label }.toTypedArray()
+        android.app.AlertDialog.Builder(this)
+            .setTitle("选择要连接的电脑")
+            .setItems(names) { _, which -> connectToPc(list[which], "mDNS 发现") }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 连到发现到的 PC：候选地址逐个探测 → 填 IP/端口 → 记 prefs → 重连 */
+    private fun connectToPc(f: MdnsDiscovery.Found, tag: String) {
+        val candidates = f.candidates.ifEmpty { listOf(f.host) }
+        // 探测要走网络，不能卡 UI 线程
+        Thread {
+            // PC 可能同时开着 USB 共享和 WiFi，手机只能走其中一条 → 逐个试，第一个能连上的就是对的
+            var picked: String? = null
+            for (c in candidates) {
+                if (probeTcp(c, f.port)) {
+                    picked = c
+                    break
+                }
+                Log.i("SpenTablet", "$tag 候选 $c:${f.port} 连不上，换下一个")
+            }
+            val target = picked ?: candidates.first()
+            runOnUiThread {
+                host = target
+                port = f.port
+                hostEdit.setText(target)
+                portEdit.setText(f.port.toString())
+                prefs.edit().putString("host", target).putInt("port", f.port).apply()
+                ipText.text = if (picked != null) {
+                    "${tag}：${f.serviceName}\n$target:${f.port} 可达，正在连接…"
+                } else {
+                    "${tag}：${f.serviceName}\n候选 ${candidates.joinToString("、")} 都连不上，" +
+                            "仍尝试 $target:${f.port}"
+                }
+                Log.i("SpenTablet", "$tag → ${f.serviceName} $target:${f.port}")
+                restartNet()
+            }
+        }.apply { isDaemon = true }.start()
+    }
+
+    /** 快速 TCP 探测：这个地址能不能连上 PC 的端口 */
+    private fun probeTcp(hostStr: String, portNum: Int, timeoutMs: Int = 1200): Boolean = try {
+        java.net.Socket().use {
+            it.connect(java.net.InetSocketAddress(hostStr, portNum), timeoutMs)
+            true
+        }
+    } catch (e: Throwable) {
+        false
+    }
+
     private fun restartNet() {
         if (::net.isInitialized) net.stop()
         net = NetClient(host, port) { helloFrame() }
@@ -507,6 +620,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         alive = false
+        MdnsDiscovery.stop()
         if (::net.isInitialized) net.stop()
         super.onDestroy()
     }
