@@ -45,6 +45,11 @@ public sealed class TcpPenServer : IDisposable
     private const int MOUSE_MIDDLE_CLICK = 7;
     private const int MOUSE_BACK = 8;
     private const int MOUSE_FORWARD = 9;
+    private const int MOUSE_VOL_UP = 10;      // 音量 +
+    private const int MOUSE_VOL_DOWN = 11;     // 音量 -
+    private const int MOUSE_VOL_MUTE = 12;    // 静音
+    private const int MOUSE_TASK_NEXT = 13;   // 任务切换 Alt+Tab
+    private const int MOUSE_TASK_PREV = 14;   // 任务反向切换 Alt+Shift+Tab
 
     /// <summary>
     /// 手指划过整个书写区高度 = 滚动多少**像素**。
@@ -514,6 +519,26 @@ public sealed class TcpPenServer : IDisposable
             case MOUSE_FORWARD:
                 MouseControl.Forward();
                 AppLog.Info("[Mouse] 前进");
+                break;
+            case MOUSE_VOL_UP:
+                MouseControl.VolumeUp();
+                AppLog.Info("[Mouse] 音量 +");
+                break;
+            case MOUSE_VOL_DOWN:
+                MouseControl.VolumeDown();
+                AppLog.Info("[Mouse] 音量 -");
+                break;
+            case MOUSE_VOL_MUTE:
+                MouseControl.VolumeMute();
+                AppLog.Info("[Mouse] 静音");
+                break;
+            case MOUSE_TASK_NEXT:
+                MouseControl.TaskSwitch(back: false);
+                AppLog.Info("[Mouse] 任务切换 Alt+Tab");
+                break;
+            case MOUSE_TASK_PREV:
+                MouseControl.TaskSwitch(back: true);
+                AppLog.Info("[Mouse] 任务切换 Alt+Shift+Tab");
                 break;
             default:
                 break;

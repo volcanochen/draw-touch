@@ -36,6 +36,12 @@ internal static class MouseControl
     private const int VK_CONTROL = 0x11;
     private const int VK_BROWSER_BACK = 0xA6;
     private const int VK_BROWSER_FORWARD = 0xA7;
+    private const int VK_VOLUME_MUTE = 0xAD;
+    private const int VK_VOLUME_DOWN = 0xAE;
+    private const int VK_VOLUME_UP = 0xAF;
+    private const int VK_MENU = 0x12;      // Alt
+    private const int VK_SHIFT = 0x10;
+    private const int VK_TAB = 0x09;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct MOUSEINPUT
@@ -182,6 +188,28 @@ internal static class MouseControl
     public static void Back() => TapKey(VK_BROWSER_BACK);
 
     public static void Forward() => TapKey(VK_BROWSER_FORWARD);
+
+    // ---- 系统级快捷键：音量 / 静音 / 任务切换 ----
+
+    public static void VolumeUp() => TapKey(VK_VOLUME_UP);
+
+    public static void VolumeDown() => TapKey(VK_VOLUME_DOWN);
+
+    public static void VolumeMute() => TapKey(VK_VOLUME_MUTE);
+
+    /// <summary>
+    /// 任务切换 Alt+Tab：按住 Alt 不放，敲一下 Tab 再松开 Alt —— 与系统 Alt+Tab 一致。
+    /// back=true 时按 Alt+Shift+Tab（往回切）。
+    /// </summary>
+    public static void TaskSwitch(bool back = false)
+    {
+        if (back) SendKey(VK_SHIFT, up: false);
+        SendKey(VK_MENU, up: false);        // Alt
+        SendKey(VK_TAB, up: false);
+        SendKey(VK_TAB, up: true);
+        SendKey(VK_MENU, up: true);
+        if (back) SendKey(VK_SHIFT, up: true);
+    }
 
     private static void SendWheel(uint flag, int delta)
     {

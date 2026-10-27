@@ -9,13 +9,16 @@ namespace SpenTabletHost;
 
 /// <summary>
 /// 桌面笔迹叠加层（屏幕备注）：一个透明、置顶、鼠标穿透的窗口，
-/// 把手机 S Pen 的笔迹画在**桌面操作范围框内**（与数位板绘制逻辑一致：
-/// 笔坐标本来就是相对操作框归一的，框缩放/移动时笔迹跟着走）。
+/// 把手机 S Pen 的笔迹画在桌面上。
+///
+/// 坐标处理：笔坐标是相对操作框归一的，AddPoint 时按**当时的范围框**换算成
+/// 绝对屏幕坐标并固定存下来 —— 之后框再缩放/移动，已有笔迹都留在原处、不被拉伸。
+///
+/// 颜色：**每一笔**各自记录落笔时的颜色（换色只影响之后的新笔画，已画的笔不变色）。
+/// 颜色索引由手机端左侧色板选择后下发。
 ///
 /// 覆盖整块虚拟屏幕（多屏也能画）。在自己的 STA 线程上跑消息循环，
 /// 外部通过 Post 异步调用（AddPoint 高频写入不阻塞 TCP 线程）。
-///
-/// 笔迹颜色由**手机端**左侧的浮出色板选择（索引随 NOTE 帧下发），PC 只负责按索引换色。
 /// 笔迹层本身是鼠标穿透的（不接收点击，也不打扰当前应用）。
 /// </summary>
 public sealed class NoteOverlay : IDisposable
@@ -37,14 +40,25 @@ public sealed class NoteOverlay : IDisposable
         Color.FromArgb(250, 250, 250),  // 6 白
     };
 
+    /// <summary>一笔笔迹：落笔时的颜色 + 一串绝对屏幕坐标点</summary>
+    private sealed class Stroke
+    {
+        public Color Color;
+        public readonly List<PointF> Points = new();
+        public Stroke(Color c) => Color = c;
+    }
+
     private sealed class OverlayForm : Form
     {
-        // 每一笔 = 一串点，存**范围框内的归一化坐标**（绘制时才乘当前框矩形 → 笔迹永远跟着框）
-        public readonly List<List<PointF>> Strokes = new();
+        // 每一笔 = 一串**绝对屏幕坐标**（落笔时按当时的范围框换算并固定下来，
+        // 之后框缩放/移动都不再影响它 —— 笔迹留在桌面原处）
+        public readonly List<Stroke> Strokes = new();
         public readonly Pen Pen = new(Presets[0], 3.5f)
         { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round };
+        /// <summary>当前笔迹颜色（新起一笔时采用；已有笔画的颜色不变）</summary>
+        public Color CurrentColor = Presets[0];
 
-        /// <summary>当前桌面范围框（虚拟屏幕坐标）。由 TCP 线程每次派发前同步。</summary>
+        /// <summary>当前桌面范围框（虚拟屏幕坐标），仅用于把归一化笔坐标换算成绝对坐标。</summary>
         public int Rx, Ry, Rw = 1920, Rh = 1080;
 
         public OverlayForm()
@@ -80,29 +94,31 @@ public sealed class NoteOverlay : IDisposable
 
         public void SetRect(int x, int y, int w, int h)
         {
-            if (x == Rx && y == Ry && w == Rw && h == Rh) return;
             Rx = x; Ry = y; Rw = Math.Max(1, w); Rh = Math.Max(1, h);
-            if (Strokes.Count > 0) Invalidate();  // 框动了 → 已有笔迹跟着重绘
+            // 已有笔迹存的是绝对坐标，框变化不需要重绘（笔迹留在原处）
         }
 
+        /// <summary>切换「之后新笔画」的颜色；已画好的笔画保持各自的颜色。</summary>
         public void SetColor(Color c)
         {
+            CurrentColor = c;
             Pen.Color = c;
-            Invalidate();
         }
 
         public void AddPoint(float nx, float ny, PenState st)
         {
+            // 归一化笔坐标 → 绝对屏幕坐标（按落笔时刻的范围框换算一次，之后固定不变）
+            var pt = new PointF(Rx + nx * Rw, Ry + ny * Rh);
             switch (st)
             {
                 case PenState.Down:
-                    Strokes.Add(new List<PointF> { new(nx, ny) });
+                    Strokes.Add(new Stroke(CurrentColor) { Points = { pt } });
                     break;
                 case PenState.Move:
-                    if (Strokes.Count > 0) Strokes[^1].Add(new PointF(nx, ny));
+                    if (Strokes.Count > 0) Strokes[^1].Points.Add(pt);
                     break;
                 case PenState.Up:
-                    if (Strokes.Count > 0 && Strokes[^1].Count == 1) Strokes[^1].Add(new PointF(nx, ny)); // 单点笔迹也可见
+                    if (Strokes.Count > 0 && Strokes[^1].Points.Count == 1) Strokes[^1].Points.Add(pt); // 单点笔迹也可见
                     Invalidate();
                     return;
                 default:
@@ -127,24 +143,27 @@ public sealed class NoteOverlay : IDisposable
             base.OnPaint(e);
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             // 窗口原点可能是负数（虚拟屏幕左/上边界），绘制前换算到客户区坐标
-            float ox = Rx - Left;
-            float oy = Ry - Top;
+            float ox = -Left;
+            float oy = -Top;
+            // 每笔用**自己的颜色**画（换色不会把已画的笔一起改掉）
             foreach (var s in Strokes)
             {
-                if (s.Count == 0) continue;
-                if (s.Count == 1)
+                if (s.Points.Count == 0) continue;
+                Pen.Color = s.Color;
+                if (s.Points.Count == 1)
                 {
-                    var p = s[0];
-                    e.Graphics.FillEllipse(Pen.Brush, ox + p.X * Rw - 2.5f, oy + p.Y * Rh - 2.5f, 5, 5);
+                    var p = s.Points[0];
+                    e.Graphics.FillEllipse(Pen.Brush, ox + p.X - 2.5f, oy + p.Y - 2.5f, 5, 5);
                 }
                 else
                 {
-                    var pts = new PointF[s.Count];
-                    for (int i = 0; i < s.Count; i++)
-                        pts[i] = new PointF(ox + s[i].X * Rw, oy + s[i].Y * Rh);
+                    var pts = new PointF[s.Points.Count];
+                    for (int i = 0; i < s.Points.Count; i++)
+                        pts[i] = new PointF(ox + s.Points[i].X, oy + s.Points[i].Y);
                     e.Graphics.DrawLines(Pen, pts);
                 }
             }
+            Pen.Color = CurrentColor;
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)

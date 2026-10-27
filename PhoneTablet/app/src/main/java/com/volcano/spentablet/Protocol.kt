@@ -75,6 +75,16 @@ object Protocol {
     const val MOUSE_BACK: Int = 8
     /** 前进（浏览器） */
     const val MOUSE_FORWARD: Int = 9
+    /** 音量 + */
+    const val MOUSE_VOL_UP: Int = 10
+    /** 音量 - */
+    const val MOUSE_VOL_DOWN: Int = 11
+    /** 静音 */
+    const val MOUSE_VOL_MUTE: Int = 12
+    /** 任务切换：Alt+Tab */
+    const val MOUSE_TASK_NEXT: Int = 13
+    /** 任务反向切换：Alt+Shift+Tab */
+    const val MOUSE_TASK_PREV: Int = 14
 
     const val DEFAULT_PORT: Int = 6000
 

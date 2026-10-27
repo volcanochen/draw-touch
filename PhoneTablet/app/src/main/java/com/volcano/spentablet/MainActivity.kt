@@ -472,11 +472,31 @@ class MainActivity : Activity() {
                     text = "$name：${canvas.actionName(next)}"
                 }
             }
+        // 可配置动作：点击类（含音量/任务切换这类"按一下"的动作）
+        val tapActions = intArrayOf(0, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14)
         details.addView(gestureRow("双指滑动", "g2Swipe", 1, intArrayOf(0, 1, 2)))
-        details.addView(gestureRow("双指点击", "g2Tap", 4, intArrayOf(0, 3, 4, 5)))
-        details.addView(gestureRow("三指点击", "g3Tap", 5, intArrayOf(0, 3, 4, 5, 6, 7)))
+        details.addView(gestureRow("双指捏合", "g2Pinch", 2, intArrayOf(0, 1, 2, 10, 11, 12, 13, 14)))
+        details.addView(gestureRow("双指点击", "g2Tap", 4, tapActions))
+        details.addView(gestureRow("三指点击", "g3Tap", 5, tapActions))
         details.addView(gestureRow("三指左右滑", "g3Swipe", 8, intArrayOf(0, 8, 9)))
         details.addView(gestureRow("四指点击", "g4Tap", 9, intArrayOf(0, 9)))
+
+        details.addView(tpTitle("右侧滚轮条"))
+        // 无极滚动：抬手后按动量继续滚一阵再停（双击滚轮条切换）
+        details.addView(Button(this).apply {
+            fun refresh() {
+                text = if (wheelInertia) "滚动模式：无极滚动" else "滚动模式：普通滚动"
+            }
+            refresh()
+            setOnClickListener {
+                wheelInertia = !wheelInertia
+                prefs.edit().putBoolean("wheelInertia", wheelInertia).apply()
+                refresh()
+            }
+        })
+        details.addView(minusPlus("动量", { wheelMomentum }, {
+            wheelMomentum = it; prefs.edit().putFloat("wheelMomentum", it).apply()
+        }, 0.1f, 0.2f, 3.0f))
 
         details.addView(tpTitle("触摸板颜色"))
         val colorRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -602,11 +622,17 @@ class MainActivity : Activity() {
 
     private fun openSettings() {
         if (::verText.isInitialized) verText.text = versionLine()
+        // 重建一遍设置项：默认值迁移 / 手势切换后的最新值要反映到界面上
+        details.removeAllViews()
+        buildSettingsControls()
         settingsPage.visibility = View.VISIBLE
+        stopInertia()
+        updateModeUI()   // 触摸板浮动按钮（滚轮条/三键）在设置页里要藏起来
     }
 
     private fun closeSettings() {
         settingsPage.visibility = View.GONE
+        updateModeUI()
     }
 
     override fun onBackPressed() {
@@ -643,10 +669,18 @@ class MainActivity : Activity() {
     /** 模式相关 UI 显隐：触摸板=滚轮条+三键；数位板=工具条（备注/清除/截图） */
     private fun updateModeUI() {
         val mouse = workMode == Protocol.MODE_MOUSE
-        if (::trackpadOverlay.isInitialized) trackpadOverlay.visibility = if (mouse) View.VISIBLE else View.GONE
-        if (::tabletToolbar.isInitialized) tabletToolbar.visibility = if (!mouse) View.VISIBLE else View.GONE
+        // 设置页打开时，触摸板/数位板的浮动按钮一律收起（不挡着设置项）
+        val covered = ::settingsPage.isInitialized && settingsPage.visibility == View.VISIBLE
+        if (::trackpadOverlay.isInitialized) {
+            trackpadOverlay.visibility = if (mouse && !covered) View.VISIBLE else View.GONE
+        }
+        if (::tabletToolbar.isInitialized) {
+            tabletToolbar.visibility = if (!mouse && !covered) View.VISIBLE else View.GONE
+        }
         // 笔迹颜色色板：只在数位板模式出现，其它界面一律隐藏
-        if (::notePalette.isInitialized) notePalette.visibility = if (!mouse) View.VISIBLE else View.GONE
+        if (::notePalette.isInitialized) {
+            notePalette.visibility = if (!mouse && !covered) View.VISIBLE else View.GONE
+        }
     }
 
     /** 模式按钮图标 = 当前模式（状态与按钮融合） */
@@ -671,15 +705,17 @@ class MainActivity : Activity() {
               　或用「扫描网段找 PC」；USB 数据线 + adb 转发时填 127.0.0.1<br><br>
             <b>【触摸板模式（默认，手指=触摸板）】</b><br>
             · 单指滑动 = 移动光标；单击 = 左键；双击 = 右键<br>
-            · 右侧滚轮条滑动 = 滚动；底部按键 = 左/中/右键<br>
+            · 右侧滚轮条滑动 = 滚动，<b>双击滚轮条</b>切换普通滚动 / 无极滚动（动量可在设置里调）<br>
+            · 底部浮动圆钮 = 左 / 中 / 右键<br>
             · 双指滑动 = 滚动；双指捏合 = 缩放（Ctrl+滚轮）<br>
             · 双指点击 = 右键；三指点击 = 中键；三指左右滑 = 前进/后退<br>
-            · 手势动作可在设置里自定义<br><br>
+            · 手势动作可在设置里自定义：还可设为音量加减 / 静音 / 任务切换<br><br>
             <b>【数位板模式（S Pen 作画）】</b><br>
             · 笔在橙色框内 = 在 PC 上作画（压感 / 倾斜）<br>
             · 单指滑动 = 移动范围框；双指捏合 = 缩放范围框<br>
             · 框可以拖到任意显示器（含多屏）<br>
-            · 底部工具条：桌面备注（笔迹固定在桌面上）/ 清除 / 截图<br><br>
+            · 底部浮动圆钮：<b>备注</b>（笔迹画在桌面固定位置，换色只影响之后的笔）/ <b>撤销</b>（点击撤一笔、长按清空）/ <b>捕获</b>（桌面框内容设为手机画布背景，可继续在上面画，再点清除）<br>
+            · 左侧浮出色板 = 选择备注笔迹颜色<br><br>
             <b>【屏幕方向】</b>循环按钮：陀螺仪全向 / 横屏双朝向 / 竖屏双朝向<br><br>
             <b>【PC 端下载】</b>（点击打开）：<br>
             <a href="$link">$link</a>
@@ -783,7 +819,20 @@ class MainActivity : Activity() {
             val strip = v as WheelStripView
             when (ev.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    v.tag = ev.y; true
+                    val now = android.os.SystemClock.uptimeMillis()
+                    if (now - wheelLastDownAt < 280L) {
+                        // 双击滚轮条 → 普通滚动 / 无极滚动 切换
+                        wheelInertia = !wheelInertia
+                        prefs.edit().putBoolean("wheelInertia", wheelInertia).apply()
+                        strip.inertia = wheelInertia
+                        DebugLog.write("[wheel] ${if (wheelInertia) "无极滚动" else "普通滚动"}")
+                    }
+                    wheelLastDownAt = now
+                    stopInertia()
+                    v.tag = ev.y
+                    wheelLastY = ev.y
+                    wheelLastT = now
+                    true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val last = (v.tag as? Float) ?: ev.y
@@ -792,28 +841,42 @@ class MainActivity : Activity() {
                     if (canvas.height > 0) {
                         canvas.sendWheel(dy / canvas.height)
                         strip.scrollBy(dy)      // 横纹跟着手指走，像真的滚轮
+                        // 记录抬手瞬间的速度（用于无极滚动的惯性）
+                        val now = android.os.SystemClock.uptimeMillis()
+                        val dt = (now - wheelLastT).coerceAtLeast(1)
+                        wheelVel = (ev.y - wheelLastY) / canvas.height.toFloat() * (16f / dt)
+                        wheelLastY = ev.y
+                        wheelLastT = now
                     }
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    // 无极滚动：抬手后按动量继续滚，逐渐衰减停下
+                    if (wheelInertia && kotlin.math.abs(wheelVel) > 0.0008f) startInertia()
                     true
                 }
                 else -> true
             }
         }
-        // —— 底部三个实体感按键：左键 / 中键 / 右键 ——
+        wheel.inertia = wheelInertia
+        // —— 底部三个浮动圆钮：左键 / 中键 / 右键 ——
         val keysBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(72), Gravity.BOTTOM)
-            setBackgroundColor(Color.parseColor("#CC111111"))
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(10) }
         }
         fun keyBtn(label: String, kind: Int): Button = Button(this).apply {
             text = label
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
-                .apply { setMargins(dp(4), dp(6), dp(4), dp(6)) }
+            layoutParams = LinearLayout.LayoutParams(dp(64), dp(64))
+                .apply { setMargins(dp(6), 0, dp(6), 0) }
+            background = floatBtnBg()
+            setTextColor(Color.WHITE)
             setOnClickListener { canvas.sendClick(kind) }
         }
-        keysBar.addView(keyBtn("左键", Protocol.MOUSE_LEFT_CLICK))
-        keysBar.addView(keyBtn("中键", Protocol.MOUSE_MIDDLE_CLICK))
-        keysBar.addView(keyBtn("右键", Protocol.MOUSE_RIGHT_CLICK))
+        keysBar.addView(keyBtn("左", Protocol.MOUSE_LEFT_CLICK))
+        keysBar.addView(keyBtn("中", Protocol.MOUSE_MIDDLE_CLICK))
+        keysBar.addView(keyBtn("右", Protocol.MOUSE_RIGHT_CLICK))
 
         trackpadOverlay.addView(wheel)
         trackpadOverlay.addView(keysBar)
@@ -821,9 +884,44 @@ class MainActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
     }
 
+    // ---- 无极滚动（惯性）----
+    private var wheelLastDownAt = 0L
+    private var wheelLastY = 0f
+    private var wheelLastT = 0L
+    /** 抬手瞬间的滚动速度（归一化/16ms） */
+    private var wheelVel = 0f
+    private val inertiaHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val inertiaTask = object : Runnable {
+        override fun run() {
+            if (!wheelInertia || kotlin.math.abs(wheelVel) < 0.0002f) return
+            canvas.sendWheel(wheelVel)
+            wheelVel *= 0.92f          // 每帧衰减，像触摸板惯性滚动一样慢慢停下
+            inertiaHandler.postDelayed(this, 16)
+        }
+    }
+
+    private fun startInertia() {
+        wheelVel *= wheelMomentum.coerceIn(0.2f, 3.0f)
+        inertiaHandler.removeCallbacks(inertiaTask)
+        inertiaHandler.postDelayed(inertiaTask, 16)
+    }
+
+    private fun stopInertia() {
+        inertiaHandler.removeCallbacks(inertiaTask)
+        wheelVel = 0f
+    }
+
+    /** 浮动按钮外观：半透明圆角小钮（不占满整条，浮在画面上） */
+    private fun floatBtnBg() = android.graphics.drawable.GradientDrawable().apply {
+        setColor(Color.parseColor("#AA2A2A2A"))
+        cornerRadius = dp(32).toFloat()
+        setStroke(1, Color.parseColor("#66FFFFFF"))
+    }
+
     /**
      * 右侧虚拟滚轮条：圆角底 + 等间距横纹（模仿滚轮的沟槽）。
      * 滚动时横纹跟着手指上下平移（[scrollBy]），看起来真的在滚。
+     * [inertia] = 无极滚动模式：纹路画得更亮，提示当前是惯性滚动。
      */
     private inner class WheelStripView(context: android.content.Context) : View(context) {
         private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -838,6 +936,9 @@ class MainActivity : Activity() {
         private val rect = RectF()
         /** 横纹的滚动偏移(px)，取模后循环平移 */
         private var offset = 0f
+        /** 无极滚动模式下纹路更亮（视觉上区分两种滚动模式） */
+        var inertia = false
+            set(value) { field = value; invalidate() }
         private val gapPx get() = 13f * resources.displayMetrics.density
         private val radiusPx get() = 10f * resources.displayMetrics.density
         private val padPx get() = 9f * resources.displayMetrics.density
@@ -856,6 +957,7 @@ class MainActivity : Activity() {
             c.drawRoundRect(rect, radiusPx, radiusPx, bgPaint)
             val gap = gapPx
             if (gap <= 1f) return
+            linePaint.color = Color.parseColor(if (inertia) "#CCFFFFFF" else "#88FFFFFF")
             // 让横纹在 [0,gap) 内循环，滚动时整片纹路跟着手指移动
             var y = ((offset % gap) + gap) % gap
             while (y < h) {
@@ -870,19 +972,20 @@ class MainActivity : Activity() {
         tabletToolbar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(56), Gravity.BOTTOM)
-            setBackgroundColor(Color.parseColor("#B3222222"))
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(10) }
         }
-        noteBtn = Button(this).apply {
-            text = "备注"
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
-                .apply { setMargins(dp(4), dp(6), dp(4), dp(6)) }
+        fun toolBtn(label: String): Button = Button(this).apply {
+            text = label
+            layoutParams = LinearLayout.LayoutParams(dp(66), dp(64))
+                .apply { setMargins(dp(6), 0, dp(6), 0) }
+            background = floatBtnBg()
+            setTextColor(Color.WHITE)
+        }
+        noteBtn = toolBtn("备注").apply {
             setOnClickListener { toggleNote(!noteOn) }
         }
-        val clearBtn = Button(this).apply {
-            text = "清除"
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
-                .apply { setMargins(dp(4), dp(6), dp(4), dp(6)) }
+        val undoBtn = toolBtn("撤销").apply {
             setOnClickListener {
                 net.send(Protocol.buildNote(Protocol.NOTE_UNDO)) // 点击=撤销一笔
             }
@@ -891,14 +994,11 @@ class MainActivity : Activity() {
                 true
             }
         }
-        shotBtn = Button(this).apply {
-            text = "捕获"
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
-                .apply { setMargins(dp(4), dp(6), dp(4), dp(6)) }
+        shotBtn = toolBtn("捕获").apply {
             setOnClickListener { onShotButton() }
         }
         tabletToolbar.addView(noteBtn)
-        tabletToolbar.addView(clearBtn)
+        tabletToolbar.addView(undoBtn)
         tabletToolbar.addView(shotBtn)
         tabletToolbar.visibility = View.GONE
         root.addView(tabletToolbar) // layoutParams 已带 Gravity.BOTTOM
@@ -995,29 +1095,23 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 显示 PC 传回的范围框截图（点一下关闭） */
+    /**
+     * PC 传回的范围框截图：直接设成书写区的**背景**（不是弹出新窗口），
+     * 之后照样能在上面写写画画，笔迹叠在截图上面。
+     */
     private fun showShot(png: ByteArray) {
         val bmp = BitmapFactory.decodeByteArray(png, 0, png.size)
         if (bmp == null) {
             DebugLog.write("[shot] 解码失败 ${png.size}B")
             return
         }
-        closeShot()
-        shotView = ImageView(this).apply {
-            setImageBitmap(bmp)
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            setBackgroundColor(Color.parseColor("#EE000000"))
-            setOnClickListener { closeShot() } // 点一下关闭
-        }
-        addContentView(shotView, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        canvas.shotBackground = bmp
+        DebugLog.write("[shot] 已设为背景 ${bmp.width}x${bmp.height}")
     }
 
+    /** 清除截图背景（按钮变回「捕获」，同时解除范围框锁定） */
     private fun closeShot() {
-        shotView?.let {
-            (it.parent as? android.view.ViewGroup)?.removeView(it)
-        }
-        shotView = null
+        canvas.shotBackground = null
         if (shotCaptured) {
             canvas.frameLocked = false
             shotCaptured = false
@@ -1026,16 +1120,32 @@ class MainActivity : Activity() {
     }
 
     // ================= 触摸板配置（速度/滚动/手势/颜色）=================
+    /** 无极滚动：抬手后按动量继续滚（双击右侧滚轮条切换） */
+    private var wheelInertia = false
+    /** 无极滚动的动量倍率（越大惯性越久） */
+    private var wheelMomentum = 1.0f
+
     private fun applyTrackpadPrefs() {
-        canvas.cursorSpeed = prefs.getFloat("tpSpeed", 1.0f)
-        canvas.scrollScale = prefs.getFloat("tpScroll", 1.0f)
+        // 默认值迁移：老版本装过的机器把旧的 1.0/1.0 升到新默认（1.5 / 3.0），只做一次
+        if (!prefs.getBoolean("tpDefaults2", false)) {
+            prefs.edit()
+                .putBoolean("tpDefaults2", true)
+                .putFloat("tpSpeed", 1.5f)
+                .putFloat("tpScroll", 3.0f)
+                .apply()
+        }
+        canvas.cursorSpeed = prefs.getFloat("tpSpeed", 1.5f)
+        canvas.scrollScale = prefs.getFloat("tpScroll", 3.0f)
         canvas.trackpadColor = prefs.getInt("tpColor", 0xFF20242B.toInt())
         canvas.g2Swipe = prefs.getInt("g2Swipe", 1)
+        canvas.g2Pinch = prefs.getInt("g2Pinch", 2)
         canvas.g2Tap = prefs.getInt("g2Tap", 4)
         canvas.g3Tap = prefs.getInt("g3Tap", 5)
         canvas.g3Swipe = prefs.getInt("g3Swipe", 8)
         canvas.g4Tap = prefs.getInt("g4Tap", 9)
         canvas.g4Swipe = prefs.getInt("g4Swipe", 0)
+        wheelInertia = prefs.getBoolean("wheelInertia", false)
+        wheelMomentum = prefs.getFloat("wheelMomentum", 1.0f)
     }
 
     /** 循环切换一个手势槽的动作码（设置页按钮用） */

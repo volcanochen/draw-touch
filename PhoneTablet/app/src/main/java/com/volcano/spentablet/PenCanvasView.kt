@@ -125,6 +125,7 @@ class PenCanvasView(context: Context) : View(context) {
     // ---- 手势动作映射（槽位 → 动作码）----
     // 动作码：0=无 1=滚轮 2=缩放 3=左键 4=右键 5=中键 6=后退 7=前进 8=后退/前进(方向) 9=切换模式
     var g2Swipe: Int = 1   // 双指滑动：滚轮
+    var g2Pinch: Int = 2   // 双指捏合：缩放（独立槽位，与双指滑动分开）
     var g2Tap: Int = 4     // 双指点击：右键
     var g3Tap: Int = 5     // 三指点击：中键
     var g3Swipe: Int = 8   // 三指左右滑：后退/前进
@@ -233,6 +234,8 @@ class PenCanvasView(context: Context) : View(context) {
     private var tpPenDown = false
     /** 触摸板主手指的 pointerId（取历史采样点用） */
     private var tpFingerId = -1
+    /** 捏合型一次性动作（音量/任务切换）的上次触发时间，用于节流 */
+    private var lastPinchActionAt = 0L
 
     // ---- 诊断计数：index = toolType(0..4)，第二维 = down/move/up/hover ----
     private val counters = Array(5) { IntArray(4) }
@@ -257,17 +260,36 @@ class PenCanvasView(context: Context) : View(context) {
         if (w > 0 && h > 0) {
             bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
             canvas = Canvas(bitmap!!)
-            canvas!!.drawColor(Color.WHITE)
+            // 笔迹层是**透明底**：背景（白底 / 桌面截图）在 onDraw 里先画，笔迹叠在上面
+            canvas!!.drawColor(Color.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR)
             // 书写区尺寸变了（上下控制栏挤压 / 转屏）必须通知 PC 重算等比映射
             if (w != oldw || h != oldh) onSurfaceSizeChanged?.invoke(w, h)
         }
     }
+
+    /**
+     * 桌面范围框的截图：设为书写区的**背景**（不是弹出窗口），
+     * 设好之后照样能在上面写字/画画，笔迹叠在截图之上。
+     */
+    var shotBackground: Bitmap? = null
+        set(value) {
+            field?.recycle()
+            field = value
+            invalidate()
+        }
 
     override fun onDraw(c: Canvas) {
         if (workMode == Protocol.MODE_MOUSE) {
             // 触摸板模式：不显示白底笔迹层，用可配置的触摸板底色
             c.drawColor(trackpadColor)
         } else {
+            // 背景：有桌面截图就用截图（铺满），否则白底
+            val bg = shotBackground
+            if (bg != null && !bg.isRecycled) {
+                c.drawBitmap(bg, null, android.graphics.Rect(0, 0, width, height), null)
+            } else {
+                c.drawColor(Color.WHITE)
+            }
             bitmap?.let { c.drawBitmap(it, 0f, 0f, null) }
         }
         // 操作框：**撑满整个书写区**。
@@ -278,7 +300,7 @@ class PenCanvasView(context: Context) : View(context) {
     }
 
     fun clear() {
-        bitmap?.eraseColor(Color.WHITE)
+        bitmap?.eraseColor(Color.TRANSPARENT)
         invalidate()
     }
 
@@ -520,12 +542,39 @@ class PenCanvasView(context: Context) : View(context) {
             6 -> onMouse?.invoke(Protocol.MOUSE_BACK, 0f, 0f)
             7 -> onMouse?.invoke(Protocol.MOUSE_FORWARD, 0f, 0f)
             9 -> onSwitchMode?.invoke()
+            10 -> onMouse?.invoke(Protocol.MOUSE_VOL_UP, 0f, 0f)
+            11 -> onMouse?.invoke(Protocol.MOUSE_VOL_DOWN, 0f, 0f)
+            12 -> onMouse?.invoke(Protocol.MOUSE_VOL_MUTE, 0f, 0f)
+            13 -> onMouse?.invoke(Protocol.MOUSE_TASK_NEXT, 0f, 0f)
+            14 -> onMouse?.invoke(Protocol.MOUSE_TASK_PREV, 0f, 0f)
+        }
+    }
+
+    /** 捏合专用分发：factor 是本次的相对缩放量（>1 张开 / <1 捏拢） */
+    private fun dispatchPinch(code: Int, factor: Float) {
+        onDebug?.invoke("双指捏合 ×${String.format("%.3f", factor)} → ${actionName(code)}")
+        when (code) {
+            1 -> onMouse?.invoke(Protocol.MOUSE_SCROLL, 0f, (factor - 1f) * 2f * scrollScale)
+            2 -> onMouse?.invoke(Protocol.MOUSE_ZOOM, factor, 0f)
+            10 -> onMouse?.invoke(Protocol.MOUSE_VOL_UP, 0f, 0f)
+            11 -> onMouse?.invoke(Protocol.MOUSE_VOL_DOWN, 0f, 0f)
+            12 -> onMouse?.invoke(Protocol.MOUSE_VOL_MUTE, 0f, 0f)
+            13 -> onMouse?.invoke(Protocol.MOUSE_TASK_NEXT, 0f, 0f)
+            14 -> onMouse?.invoke(Protocol.MOUSE_TASK_PREV, 0f, 0f)
+            3 -> onMouse?.invoke(Protocol.MOUSE_LEFT_CLICK, 0f, 0f)
+            4 -> onMouse?.invoke(Protocol.MOUSE_RIGHT_CLICK, 0f, 0f)
+            5 -> onMouse?.invoke(Protocol.MOUSE_MIDDLE_CLICK, 0f, 0f)
+            6 -> onMouse?.invoke(Protocol.MOUSE_BACK, 0f, 0f)
+            7 -> onMouse?.invoke(Protocol.MOUSE_FORWARD, 0f, 0f)
+            9 -> onSwitchMode?.invoke()
         }
     }
 
     fun actionName(code: Int) = when (code) {
         1 -> "滚轮"; 2 -> "缩放"; 3 -> "左键"; 4 -> "右键"; 5 -> "中键"
-        6 -> "后退"; 7 -> "前进"; 8 -> "后退/前进"; 9 -> "切换模式"; else -> "无"
+        6 -> "后退"; 7 -> "前进"; 8 -> "后退/前进"; 9 -> "切换模式"
+        10 -> "音量+"; 11 -> "音量-"; 12 -> "静音"; 13 -> "下一任务"; 14 -> "上一任务"
+        else -> "无"
     }
 
     // ---------- 数位板模式：手指 = 拖动操作框（手机框与桌面框一起动） ----------
@@ -679,12 +728,18 @@ class PenCanvasView(context: Context) : View(context) {
                         }
                     } else {
                         val relSpan = if (tpLastSpan > 1f) kotlin.math.abs(dSpan) / tpLastSpan else 0f
-                        if (relSpan > PINCH_REL && g2Swipe == 2) {
-                            // 捏合 → 缩放
+                        if (relSpan > PINCH_REL && g2Pinch != 0) {
+                            // 捏合 → 按「双指捏合」槽位配置的动作分发（默认缩放）
+                            // 音量/任务切换这类一次性动作要节流，否则一次捏合会连发几十次
                             val factor = if (tpLastSpan > 1f) span / tpLastSpan else 1f
-                            onMouse?.invoke(Protocol.MOUSE_ZOOM, factor, 0f)
-                            onDebug?.invoke("双指捏合 ×${String.format("%.3f", factor)} → 缩放")
-                        } else if (g2Swipe == 1 && (kotlin.math.abs(dCx) > 0.5f || kotlin.math.abs(dCy) > 0.5f)) {
+                            val now = android.os.SystemClock.uptimeMillis()
+                            if (g2Pinch == 2) {
+                                dispatchPinch(g2Pinch, factor)      // 缩放：连续量，每帧都发
+                            } else if (now - lastPinchActionAt > PINCH_ACTION_COOLDOWN_MS) {
+                                lastPinchActionAt = now
+                                dispatchPinch(g2Pinch, if (factor > 1f) 1.06f else 0.94f)
+                            }
+                        } else if (g2Swipe != 0 && (kotlin.math.abs(dCx) > 0.5f || kotlin.math.abs(dCy) > 0.5f)) {
                             // 双指滑动 → 滚轮（滚动比例可配置）
                             // 与光标移动同理：横纵都用 h 归一化，横向/纵向滚动速度才一致
                             onMouse?.invoke(Protocol.MOUSE_SCROLL, dCx / h * scrollScale, dCy / h * scrollScale)
@@ -799,5 +854,7 @@ class PenCanvasView(context: Context) : View(context) {
         private const val SWIPE_PX = 140f
         /** 判定为「捏合」而不是「滚动」的相对跨度变化阈值 */
         private const val PINCH_REL = 0.12f
+        /** 捏合触发一次性动作（音量/任务切换等）的冷却时间(ms) */
+        private const val PINCH_ACTION_COOLDOWN_MS = 320L
     }
 }
