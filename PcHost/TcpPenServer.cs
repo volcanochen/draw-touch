@@ -78,6 +78,10 @@ public sealed class TcpPenServer : IDisposable
     public double LastPressure;
     public int LastX, LastY;
 
+    /// <summary>当前是否有手机连接（托盘图标据此显示连接状态）。</summary>
+    private volatile bool _clientConnected;
+    public bool ClientConnected => _clientConnected;
+
     /// <summary>每收到一帧并映射成 PenSample 后回调（用于调试浮窗）。</summary>
     public Action<PenSample>? OnSample { get; set; }
 
@@ -127,6 +131,7 @@ public sealed class TcpPenServer : IDisposable
 
     private void HandleClient(TcpClient client, CancellationToken token)
     {
+        _clientConnected = true;
         try
         {
             using (client)
@@ -199,6 +204,7 @@ public sealed class TcpPenServer : IDisposable
         }
         finally
         {
+            _clientConnected = false;
             Console.WriteLine("[Server] 手机断开");
         }
     }

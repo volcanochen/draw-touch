@@ -15,6 +15,9 @@ internal sealed class TrayApp : ApplicationContext
     private readonly Action<bool> _setDebug;
     private readonly System.Windows.Forms.Timer _tick;
     private readonly Bitmap _iconBmp;
+    private readonly Icon _iconOff;   // 未连接：深蓝底
+    private readonly Icon _iconOn;    // 已连接：绿色底
+    private bool _lastConnected;
     private ConfigForm? _form;
     private ToolStripMenuItem? _mWork;
 
@@ -24,11 +27,15 @@ internal sealed class TrayApp : ApplicationContext
         _server = server;
         _setDebug = setDebug;
 
-        _iconBmp = BuildIconBitmap();
+        _iconBmp = BuildIconBitmap(false);
+        var onBmp = BuildIconBitmap(true);
+        _iconOff = Icon.FromHandle(_iconBmp.GetHicon());
+        _iconOn = Icon.FromHandle(onBmp.GetHicon());
+        onBmp.Dispose();
         _tray = new NotifyIcon
         {
-            Icon = Icon.FromHandle(_iconBmp.GetHicon()),
-            Text = "SpenTablet 数位板",
+            Icon = _iconOff,
+            Text = "SpenTablet 数位板｜未连接",
             Visible = true,
             ContextMenuStrip = BuildMenu()
         };
@@ -44,10 +51,15 @@ internal sealed class TrayApp : ApplicationContext
                         $"p={_server.LastPressure:F2}");
             // 手机端切换模式时同步托盘勾选（Changed 事件来自网络线程，这里在 UI 线程上跟）
             if (_mWork != null && _mWork.Checked != _cfg.IsMouseMode)
-            {
                 _mWork.Checked = _cfg.IsMouseMode;
-                _tray.Text = _cfg.IsMouseMode ? "SpenTablet 鼠标模式" : "SpenTablet 数位板";
+            // 托盘图标反映连接状态：连上=绿色、断开=蓝色，悬停文字也带状态
+            bool conn = _server.ClientConnected;
+            if (conn != _lastConnected)
+            {
+                _lastConnected = conn;
+                _tray.Icon = conn ? _iconOn : _iconOff;
             }
+            _tray.Text = $"{(_cfg.IsMouseMode ? "SpenTablet 鼠标模式" : "SpenTablet 数位板")}｜{(conn ? "已连接手机" : "未连接")}";
         };
         _tick.Start();
 
@@ -87,8 +99,7 @@ internal sealed class TrayApp : ApplicationContext
             mWork.Checked = on;
             _cfg.SetWorkMode(on);
             if (on) MouseControl.ReleaseAll();
-            _tray.Text = on ? "SpenTablet 鼠标模式" : "SpenTablet 数位板";
-            AppLog.Info($"[Host] 托盘切换为 {(on ? "鼠标" : "数位板")} 模式");
+            AppLog.Info($"[Host] 托盘切换为 {(on ? "鼠标" : "数位板")} 模式");   // 悬停文字由 2 秒定时器统一刷新
             ConfigStore.Save(_cfg);
         };
         menu.Items.Add(mWork);
@@ -147,14 +158,15 @@ internal sealed class TrayApp : ApplicationContext
         _form.Activate();
     }
 
-    /// <summary>画一个简单的“笔”图标：深色底 + 白色斜线笔尖。</summary>
-    private static Bitmap BuildIconBitmap()
+    /// <summary>画一个简单的“笔”图标：深色/绿色底 + 白色斜线笔尖。底色区分连接状态。</summary>
+    private static Bitmap BuildIconBitmap(bool connected)
     {
         var bmp = new Bitmap(32, 32);
         using var g = Graphics.FromImage(bmp);
         g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
         g.Clear(Color.Transparent);
-        using var bg = new SolidBrush(Color.FromArgb(30, 90, 160));
+        // 已连接 = 绿底（一眼看出手机在线）；未连接 = 深蓝底
+        using var bg = new SolidBrush(connected ? Color.FromArgb(34, 160, 80) : Color.FromArgb(30, 90, 160));
         g.FillEllipse(bg, 0, 0, 31, 31);
         using var pen = new Pen(Color.White, 4f) { StartCap = System.Drawing.Drawing2D.LineCap.Round, EndCap = System.Drawing.Drawing2D.LineCap.Round };
         g.DrawLine(pen, 7, 25, 21, 11);

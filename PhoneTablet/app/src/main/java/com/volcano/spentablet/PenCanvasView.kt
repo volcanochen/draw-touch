@@ -140,6 +140,9 @@ class PenCanvasView(context: Context) : View(context) {
     /** 四指等手势触发「切换模式」时回调给 MainActivity */
     var onSwitchMode: (() -> Unit)? = null
 
+    /** 手指/笔刚按下屏幕（每次手势一次）。MainActivity 用来打断无极滚动的惯性 */
+    var onTouchDown: (() -> Unit)? = null
+
     /** 截图捕获后锁定：忽略手指拖框/捏合，直到截图清除 */
     var frameLocked: Boolean = false
 
@@ -254,6 +257,10 @@ class PenCanvasView(context: Context) : View(context) {
     private var lastPinchActionAt = 0L
     /** 滑动型一次性动作（三指/四指左右滑）的上次触发时间，用于节流 */
     private var lastSwipeActionAt = 0L
+    /** 本手势是否已判定为「捏合」：一旦判定，后续都走捏合而不是滚动（直到手势结束） */
+    private var tpPinchMode = false
+    /** 手势开始时的双指跨度（捏合判定用**累计**跨度变化，而不是单帧） */
+    private var tpStartSpan = 0f
 
     // ---- 诊断计数：index = toolType(0..4)，第二维 = down/move/up/hover ----
     private val counters = Array(5) { IntArray(4) }
@@ -380,6 +387,9 @@ class PenCanvasView(context: Context) : View(context) {
     private fun handleEvent(e: MotionEvent, contact: Boolean) {
         val n = e.pointerCount
         val action = e.actionMasked
+
+        // 每次手势落下的第一下：通知外部（用于打断无极滚动的惯性）
+        if (contact && action == MotionEvent.ACTION_DOWN) onTouchDown?.invoke()
 
         // 鼠标模式：手指要**整体**处理（多点触控必须拿到所有手指的坐标）
         if (contact && workMode == Protocol.MODE_MOUSE && countFingers(e) > 0) {
@@ -759,6 +769,8 @@ class PenCanvasView(context: Context) : View(context) {
                 tpLastCx = cx
                 tpLastCy = cy
                 tpLastSpan = span
+                tpStartSpan = span
+                tpPinchMode = false
             }
 
             MotionEvent.ACTION_POINTER_DOWN -> {
@@ -772,6 +784,8 @@ class PenCanvasView(context: Context) : View(context) {
                 tpLastCx = cx
                 tpLastCy = cy
                 tpLastSpan = span
+                tpStartSpan = span     // 进入多点手势：以当前跨度为捏合判定基准
+                tpPinchMode = false
             }
 
             MotionEvent.ACTION_MOVE -> {
@@ -806,8 +820,13 @@ class PenCanvasView(context: Context) : View(context) {
                             tpStartX = cx
                         }
                     } else {
-                        val relSpan = if (tpLastSpan > 1f) kotlin.math.abs(dSpan) / tpLastSpan else 0f
-                        if (relSpan > PINCH_REL && g2Pinch != 0) {
+                        // 捏合判定：用**手势开始到现在的累计跨度变化**。
+                        // 以前用单帧 dSpan/tpLastSpan > 12% —— 真实捏合每帧只变化 1~2%，
+                        // 单帧永远到不了阈值，结果触摸板模式的捏合从来没触发过。
+                        val relSpanTotal = if (tpStartSpan > 1f)
+                            kotlin.math.abs(span - tpStartSpan) / tpStartSpan else 0f
+                        if (!tpPinchMode && relSpanTotal > PINCH_REL) tpPinchMode = true
+                        if (tpPinchMode && g2Pinch != 0) {
                             // 捏合 → 按「双指捏合」槽位配置的动作分发（默认缩放）
                             // 音量/任务切换这类一次性动作要节流，否则一次捏合会连发几十次
                             val factor = if (tpLastSpan > 1f) span / tpLastSpan else 1f
@@ -862,6 +881,9 @@ class PenCanvasView(context: Context) : View(context) {
 
             MotionEvent.ACTION_POINTER_UP -> {
                 tpActiveFingers = maxOf(0, cnt - 1)
+                // 手指数变化：重置捏合判定基准（3 指收成 2 指后要能重新捏合）
+                tpStartSpan = span
+                tpPinchMode = false
                 // 从多指回到单指：重置单指基准，避免光标突然跳一下
                 tpSingleX = cx
                 tpSingleY = cy
@@ -873,6 +895,7 @@ class PenCanvasView(context: Context) : View(context) {
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 tpActiveFingers = 0
                 tpFingerId = -1
+                tpPinchMode = false
                 val dur = android.os.SystemClock.uptimeMillis() - tpStartTime
                 val isTap = tpMoved < tapSlopPx * 1.5f && dur < TAP_TIMEOUT_MS
                 when {

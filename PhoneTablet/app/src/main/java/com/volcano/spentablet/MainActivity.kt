@@ -58,10 +58,10 @@ class MainActivity : Activity() {
 
     // ---- 触摸板模式 UI（滚轮条 + 左/中/右键）----
     private lateinit var trackpadOverlay: android.widget.FrameLayout
-    // ---- 数位板模式工具条（备注/清除/截图）----
+    // ---- 数位板模式工具条（备注/撤销/完成 + 色板，合并成一个可拖动面板）----
     private lateinit var tabletToolbar: android.widget.LinearLayout
-    /** 数位板模式：左侧浮出的笔迹颜色色板 */
-    private lateinit var notePalette: LinearLayout
+    /** 工具条第二行的 7 个笔迹颜色块（高亮切换用） */
+    private var noteColorRow: LinearLayout? = null
     /** 当前笔迹颜色索引（对应 [noteColors]） */
     private var noteColorIdx = 0
     /** 截图预览（全屏覆盖） */
@@ -281,6 +281,8 @@ class MainActivity : Activity() {
         applyTrackpadPrefs()
         // 四指点击等手势 → 切换模式
         canvas.onSwitchMode = { runOnUiThread { cycleWorkMode() } }
+        // 任意触摸落下都打断无极滚动的惯性（滚轮条自己的 ACTION_DOWN 也会停）
+        canvas.onTouchDown = { stopInertia() }
 
         setContentView(root)
         applyOrientationMode()
@@ -508,7 +510,7 @@ class MainActivity : Activity() {
                 refresh()
             }
         })
-        details.addView(minusPlus("动量", { wheelMomentum }, {
+        details.addView(minusPlus("动量（1.0 = 抬手滚 3 秒停）", { wheelMomentum }, {
             wheelMomentum = it; prefs.edit().putFloat("wheelMomentum", it).apply()
         }, 0.1f, 0.2f, 3.0f))
 
@@ -691,10 +693,6 @@ class MainActivity : Activity() {
         if (::tabletToolbar.isInitialized) {
             tabletToolbar.visibility = if (!mouse && !covered) View.VISIBLE else View.GONE
         }
-        // 笔迹颜色色板：只在数位板模式出现，其它界面一律隐藏
-        if (::notePalette.isInitialized) {
-            notePalette.visibility = if (!mouse && !covered) View.VISIBLE else View.GONE
-        }
     }
 
     /** 模式按钮图标 = 当前模式（状态与按钮融合） */
@@ -729,7 +727,7 @@ class MainActivity : Activity() {
             · 单指滑动 = 移动范围框；双指捏合 = 缩放范围框<br>
             · 框可以拖到任意显示器（含多屏）<br>
             · 底部浮动圆钮：<b>备注</b>（笔迹画在桌面固定位置，换色只影响之后的笔，手机与桌面同步）/ <b>撤销</b>（点击手机+桌面各撤一笔、长按两边一起清空）/ <b>$shotBtnLabel</b>（捕获：桌面框内容设为手机画布背景，可继续在上面画；再点完成恢复）<br>
-            · 左侧浮出色板 = 选择备注笔迹颜色<br><br>
+            · 浮动面板 = <b>备注 / 撤销 / 完成</b> + 7 色板，<b>按住可整体拖动</b>（挡住画面就拖走，位置会记住）<br><br>
             <b>【屏幕方向】</b>循环按钮：陀螺仪全向 / 横屏双朝向 / 竖屏双朝向<br><br>
             <b>【PC 端下载】</b>（点击打开）：<br>
             <a href="$link">$link</a>
@@ -910,32 +908,29 @@ class MainActivity : Activity() {
     /** 抬手瞬间的滚动速度（归一化/16ms） */
     private var wheelVel = 0f
     private val inertiaHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    /** 惯性开始时刻（用于硬性限时） */
+    /** 惯性开始时刻 */
     private var inertiaStartAt = 0L
-    /** 本轮惯性的停止阈值（按起始速度比例算，甩多快都在同样时间内停） */
-    private var inertiaStopVel = 0.0006f
+    /** 本轮惯性的起始速度（按缓出曲线衰减到 0） */
+    private var inertiaBaseVel = 0f
+    /** 本轮惯性的总时长(ms)：默认 1.0 倍动量 = 3 秒 */
+    private var inertiaDurationMs = 3000L
 
     private val inertiaTask = object : Runnable {
         override fun run() {
-            // 三个条件任一满足即停：关掉无极滚动 / 超过最长时长 / 速度掉到阈值以下。
-            // 以前只有 0.92 的衰减 + 极小阈值，甩一下要滚 1 秒多，手感像"不按停就一直滚"。
             if (!wheelInertia) { stopInertia(); return }
-            val now = android.os.SystemClock.uptimeMillis()
-            if (now - inertiaStartAt > inertiaMaxMs ||
-                kotlin.math.abs(wheelVel) < inertiaStopVel) {
-                wheelVel = 0f
-                return
-            }
-            canvas.sendWheel(wheelVel)
-            wheelVel *= inertiaDecay       // 每帧衰减（0.86：约 0.3 秒内滑停）
+            val t = android.os.SystemClock.uptimeMillis() - inertiaStartAt
+            if (t >= inertiaDurationMs) { wheelVel = 0f; return }   // 到点精确停下
+            // 缓出曲线 (1-t/T)^2：先快后慢，T 时刻速度正好为 0 —— 抬手后 3 秒稳稳停下
+            val remain = 1f - t.toFloat() / inertiaDurationMs
+            canvas.sendWheel(inertiaBaseVel * remain * remain)
             inertiaHandler.postDelayed(this, inertiaTickMs)
         }
     }
 
     private fun startInertia() {
-        wheelVel *= wheelMomentum.coerceIn(0.2f, 3.0f)
-        // 起始速度越大，停止阈值按比例抬高 → 惯性时长与甩动幅度基本无关
-        inertiaStopVel = maxOf(0.0006f, kotlin.math.abs(wheelVel) * 0.04f)
+        // 动量倍率同时决定惯性时长：1.0 → 抬手 3 秒滑停（0.2 → 0.6s，3.0 → 9s）
+        inertiaDurationMs = (inertiaBaseMs * wheelMomentum.coerceIn(0.2f, 3.0f)).toLong()
+        inertiaBaseVel = wheelVel
         inertiaStartAt = android.os.SystemClock.uptimeMillis()
         inertiaHandler.removeCallbacks(inertiaTask)
         inertiaHandler.postDelayed(inertiaTask, inertiaTickMs)
@@ -1004,16 +999,26 @@ class MainActivity : Activity() {
 
     // ================= 数位板工具条（备注 / 清除 / 截图）=================
     private fun buildTabletToolbar(root: FrameLayout) {
-        tabletToolbar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
+        // 备注按钮 + 撤销/完成 + 7 色板合并成**一个**浮动面板，整体可拖动，
+        // 挡住画笔区域时直接拖走（位置会记住）
+        tabletToolbar = DraggablePanel(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.parseColor("#B0222222"))
+                cornerRadius = dp(14).toFloat()
+                setStroke(1, Color.parseColor("#66FFFFFF"))
+            }
+            setPadding(dp(6), dp(6), dp(6), dp(6))
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(10) }
         }
+        // —— 第一行：备注 / 撤销 / 捕获 ——
+        val btnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         fun toolBtn(label: String): Button = Button(this).apply {
             text = label
-            layoutParams = LinearLayout.LayoutParams(dp(66), dp(64))
-                .apply { setMargins(dp(6), 0, dp(6), 0) }
+            layoutParams = LinearLayout.LayoutParams(dp(66), dp(56))
+                .apply { setMargins(dp(4), 0, dp(4), 0) }
             background = floatBtnBg()
             setTextColor(Color.WHITE)
         }
@@ -1034,13 +1039,32 @@ class MainActivity : Activity() {
         shotBtn = toolBtn("捕获").apply {
             setOnClickListener { onShotButton() }
         }
-        tabletToolbar.addView(noteBtn)
-        tabletToolbar.addView(undoBtn)
-        tabletToolbar.addView(shotBtn)
+        btnRow.addView(noteBtn)
+        btnRow.addView(undoBtn)
+        btnRow.addView(shotBtn)
+        // —— 第二行：7 个笔迹颜色块 ——
+        val colorRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        noteColorRow = colorRow
+        noteColorIdx = prefs.getInt("noteColor", 0).coerceIn(0, noteColors.lastIndex)
+        // 手机屏上画的笔迹也用同一个颜色（落笔时锁定，之后换色不影响已画的笔）
+        canvas.strokeColor = noteColors[noteColorIdx]
+        repeat(noteColors.size) { i ->
+            colorRow.addView(View(this).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(26), dp(26)).apply {
+                    setMargins(dp(3), dp(3), dp(3), dp(2))
+                }
+                background = swatchBg(i)
+                setOnClickListener { selectNoteColor(i) }
+            })
+        }
+        tabletToolbar.addView(btnRow)
+        tabletToolbar.addView(colorRow)
         tabletToolbar.visibility = View.GONE
-        root.addView(tabletToolbar) // layoutParams 已带 Gravity.BOTTOM
-        // 左侧悬浮的笔迹颜色色板（仅数位板模式可见）
-        buildNotePalette(root)
+        root.addView(tabletToolbar)
+        restoreToolbarPos()
     }
 
     /** 预设笔迹颜色（顺序必须与 PC 端 NoteOverlay.Presets 完全一致） */
@@ -1054,58 +1078,97 @@ class MainActivity : Activity() {
         0xFFFAFAFA.toInt()  // 白
     )
 
-    /**
-     * 屏幕左侧浮出的一列颜色块：点一下就换备注笔迹颜色（索引发给 PC）。
-     * 只在数位板模式出现，其它界面一律隐藏，避免挡住书写区。
-     */
-    private fun buildNotePalette(root: FrameLayout) {
-        notePalette = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.START or Gravity.CENTER_VERTICAL).apply { leftMargin = dp(6) }
-            setBackgroundColor(Color.parseColor("#66222222"))
-            setPadding(dp(4), dp(5), dp(4), dp(5))
-            visibility = View.GONE
+    /** 色块外观：圆角方块，选中的加白描边 */
+    private fun swatchBg(idx: Int) = android.graphics.drawable.GradientDrawable().apply {
+        setColor(noteColors[idx])
+        cornerRadius = dp(5).toFloat()
+        setStroke(if (idx == noteColorIdx) dp(3) else 1,
+            if (idx == noteColorIdx) Color.WHITE else Color.parseColor("#99777777"))
+    }
+
+    /** 恢复上次拖动到的面板位置（按父容器比例存，转屏后按新尺寸换算） */
+    private fun restoreToolbarPos() {
+        val xf = prefs.getFloat("toolbarXF", -1f)
+        val yf = prefs.getFloat("toolbarYF", -1f)
+        if (xf < 0f || yf < 0f) return
+        tabletToolbar.post {
+            val p = tabletToolbar.parent as? ViewGroup ?: return@post
+            if (p.width <= 0 || p.height <= 0 || tabletToolbar.width <= 0) return@post
+            val lp = tabletToolbar.layoutParams as FrameLayout.LayoutParams
+            lp.gravity = Gravity.NO_GRAVITY
+            lp.leftMargin = (xf * p.width).toInt().coerceIn(0, (p.width - tabletToolbar.width).coerceAtLeast(0))
+            lp.topMargin = (yf * p.height).toInt().coerceIn(0, (p.height - tabletToolbar.height).coerceAtLeast(0))
+            tabletToolbar.layoutParams = lp
         }
-        noteColorIdx = prefs.getInt("noteColor", 0).coerceIn(0, noteColors.lastIndex)
-        // 手机屏上画的笔迹也用同一个颜色（落笔时锁定，之后换色不影响已画的笔）
-        canvas.strokeColor = noteColors[noteColorIdx]
-        repeat(noteColors.size) { i ->
-            val swatch = View(this).apply {
-                layoutParams = LinearLayout.LayoutParams(dp(26), dp(26)).apply {
-                    setMargins(0, dp(3), 0, dp(3))
-                }
-                background = android.graphics.drawable.GradientDrawable().apply {
-                    setColor(noteColors[i])
-                    cornerRadius = dp(5).toFloat()
-                    setStroke(if (i == noteColorIdx) dp(3) else 1,
-                        if (i == noteColorIdx) Color.WHITE else Color.parseColor("#99777777"))
-                }
-                setOnClickListener { selectNoteColor(i) }
-            }
-            notePalette.addView(swatch)
-        }
-        root.addView(notePalette)
     }
 
     /** 选中一个笔迹颜色：高亮该色块，并把颜色索引发给 PC */
     private fun selectNoteColor(idx: Int) {
         noteColorIdx = idx
-        for (i in 0 until notePalette.childCount) {
-            val v = notePalette.getChildAt(i)
-            v.background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(noteColors[i])
-                cornerRadius = dp(5).toFloat()
-                setStroke(if (i == idx) dp(3) else 1,
-                    if (i == idx) Color.WHITE else Color.parseColor("#99777777"))
-            }
+        noteColorRow?.let { row ->
+            for (i in 0 until row.childCount) row.getChildAt(i).background = swatchBg(i)
         }
         prefs.edit().putInt("noteColor", idx).apply()
         // 手机端本地笔迹同步换色（只影响之后落的新笔），并下发索引给 PC 端叠加层
         canvas.strokeColor = noteColors[idx]
         if (::net.isInitialized) net.send(Protocol.buildNote(Protocol.NOTE_COLOR, idx.toFloat()))
         DebugLog.write("[note] 笔迹颜色 → 预设 #$idx")
+    }
+
+    /**
+     * 可拖动的浮动面板：整体按住拖走（超过触摸阈值才判定为拖动，否则按钮照常点击）。
+     * 拖动结束后把位置按父容器比例存进 prefs，下次启动还原。
+     */
+    private inner class DraggablePanel(context: android.content.Context) : LinearLayout(context) {
+        private var downRawX = 0f
+        private var downRawY = 0f
+        private var startX = 0
+        private var startY = 0
+        private var dragging = false
+        private val slop = android.view.ViewConfiguration.get(context).scaledTouchSlop
+
+        override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downRawX = ev.rawX; downRawY = ev.rawY
+                    startX = left; startY = top      // 相对父容器的当前位置（拖动基准）
+                    dragging = false
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (!dragging && (kotlin.math.abs(ev.rawX - downRawX) > slop ||
+                                kotlin.math.abs(ev.rawY - downRawY) > slop)) dragging = true
+                }
+            }
+            return dragging
+        }
+
+        override fun onTouchEvent(ev: MotionEvent): Boolean {
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_MOVE -> if (dragging) moveTo(ev.rawX, ev.rawY)
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (dragging) { dragging = false; savePos() }
+                }
+            }
+            return dragging || super.onTouchEvent(ev)
+        }
+
+        private fun moveTo(rawX: Float, rawY: Float) {
+            val p = parent as? ViewGroup ?: return
+            val lp = layoutParams as FrameLayout.LayoutParams
+            lp.gravity = Gravity.NO_GRAVITY
+            lp.leftMargin = (startX + (rawX - downRawX).toInt()).coerceIn(0, (p.width - width).coerceAtLeast(0))
+            lp.topMargin = (startY + (rawY - downRawY).toInt()).coerceIn(0, (p.height - height).coerceAtLeast(0))
+            layoutParams = lp
+        }
+
+        private fun savePos() {
+            val p = parent as? ViewGroup ?: return
+            if (p.width <= 0 || p.height <= 0) return
+            prefs.edit()
+                .putFloat("toolbarXF", left.toFloat() / p.width)
+                .putFloat("toolbarYF", top.toFloat() / p.height)
+                .apply()
+        }
     }
 
     private lateinit var noteBtn: Button
@@ -1169,12 +1232,10 @@ class MainActivity : Activity() {
     /** 无极滚动的动量倍率（越大惯性滑得越远） */
     private var wheelMomentum = 1.0f
 
-    /** 惯性每帧衰减系数（越小停得越快） */
-    private val inertiaDecay = 0.86f
+    /** 无极滚动的基础时长(ms)：动量倍率 1.0 时抬手后滚 3 秒停下 */
+    private val inertiaBaseMs = 3000L
     /** 惯性滑动的调度间隔(ms) */
     private val inertiaTickMs = 16L
-    /** 惯性最长时长(ms)：到点无条件停，杜绝长尾滚动 */
-    private val inertiaMaxMs = 600L
 
     private fun applyTrackpadPrefs() {
         // 默认值迁移（只做一次）：tpDefaults2 → 速度 1.5 / 滚动 3.0；tpDefaults3 → 滚动上限放宽后默认 5.0
