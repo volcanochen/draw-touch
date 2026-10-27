@@ -169,6 +169,16 @@ class PenCanvasView(context: Context) : View(context) {
 
     private var bitmap: Bitmap? = null
     private var canvas: Canvas? = null
+
+    /**
+     * 一条笔迹：落笔时锁定的颜色 + 点序列（x,y 交替存放）。
+     * 平时画到 [bitmap] 上是增量（每事件 O(1)），记录点列只为了**撤销/清空**时能
+     * 在手机屏上把对应笔迹一并去掉（与 PC 端叠加层行为一致）。
+     */
+    private class Stroke(val color: Int) { val pts = mutableListOf<Float>() }
+    private val strokes = ArrayList<Stroke>()
+    private var curStroke: Stroke? = null
+
     private val paint = Paint().apply {
         color = Color.BLACK
         strokeWidth = 4f
@@ -265,6 +275,10 @@ class PenCanvasView(context: Context) : View(context) {
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         bitmap?.recycle()
+        // 尺寸变了，旧笔迹的坐标已不在同一坐标系 —— 与旧行为一致直接丢弃，
+        // 同时清掉笔画记录，避免「撤销」又把坐标已失效的笔迹画回来
+        strokes.clear()
+        curStroke = null
         if (w > 0 && h > 0) {
             bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
             canvas = Canvas(bitmap!!)
@@ -307,8 +321,41 @@ class PenCanvasView(context: Context) : View(context) {
         c.drawRect(h, h, width - h, height - h, borderPaint)
     }
 
+    /** 清空手机屏上全部笔迹，同时清掉笔画记录（撤销/清空与 PC 端同步用） */
     fun clear() {
+        strokes.clear()
+        curStroke = null
         bitmap?.eraseColor(Color.TRANSPARENT)
+        invalidate()
+    }
+
+    /** 撤销最后一笔（手机屏），与 PC 端「撤销」按钮行为保持一致 */
+    fun undoStroke() {
+        if (strokes.isEmpty()) return
+        strokes.removeAt(strokes.size - 1)
+        redrawStrokes()
+    }
+
+    /**
+     * 按笔画记录重画整个笔迹层。
+     * 只在撤销/清空这类低频操作时调用；平时书写走增量绘制（每事件 O(1)），不重刷整层。
+     */
+    private fun redrawStrokes() {
+        val bmp = bitmap ?: return
+        val cv = canvas ?: return
+        bmp.eraseColor(Color.TRANSPARENT)
+        for (s in strokes) {
+            paint.color = s.color
+            if (s.pts.size == 2) {
+                cv.drawPoint(s.pts[0], s.pts[1], paint)
+            } else {
+                var k = 2
+                while (k < s.pts.size) {
+                    cv.drawLine(s.pts[k - 2], s.pts[k - 1], s.pts[k], s.pts[k + 1], paint)
+                    k += 2
+                }
+            }
+        }
         invalidate()
     }
 
@@ -426,15 +473,23 @@ class PenCanvasView(context: Context) : View(context) {
                             // 每一笔落笔时锁定当前颜色：这一笔整条都用这个颜色画
                             paint.color = strokeColor
                             lastX = x; lastY = y; hasLast = true
+                            val s = Stroke(strokeColor)
+                            s.pts.add(x); s.pts.add(y)
+                            strokes.add(s)
+                            curStroke = s
                             canvas?.drawPoint(x, y, paint)
                         }
                         Protocol.TYPE_PEN_MOVE -> {
                             if (hasLast) {
                                 canvas?.drawLine(lastX, lastY, x, y, paint)
+                                curStroke?.let { it.pts.add(x); it.pts.add(y) }
                                 lastX = x; lastY = y
                             }
                         }
-                        Protocol.TYPE_PEN_UP -> hasLast = false
+                        Protocol.TYPE_PEN_UP -> {
+                            curStroke = null
+                            hasLast = false
+                        }
                     }
                     invalidate()
                 } else {

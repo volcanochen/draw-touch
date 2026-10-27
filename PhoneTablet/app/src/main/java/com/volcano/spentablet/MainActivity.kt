@@ -728,7 +728,7 @@ class MainActivity : Activity() {
             · 笔在橙色框内 = 在 PC 上作画（压感 / 倾斜）<br>
             · 单指滑动 = 移动范围框；双指捏合 = 缩放范围框<br>
             · 框可以拖到任意显示器（含多屏）<br>
-            · 底部浮动圆钮：<b>备注</b>（笔迹画在桌面固定位置，换色只影响之后的笔，手机与桌面同步）/ <b>撤销</b>（点击撤一笔、长按清空）/ <b>$shotBtnLabel</b>（捕获：桌面框内容设为手机画布背景，可继续在上面画；再点完成恢复）<br>
+            · 底部浮动圆钮：<b>备注</b>（笔迹画在桌面固定位置，换色只影响之后的笔，手机与桌面同步）/ <b>撤销</b>（点击手机+桌面各撤一笔、长按两边一起清空）/ <b>$shotBtnLabel</b>（捕获：桌面框内容设为手机画布背景，可继续在上面画；再点完成恢复）<br>
             · 左侧浮出色板 = 选择备注笔迹颜色<br><br>
             <b>【屏幕方向】</b>循环按钮：陀螺仪全向 / 横屏双朝向 / 竖屏双朝向<br><br>
             <b>【PC 端下载】</b>（点击打开）：<br>
@@ -1022,10 +1022,12 @@ class MainActivity : Activity() {
         }
         val undoBtn = toolBtn("撤销").apply {
             setOnClickListener {
-                net.send(Protocol.buildNote(Protocol.NOTE_UNDO)) // 点击=撤销一笔
+                canvas.undoStroke()                              // 手机屏同步撤一笔
+                net.send(Protocol.buildNote(Protocol.NOTE_UNDO)) // PC 端桌面撤一笔
             }
             setOnLongClickListener {
-                net.send(Protocol.buildNote(Protocol.NOTE_CLEAR)) // 长按=清空
+                canvas.clear()                                    // 手机屏同步清空
+                net.send(Protocol.buildNote(Protocol.NOTE_CLEAR)) // PC 端桌面清空
                 true
             }
         }
