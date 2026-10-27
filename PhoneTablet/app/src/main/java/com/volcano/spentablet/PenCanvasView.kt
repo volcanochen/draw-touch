@@ -146,6 +146,20 @@ class PenCanvasView(context: Context) : View(context) {
         onMouse?.invoke(kind, 0f, 0f)
     }
 
+    /**
+     * 发送光标相对位移（dxPx / dyPx 为屏幕像素）。
+     *
+     * 横纵**用同一个除数**（书写区高度）归一化：以前 dx 除以宽、dy 除以高，
+     * 手机是竖屏（宽!=高），同样的手指位移横向和纵向算出来的归一化值不一样，
+     * 光标就表现为横竖速度差好几倍。统一后：手指划过多少像素，光标横竖都走同样的比例。
+     * （PC 端也统一乘同一个系数 VirtualH，见 TcpPenServer.HandleMouse）
+     */
+    private fun sendMouseMove(dxPx: Float, dyPx: Float) {
+        if (dxPx == 0f && dyPx == 0f) return
+        val base = if (height > 0) height.toFloat() else 1f
+        onMouse?.invoke(Protocol.MOUSE_MOVE, dxPx / base * cursorSpeed, dyPx / base * cursorSpeed)
+    }
+
     private var bitmap: Bitmap? = null
     private var canvas: Canvas? = null
     private val paint = Paint().apply {
@@ -217,6 +231,8 @@ class PenCanvasView(context: Context) : View(context) {
     private var tpActiveFingers = 0
     /** 鼠标模式下 S Pen 是否处于按下状态 */
     private var tpPenDown = false
+    /** 触摸板主手指的 pointerId（取历史采样点用） */
+    private var tpFingerId = -1
 
     // ---- 诊断计数：index = toolType(0..4)，第二维 = down/move/up/hover ----
     private val counters = Array(5) { IntArray(4) }
@@ -604,6 +620,7 @@ class PenCanvasView(context: Context) : View(context) {
             MotionEvent.ACTION_DOWN -> {
                 tpActiveFingers = 1
                 tpMaxPointers = 1
+                tpFingerId = e.getPointerId(e.actionIndex)
                 tpStartX = cx
                 tpStartY = cy
                 tpStartTime = android.os.SystemClock.uptimeMillis()
@@ -669,8 +686,9 @@ class PenCanvasView(context: Context) : View(context) {
                             onDebug?.invoke("双指捏合 ×${String.format("%.3f", factor)} → 缩放")
                         } else if (g2Swipe == 1 && (kotlin.math.abs(dCx) > 0.5f || kotlin.math.abs(dCy) > 0.5f)) {
                             // 双指滑动 → 滚轮（滚动比例可配置）
-                            onMouse?.invoke(Protocol.MOUSE_SCROLL, dCx / w * scrollScale, dCy / h * scrollScale)
-                            onDebug?.invoke("双指滑动 dx=${String.format("%.3f", dCx / w)} dy=${String.format("%.3f", dCy / h)} → 滚动")
+                            // 与光标移动同理：横纵都用 h 归一化，横向/纵向滚动速度才一致
+                            onMouse?.invoke(Protocol.MOUSE_SCROLL, dCx / h * scrollScale, dCy / h * scrollScale)
+                            onDebug?.invoke("双指滑动 dx=${String.format("%.3f", dCx / h)} dy=${String.format("%.3f", dCy / h)} → 滚动")
                         }
                     }
                     tpLastCx = cx
@@ -678,14 +696,33 @@ class PenCanvasView(context: Context) : View(context) {
                     tpLastSpan = span
                 } else {
                     // 单指 → 移动光标（速度倍率可配置）
-                    val dx = cx - tpSingleX
-                    val dy = cy - tpSingleY
+                    //
+                    // 两个关键修正：
+                    // ① 不再丢步：以前有 0.01 的归一化阈值（≈7px），慢速移动时每个事件的
+                    //    位移都掉在阈值里被丢弃，基准点却已经更新 → 表现为「不动」，
+                    //    偶尔攒够一次才发一跳 → 又「飘」。现在每个位移都发出去。
+                    // ② 提升采样率：Android 会把同一帧内的高频采样点合并进
+                    //    getHistoricalX/Y（不单独派发事件），只吃最新点会丢掉中间的采样，
+                    //    慢速移动就变成了几段折线。这里逐个历史点补发。
+                    val idx = if (tpFingerId >= 0) e.findPointerIndex(tpFingerId) else -1
+                    val hs = if (idx >= 0) e.historySize else 0
+                    var prevX = tpSingleX
+                    var prevY = tpSingleY
+                    if (idx >= 0) {
+                        for (k in 0 until hs) {
+                            val hx = e.getHistoricalX(idx, k)
+                            val hy = e.getHistoricalY(idx, k)
+                            tpMoved += kotlin.math.abs(hx - prevX) + kotlin.math.abs(hy - prevY)
+                            sendMouseMove(hx - prevX, hy - prevY)
+                            prevX = hx; prevY = hy
+                        }
+                    }
+                    val dx = cx - prevX
+                    val dy = cy - prevY
+                    tpMoved += kotlin.math.abs(dx) + kotlin.math.abs(dy)
+                    sendMouseMove(dx, dy)
                     tpSingleX = cx
                     tpSingleY = cy
-                    tpMoved += kotlin.math.abs(dx) + kotlin.math.abs(dy)
-                    if (kotlin.math.abs(dx) > 0.01f || kotlin.math.abs(dy) > 0.01f) {
-                        onMouse?.invoke(Protocol.MOUSE_MOVE, dx / w * cursorSpeed, dy / h * cursorSpeed)
-                    }
                 }
             }
 
@@ -701,6 +738,7 @@ class PenCanvasView(context: Context) : View(context) {
 
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 tpActiveFingers = 0
+                tpFingerId = -1
                 val dur = android.os.SystemClock.uptimeMillis() - tpStartTime
                 val isTap = tpMoved < tapSlopPx * 1.5f && dur < TAP_TIMEOUT_MS
                 when {

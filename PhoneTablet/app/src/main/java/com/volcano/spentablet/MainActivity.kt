@@ -3,6 +3,9 @@ package com.volcano.spentablet
 import android.app.Activity
 import android.content.SharedPreferences
 import android.graphics.Color
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.RectF
 import android.os.Build
 import android.os.Bundle
 import android.text.Editable
@@ -57,6 +60,10 @@ class MainActivity : Activity() {
     private lateinit var trackpadOverlay: android.widget.FrameLayout
     // ---- 数位板模式工具条（备注/清除/截图）----
     private lateinit var tabletToolbar: android.widget.LinearLayout
+    /** 数位板模式：左侧浮出的笔迹颜色色板 */
+    private lateinit var notePalette: LinearLayout
+    /** 当前笔迹颜色索引（对应 [noteColors]） */
+    private var noteColorIdx = 0
     /** 截图预览（全屏覆盖） */
     private var shotView: ImageView? = null
     /** 桌面备注开启中 */
@@ -269,7 +276,13 @@ class MainActivity : Activity() {
         updateModeBtn() // 模式按钮图标 = 当前模式
         updateModeUI()  // 触摸板 UI / 数位板工具条显隐
 
-        net = NetClient(host, port) { helloFrame() }
+        // 第二个参数是「连接建立后要发的 Hello 帧」；顺带在这里同步一次笔迹颜色
+        net = NetClient(host, port) {
+            if (::net.isInitialized) {
+                net.send(Protocol.buildNote(Protocol.NOTE_COLOR, noteColorIdx.toFloat()))
+            }
+            helloFrame()
+        }
         // 接收 PC 下发的 INFO（版本号 / 计算机名 / 候选 IP）
         net.onInfo = { text -> parsePcInfo(text) }
         // 接收 PC 下发的截图（PNG）
@@ -632,6 +645,8 @@ class MainActivity : Activity() {
         val mouse = workMode == Protocol.MODE_MOUSE
         if (::trackpadOverlay.isInitialized) trackpadOverlay.visibility = if (mouse) View.VISIBLE else View.GONE
         if (::tabletToolbar.isInitialized) tabletToolbar.visibility = if (!mouse) View.VISIBLE else View.GONE
+        // 笔迹颜色色板：只在数位板模式出现，其它界面一律隐藏
+        if (::notePalette.isInitialized) notePalette.visibility = if (!mouse) View.VISIBLE else View.GONE
     }
 
     /** 模式按钮图标 = 当前模式（状态与按钮融合） */
@@ -756,30 +771,31 @@ class MainActivity : Activity() {
         trackpadOverlay = FrameLayout(this)
         trackpadOverlay.visibility = View.GONE // 初始按当前模式在 updateModeUI 里定
 
-        // —— 右侧虚拟滚轮：手指上下滑 = 滚动滚轮 ——
-        val wheel = View(this).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                dp(52), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END)
-            background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(Color.parseColor("#33FFFFFF"))
-                cornerRadius = dp(10).toFloat()
-            }
-            setOnTouchListener { v, ev ->
-                when (ev.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> {
-                        v.tag = ev.y; true
-                    }
-                    MotionEvent.ACTION_MOVE -> {
-                        val last = (v.tag as? Float) ?: ev.y
-                        val dy = ev.y - last
-                        v.tag = ev.y
-                        if (canvas.height > 0) {
-                            canvas.sendWheel(dy / canvas.height)
-                        }
-                        true
-                    }
-                    else -> true
+        // —— 右侧虚拟滚轮：手指上下滑 = 滚动滚轮（带横纹，滚动时纹路跟着走） ——
+        val wheel = WheelStripView(this)
+        wheel.layoutParams = FrameLayout.LayoutParams(
+            dp(52), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END).apply {
+            // 高度限制在触摸区域之内：上方让开顶栏，下方让开左/中/右键条
+            topMargin = dp(56)
+            bottomMargin = dp(72)
+        }
+        wheel.setOnTouchListener { v, ev ->
+            val strip = v as WheelStripView
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    v.tag = ev.y; true
                 }
+                MotionEvent.ACTION_MOVE -> {
+                    val last = (v.tag as? Float) ?: ev.y
+                    val dy = ev.y - last
+                    v.tag = ev.y
+                    if (canvas.height > 0) {
+                        canvas.sendWheel(dy / canvas.height)
+                        strip.scrollBy(dy)      // 横纹跟着手指走，像真的滚轮
+                    }
+                    true
+                }
+                else -> true
             }
         }
         // —— 底部三个实体感按键：左键 / 中键 / 右键 ——
@@ -803,6 +819,50 @@ class MainActivity : Activity() {
         trackpadOverlay.addView(keysBar)
         root.addView(trackpadOverlay, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+    }
+
+    /**
+     * 右侧虚拟滚轮条：圆角底 + 等间距横纹（模仿滚轮的沟槽）。
+     * 滚动时横纹跟着手指上下平移（[scrollBy]），看起来真的在滚。
+     */
+    private inner class WheelStripView(context: android.content.Context) : View(context) {
+        private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#33FFFFFF")
+            style = Paint.Style.FILL
+        }
+        private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#88FFFFFF")
+            strokeWidth = 2f * resources.displayMetrics.density
+            style = Paint.Style.STROKE
+        }
+        private val rect = RectF()
+        /** 横纹的滚动偏移(px)，取模后循环平移 */
+        private var offset = 0f
+        private val gapPx get() = 13f * resources.displayMetrics.density
+        private val radiusPx get() = 10f * resources.displayMetrics.density
+        private val padPx get() = 9f * resources.displayMetrics.density
+
+        fun scrollBy(dyPx: Float) {
+            offset += dyPx
+            invalidate()
+        }
+
+        override fun onDraw(c: Canvas) {
+            super.onDraw(c)
+            val w = width.toFloat()
+            val h = height.toFloat()
+            if (w <= 0f || h <= 0f) return
+            rect.set(0f, 0f, w, h)
+            c.drawRoundRect(rect, radiusPx, radiusPx, bgPaint)
+            val gap = gapPx
+            if (gap <= 1f) return
+            // 让横纹在 [0,gap) 内循环，滚动时整片纹路跟着手指移动
+            var y = ((offset % gap) + gap) % gap
+            while (y < h) {
+                c.drawLine(padPx, y, w - padPx, y, linePaint)
+                y += gap
+            }
+        }
     }
 
     // ================= 数位板工具条（备注 / 清除 / 截图）=================
@@ -842,6 +902,69 @@ class MainActivity : Activity() {
         tabletToolbar.addView(shotBtn)
         tabletToolbar.visibility = View.GONE
         root.addView(tabletToolbar) // layoutParams 已带 Gravity.BOTTOM
+        // 左侧悬浮的笔迹颜色色板（仅数位板模式可见）
+        buildNotePalette(root)
+    }
+
+    /** 预设笔迹颜色（顺序必须与 PC 端 NoteOverlay.Presets 完全一致） */
+    private val noteColors = intArrayOf(
+        0xFFFF3C3C.toInt(), // 红
+        0xFFFFBE28.toInt(), // 橙
+        0xFFFAF03C.toInt(), // 黄
+        0xFF3CDC6E.toInt(), // 绿
+        0xFF50BEFF.toInt(), // 蓝
+        0xFFC86EFF.toInt(), // 紫
+        0xFFFAFAFA.toInt()  // 白
+    )
+
+    /**
+     * 屏幕左侧浮出的一列颜色块：点一下就换备注笔迹颜色（索引发给 PC）。
+     * 只在数位板模式出现，其它界面一律隐藏，避免挡住书写区。
+     */
+    private fun buildNotePalette(root: FrameLayout) {
+        notePalette = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.START or Gravity.CENTER_VERTICAL).apply { leftMargin = dp(6) }
+            setBackgroundColor(Color.parseColor("#66222222"))
+            setPadding(dp(4), dp(5), dp(4), dp(5))
+            visibility = View.GONE
+        }
+        noteColorIdx = prefs.getInt("noteColor", 0).coerceIn(0, noteColors.lastIndex)
+        repeat(noteColors.size) { i ->
+            val swatch = View(this).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(26), dp(26)).apply {
+                    setMargins(0, dp(3), 0, dp(3))
+                }
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(noteColors[i])
+                    cornerRadius = dp(5).toFloat()
+                    setStroke(if (i == noteColorIdx) dp(3) else 1,
+                        if (i == noteColorIdx) Color.WHITE else Color.parseColor("#99777777"))
+                }
+                setOnClickListener { selectNoteColor(i) }
+            }
+            notePalette.addView(swatch)
+        }
+        root.addView(notePalette)
+    }
+
+    /** 选中一个笔迹颜色：高亮该色块，并把颜色索引发给 PC */
+    private fun selectNoteColor(idx: Int) {
+        noteColorIdx = idx
+        for (i in 0 until notePalette.childCount) {
+            val v = notePalette.getChildAt(i)
+            v.background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(noteColors[i])
+                cornerRadius = dp(5).toFloat()
+                setStroke(if (i == idx) dp(3) else 1,
+                    if (i == idx) Color.WHITE else Color.parseColor("#99777777"))
+            }
+        }
+        prefs.edit().putInt("noteColor", idx).apply()
+        if (::net.isInitialized) net.send(Protocol.buildNote(Protocol.NOTE_COLOR, idx.toFloat()))
+        DebugLog.write("[note] 笔迹颜色 → 预设 #$idx")
     }
 
     private lateinit var noteBtn: Button
@@ -854,6 +977,7 @@ class MainActivity : Activity() {
         if (!::net.isInitialized) return
         noteOn = on
         net.send(Protocol.buildNote(if (on) Protocol.NOTE_ON else Protocol.NOTE_OFF))
+        if (on) net.send(Protocol.buildNote(Protocol.NOTE_COLOR, noteColorIdx.toFloat()))
         noteBtn.text = if (on) "备注✓" else "备注"
         noteBtn.isEnabled = true
         DebugLog.write("[note] ${if (on) "开启" else "关闭"}")

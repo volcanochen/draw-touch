@@ -52,6 +52,8 @@ object Protocol {
     const val NOTE_ON: Int = 1
     const val NOTE_UNDO: Int = 2
     const val NOTE_CLEAR: Int = 3
+    /** 切换笔迹颜色：arg = 预设颜色索引（与 PC 端 NoteOverlay.Presets 顺序一致） */
+    const val NOTE_COLOR: Int = 4
 
     // ---- 工作模式 ----
     const val MODE_TABLET: Int = 0   // 数位板：S Pen 在框内作画，手指拖动框
@@ -199,8 +201,13 @@ object Protocol {
         return buf.array()
     }
 
-    /** 备注帧：控制 PC 桌面笔迹叠加层（action 见 NOTE_*）。 */
-    fun buildNote(action: Int): ByteArray {
+    /**
+     * 备注帧：控制 PC 桌面笔迹叠加层。
+     * payload[0] = action（见 NOTE_*）；payload[1] = arg。
+     * 目前只有 NOTE_COLOR 用到 arg（预设颜色的索引），其余动作 arg 填 0。
+     * payload 长度固定 PAYLOAD_LEN，老版本 PC 端只读 action，仍可兼容。
+     */
+    fun buildNote(action: Int, arg: Float = 0f): ByteArray {
         val buf = ByteBuffer.allocate(6 + PAYLOAD_LEN).order(ByteOrder.LITTLE_ENDIAN)
         buf.put(MAGIC1)
         buf.put(MAGIC2)
@@ -208,7 +215,8 @@ object Protocol {
         buf.put(TYPE_NOTE.toByte())
         buf.putShort(PAYLOAD_LEN.toShort())
         buf.putFloat(action.toFloat())
-        for (i in 4 until PAYLOAD_LEN) buf.put(0)
+        buf.putFloat(arg)
+        for (i in 8 until PAYLOAD_LEN) buf.put(0)
         return buf.array()
     }
 

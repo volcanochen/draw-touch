@@ -348,6 +348,14 @@ public sealed class TcpPenServer : IDisposable
                 _noteOn = true;
                 _note.Show();
                 break;
+            case 4: // 切换笔迹颜色（arg = 手机端色板的预设颜色索引）
+                if (p.Length >= 8)
+                {
+                    int cidx = (int)BitConverter.ToSingle(p, 4);
+                    _note.SetColorIndex(cidx);
+                    AppLog.Info($"[Note] 笔迹颜色 → 预设 #{cidx}");
+                }
+                break;
             case 2: // 撤销一笔
                 _note.Undo();
                 break;
@@ -355,8 +363,8 @@ public sealed class TcpPenServer : IDisposable
                 _note.Clear();
                 break;
         }
-        if (_noteLog++ % 10 == 0 || action >= 2)
-            AppLog.Info($"[Note] action={action}（{(action == 0 ? "关" : action == 1 ? "开" : action == 2 ? "撤销" : "清空")}）");
+        if (_noteLog++ % 10 == 0 || (action >= 2 && action != 4))
+            AppLog.Info($"[Note] action={action}（{(action == 0 ? "关" : action == 1 ? "开" : action == 2 ? "撤销" : action == 3 ? "清空" : "换色")}）");
     }
 
     /// <summary>截图请求：截取当前范围框画面，PNG 分片下发到手机。</summary>
@@ -435,6 +443,9 @@ public sealed class TcpPenServer : IDisposable
         return v;
     }
 
+    // 触摸板相对移动：不足 1 像素的位移残量（跨帧累积，避免慢速移动"不动/跳"）
+    private double _moveRemX, _moveRemY;
+
     /// <summary>鼠标帧：手指当触摸板（相对移动 / 左键 / 右键）。</summary>
     private void HandleMouse(byte[] p)
     {
@@ -446,11 +457,21 @@ public sealed class TcpPenServer : IDisposable
         switch (kind)
         {
             case MOUSE_MOVE:
-                int mx = (int)Math.Round(dx * _cfg.VirtualW * _cfg.MouseSpeed);
-                int my = (int)Math.Round(dy * _cfg.VirtualH * _cfg.MouseSpeed);
-                MouseControl.MoveBy(_cfg, mx, my);
+                // 横纵**必须乘同一个系数**：手机端 dx/dy 已用同一个除数（书写区高度）归一化，
+                // 这里再各自乘 VirtualW / VirtualH 的话，横竖速度会差 VirtualW/VirtualH 倍。
+                // 统一用 VirtualH：手指划过手机书写区全高 = 光标走满虚拟屏幕高度，横竖一致。
+                //
+                // 另外：慢速移动时单帧位移常常不足 1 像素，直接取整会被吃掉（表现为"不动"，
+                // 攒够一次又突然跳一下 = "飘"）。这里累积残量，攒够整像素就走、余量留到下一帧。
+                _moveRemX += dx * _cfg.VirtualH * _cfg.MouseSpeed;
+                _moveRemY += dy * _cfg.VirtualH * _cfg.MouseSpeed;
+                int mx = (int)_moveRemX;
+                int my = (int)_moveRemY;
+                _moveRemX -= mx;
+                _moveRemY -= my;
+                if (mx != 0 || my != 0) MouseControl.MoveBy(_cfg, mx, my);
                 if (_mouseLog++ % 20 == 0)
-                    AppLog.Info($"[Mouse] 移动 dx={dx:F3} dy={dy:F3} → 光标位移 ({mx},{my}) 增益={_cfg.MouseSpeed:0.##}");
+                    AppLog.Info($"[Mouse] 移动 dx={dx:F3} dy={dy:F3} → 光标位移 ({mx},{my}) 残量({_moveRemX:F2},{_moveRemY:F2}) 增益={_cfg.MouseSpeed:0.##}");
                 break;
             case MOUSE_LEFT_CLICK:
                 MouseControl.LeftClick();
@@ -517,11 +538,13 @@ public sealed class TcpPenServer : IDisposable
             _ => PenState.Move,
         };
 
-        // 桌面备注开启中：笔迹画到桌面**固定位置**（主屏 0..1 → 主屏全屏），
-        // 不随范围框移动，也不注入系统笔（不打扰当前应用）。
+        // 桌面备注开启中：笔迹画在**桌面范围框内**（与数位板绘制逻辑一致），
+        // 坐标按范围框映射；框缩放/移动时笔迹跟着走。不注入系统笔（不打扰当前应用）。
         if (_noteOn)
         {
             if (state == PenState.Hover) return;
+            var nr = _cfg.GetActiveRect();
+            _note.SetRect(nr.x, nr.y, nr.w, nr.h);
             _note.AddPoint(x, y, state);
             if (state == PenState.Down) { CountDown++; }
             else if (state == PenState.Up) { CountUp++; }
