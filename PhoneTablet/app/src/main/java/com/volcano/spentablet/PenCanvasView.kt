@@ -75,6 +75,7 @@ class PenCanvasView(context: Context) : View(context) {
             if (field == value) return
             field = value
             resetFinger()
+            invalidate()
         }
 
     // ---- 操作框状态（相对书写区，0..1）----
@@ -112,6 +113,38 @@ class PenCanvasView(context: Context) : View(context) {
 
     /** 是否转发悬停事件（关掉可大幅降低数据量） */
     var sendHover: Boolean = true
+
+    // ---- 触摸板模式配置（MainActivity 从 prefs 读入，实时生效）----
+    /** 光标速度倍率（1.0=原速），作用在 MOUSE_MOVE 的归一化位移上 */
+    var cursorSpeed: Float = 1.0f
+    /** 滚动比例倍率（1.0=原速），作用在 MOUSE_SCROLL 的归一化位移上 */
+    var scrollScale: Float = 1.0f
+    /** 触摸板区域背景色 */
+    var trackpadColor: Int = 0xFF20242B.toInt()
+
+    // ---- 手势动作映射（槽位 → 动作码）----
+    // 动作码：0=无 1=滚轮 2=缩放 3=左键 4=右键 5=中键 6=后退 7=前进 8=后退/前进(方向) 9=切换模式
+    var g2Swipe: Int = 1   // 双指滑动：滚轮
+    var g2Tap: Int = 4     // 双指点击：右键
+    var g3Tap: Int = 5     // 三指点击：中键
+    var g3Swipe: Int = 8   // 三指左右滑：后退/前进
+    var g4Tap: Int = 9     // 四指点击：切换模式
+    var g4Swipe: Int = 0   // 四指滑动：无
+    /** 四指等手势触发「切换模式」时回调给 MainActivity */
+    var onSwitchMode: (() -> Unit)? = null
+
+    /** 截图捕获后锁定：忽略手指拖框/捏合，直到截图清除 */
+    var frameLocked: Boolean = false
+
+    /** 发送滚轮（滚轮条用）：dyNorm 为相对书写区高度的归一化位移 */
+    fun sendWheel(dyNorm: Float) {
+        onMouse?.invoke(Protocol.MOUSE_SCROLL, 0f, dyNorm * scrollScale)
+    }
+
+    /** 发送点击（底部按键用）：kind 见 Protocol.MOUSE_LEFT/RIGHT/MIDDLE_CLICK */
+    fun sendClick(kind: Int) {
+        onMouse?.invoke(kind, 0f, 0f)
+    }
 
     private var bitmap: Bitmap? = null
     private var canvas: Canvas? = null
@@ -215,7 +248,12 @@ class PenCanvasView(context: Context) : View(context) {
     }
 
     override fun onDraw(c: Canvas) {
-        bitmap?.let { c.drawBitmap(it, 0f, 0f, null) }
+        if (workMode == Protocol.MODE_MOUSE) {
+            // 触摸板模式：不显示白底笔迹层，用可配置的触摸板底色
+            c.drawColor(trackpadColor)
+        } else {
+            bitmap?.let { c.drawBitmap(it, 0f, 0f, null) }
+        }
         // 操作框：**撑满整个书写区**。
         // 用户的可操作范围始终是最大的一块；捏合只把 PC 上那个桌面框缩小，
         // 两端只要求宽高比一致，所以笔迹落在桌面框里时形状不会变形。
@@ -334,22 +372,26 @@ class PenCanvasView(context: Context) : View(context) {
                 }
             }
 
-            // 在手机屏上画出轨迹（悬停不画）
+            // 在手机屏上画出轨迹（悬停不画；触摸板模式下笔=鼠标笔，不画轨迹）
             if (contact) {
-                when (type) {
-                    Protocol.TYPE_PEN_DOWN -> {
-                        lastX = x; lastY = y; hasLast = true
-                        canvas?.drawPoint(x, y, paint)
-                    }
-                    Protocol.TYPE_PEN_MOVE -> {
-                        if (hasLast) {
-                            canvas?.drawLine(lastX, lastY, x, y, paint)
-                            lastX = x; lastY = y
+                if (workMode == Protocol.MODE_TABLET) {
+                    when (type) {
+                        Protocol.TYPE_PEN_DOWN -> {
+                            lastX = x; lastY = y; hasLast = true
+                            canvas?.drawPoint(x, y, paint)
                         }
+                        Protocol.TYPE_PEN_MOVE -> {
+                            if (hasLast) {
+                                canvas?.drawLine(lastX, lastY, x, y, paint)
+                                lastX = x; lastY = y
+                            }
+                        }
+                        Protocol.TYPE_PEN_UP -> hasLast = false
                     }
-                    Protocol.TYPE_PEN_UP -> hasLast = false
+                    invalidate()
+                } else {
+                    hasLast = false
                 }
-                invalidate()
             }
 
             if (!contact && !sendHover) {
@@ -402,8 +444,8 @@ class PenCanvasView(context: Context) : View(context) {
      * factor：本次的相对缩放量；focusX/focusY：捏合焦点（视图像素坐标）。
      */
     private fun applyZoom(factor: Float, focusX: Float, focusY: Float): Boolean {
+        if (frameLocked) return false // 截图捕获后锁定
         val W = width.toFloat(); val H = height.toFloat()
-        if (W <= 0f || H <= 0f) return false
         if (W <= 0f || H <= 0f) return false
 
         // 捏合焦点在书写区里的相对位置（书写区 ↔ 桌面框是 1:1 的，所以它同时也是焦点在框内的位置）
@@ -451,8 +493,31 @@ class PenCanvasView(context: Context) : View(context) {
         handler.removeCallbacks(singleTapAction)
     }
 
+    /** 手势动作码 → 实际动作（配置分发） */
+    private fun dispatchAction(code: Int, tag: String) {
+        onDebug?.invoke("$tag → ${actionName(code)}")
+        when (code) {
+            1 -> onMouse?.invoke(Protocol.MOUSE_SCROLL, 0f, -0.15f * scrollScale) // 点击滚一格
+            3 -> onMouse?.invoke(Protocol.MOUSE_LEFT_CLICK, 0f, 0f)
+            4 -> onMouse?.invoke(Protocol.MOUSE_RIGHT_CLICK, 0f, 0f)
+            5 -> onMouse?.invoke(Protocol.MOUSE_MIDDLE_CLICK, 0f, 0f)
+            6 -> onMouse?.invoke(Protocol.MOUSE_BACK, 0f, 0f)
+            7 -> onMouse?.invoke(Protocol.MOUSE_FORWARD, 0f, 0f)
+            9 -> onSwitchMode?.invoke()
+        }
+    }
+
+    fun actionName(code: Int) = when (code) {
+        1 -> "滚轮"; 2 -> "缩放"; 3 -> "左键"; 4 -> "右键"; 5 -> "中键"
+        6 -> "后退"; 7 -> "前进"; 8 -> "后退/前进"; 9 -> "切换模式"; else -> "无"
+    }
+
     // ---------- 数位板模式：手指 = 拖动操作框（手机框与桌面框一起动） ----------
     private fun handleFingerPan(action: Int, px: Float, py: Float) {
+        if (frameLocked) { // 截图捕获后锁定范围框，不支持移动
+            panning = false
+            return
+        }
         when (action) {
             MotionEvent.ACTION_DOWN -> {
                 panLastX = px; panLastY = py; panning = true
@@ -570,27 +635,41 @@ class PenCanvasView(context: Context) : View(context) {
                     val dCy = cy - tpLastCy
                     val dSpan = span - tpLastSpan
                     tpMoved += kotlin.math.abs(dCx) + kotlin.math.abs(dCy) + kotlin.math.abs(dSpan)
-                    if (cnt >= 3) {
-                        // 三指左右滑 → 后退/前进
+                    if (cnt >= 4) {
+                        // 四指滑动（可配置动作）
                         val totalDx = cx - tpStartX
-                        if (kotlin.math.abs(totalDx) > SWIPE_PX &&
+                        if (g4Swipe == 8 && kotlin.math.abs(totalDx) > SWIPE_PX &&
                             kotlin.math.abs(cy - tpStartY) < SWIPE_PX) {
                             val back = totalDx > 0
                             onMouse?.invoke(
                                 if (back) Protocol.MOUSE_BACK else Protocol.MOUSE_FORWARD, 0f, 0f)
-                            onDebug?.invoke("三指${if (back) "右" else "左"}滑 → ${if (back) "后退" else "前进"}")
+                            tpStartX = cx
+                        }
+                        // 其它四指滑动动作当前不实现
+                    } else if (cnt == 3) {
+                        // 三指左右滑（可配置动作）
+                        val totalDx = cx - tpStartX
+                        if (g3Swipe == 8 && kotlin.math.abs(totalDx) > SWIPE_PX &&
+                            kotlin.math.abs(cy - tpStartY) < SWIPE_PX) {
+                            val back = totalDx > 0
+                            onMouse?.invoke(
+                                if (back) Protocol.MOUSE_BACK else Protocol.MOUSE_FORWARD, 0f, 0f)
+                            tpStartX = cx
+                        } else if (g3Swipe == 9 && kotlin.math.abs(totalDx) > SWIPE_PX &&
+                            kotlin.math.abs(cy - tpStartY) < SWIPE_PX) {
+                            onSwitchMode?.invoke()
                             tpStartX = cx
                         }
                     } else {
                         val relSpan = if (tpLastSpan > 1f) kotlin.math.abs(dSpan) / tpLastSpan else 0f
-                        if (relSpan > PINCH_REL) {
+                        if (relSpan > PINCH_REL && g2Swipe == 2) {
                             // 捏合 → 缩放
                             val factor = if (tpLastSpan > 1f) span / tpLastSpan else 1f
                             onMouse?.invoke(Protocol.MOUSE_ZOOM, factor, 0f)
                             onDebug?.invoke("双指捏合 ×${String.format("%.3f", factor)} → 缩放")
-                        } else if (kotlin.math.abs(dCx) > 0.5f || kotlin.math.abs(dCy) > 0.5f) {
-                            // 双指滑动 → 滚轮
-                            onMouse?.invoke(Protocol.MOUSE_SCROLL, dCx / w, dCy / h)
+                        } else if (g2Swipe == 1 && (kotlin.math.abs(dCx) > 0.5f || kotlin.math.abs(dCy) > 0.5f)) {
+                            // 双指滑动 → 滚轮（滚动比例可配置）
+                            onMouse?.invoke(Protocol.MOUSE_SCROLL, dCx / w * scrollScale, dCy / h * scrollScale)
                             onDebug?.invoke("双指滑动 dx=${String.format("%.3f", dCx / w)} dy=${String.format("%.3f", dCy / h)} → 滚动")
                         }
                     }
@@ -598,14 +677,14 @@ class PenCanvasView(context: Context) : View(context) {
                     tpLastCy = cy
                     tpLastSpan = span
                 } else {
-                    // 单指 → 移动光标
+                    // 单指 → 移动光标（速度倍率可配置）
                     val dx = cx - tpSingleX
                     val dy = cy - tpSingleY
                     tpSingleX = cx
                     tpSingleY = cy
                     tpMoved += kotlin.math.abs(dx) + kotlin.math.abs(dy)
                     if (kotlin.math.abs(dx) > 0.01f || kotlin.math.abs(dy) > 0.01f) {
-                        onMouse?.invoke(Protocol.MOUSE_MOVE, dx / w, dy / h)
+                        onMouse?.invoke(Protocol.MOUSE_MOVE, dx / w * cursorSpeed, dy / h * cursorSpeed)
                     }
                 }
             }
@@ -625,13 +704,15 @@ class PenCanvasView(context: Context) : View(context) {
                 val dur = android.os.SystemClock.uptimeMillis() - tpStartTime
                 val isTap = tpMoved < tapSlopPx * 1.5f && dur < TAP_TIMEOUT_MS
                 when {
-                    isTap && tpMaxPointers >= 3 -> {
-                        onMouse?.invoke(Protocol.MOUSE_MIDDLE_CLICK, 0f, 0f)
-                        onDebug?.invoke("三指点击 → 鼠标中键")
+                    isTap && tpMaxPointers >= 4 -> {
+                        if (g4Tap == 9) onSwitchMode?.invoke()
+                        onDebug?.invoke("四指点击 → ${actionName(g4Tap)}")
+                    }
+                    isTap && tpMaxPointers == 3 -> {
+                        dispatchAction(g3Tap, "三指点击")
                     }
                     isTap && tpMaxPointers == 2 -> {
-                        onMouse?.invoke(Protocol.MOUSE_RIGHT_CLICK, 0f, 0f)
-                        onDebug?.invoke("双指点击 → 鼠标右键")
+                        dispatchAction(g2Tap, "双指点击")
                     }
                     isTap && tpMaxPointers == 1 -> {
                         // 单击=左键；快速双击=右键（与原有行为一致）

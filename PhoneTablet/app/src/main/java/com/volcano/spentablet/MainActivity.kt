@@ -8,7 +8,9 @@ import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
 import android.util.Log
+import android.graphics.BitmapFactory
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -17,6 +19,7 @@ import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
@@ -49,6 +52,15 @@ class MainActivity : Activity() {
     private lateinit var helpBtn: ImageButton
     /** 设置（齿轮）按钮 */
     private lateinit var settingsBtn: ImageButton
+
+    // ---- 触摸板模式 UI（滚轮条 + 左/中/右键）----
+    private lateinit var trackpadOverlay: android.widget.FrameLayout
+    // ---- 数位板模式工具条（备注/清除/截图）----
+    private lateinit var tabletToolbar: android.widget.LinearLayout
+    /** 截图预览（全屏覆盖） */
+    private var shotView: ImageView? = null
+    /** 桌面备注开启中 */
+    private var noteOn = false
 
     /** 独立设置页（全屏覆盖层，默认隐藏；返回键 / 完成按钮关闭） */
     private lateinit var settingsPage: LinearLayout
@@ -243,13 +255,25 @@ class MainActivity : Activity() {
         statusDot.setOnClickListener { openTopology() }           // 绿/红点 → 网络拓扑
         doneBtn.setOnClickListener { closeSettings() }
 
+        // ---------- 触摸板 UI（滚轮条 + 底部三键，仅触摸板模式可见）----------
+        buildTrackpadUi(root)
+        // ---------- 数位板工具条（备注 / 清除 / 截图）----------
+        buildTabletToolbar(root)
+        // 应用触摸板配置（速度/滚动比例/手势/颜色）
+        applyTrackpadPrefs()
+        // 四指点击等手势 → 切换模式
+        canvas.onSwitchMode = { runOnUiThread { cycleWorkMode() } }
+
         setContentView(root)
         applyOrientationMode()
         updateModeBtn() // 模式按钮图标 = 当前模式
+        updateModeUI()  // 触摸板 UI / 数位板工具条显隐
 
         net = NetClient(host, port) { helloFrame() }
         // 接收 PC 下发的 INFO（版本号 / 计算机名 / 候选 IP）
         net.onInfo = { text -> parsePcInfo(text) }
+        // 接收 PC 下发的截图（PNG）
+        net.onShot = { png -> runOnUiThread { showShot(png) } }
         net.start()
 
         // 开机静默 mDNS 发现：找到唯一一台 PC 且当前没连上 → 直接连上，用户零操作
@@ -262,7 +286,7 @@ class MainActivity : Activity() {
                 val err = net.lastError
                 val w = surfaceW(); val h = surfaceH()
                 val aspect = if (h > 0) String.format("%.3f", w / h) else "?"
-                val modeName = if (workMode == Protocol.MODE_MOUSE) "鼠标" else "数位板"
+                val modeName = if (workMode == Protocol.MODE_MOUSE) "触摸板" else "数位板"
                 runOnUiThread {
                     if (net.connected) {
                         statusDot.setBackgroundColor(Color.parseColor("#33DD55")) // 绿：已连
@@ -347,12 +371,12 @@ class MainActivity : Activity() {
         }
         val radioTablet = RadioButton(this).apply {
             id = View.generateViewId()
-            text = "数位板（默认）：显示范围框，S Pen 在框内作画，手指滑动=移动范围框"
+            text = "数位板：显示范围框，S Pen 在框内作画，手指滑动=移动范围框"
             setTextColor(Color.WHITE)
         }
         val radioMouse = RadioButton(this).apply {
             id = View.generateViewId()
-            text = "鼠标：取消范围框，手指滑动=移动光标，单击=左键，双击=右键"
+            text = "触摸板（默认）：取消范围框，手指滑动=移动光标，右侧滚轮条，底部三键"
             setTextColor(Color.WHITE)
         }
         val modeGroup = RadioGroup(this).apply {
@@ -393,6 +417,74 @@ class MainActivity : Activity() {
         details.addView(hoverBox)
         details.addView(gainText)
         details.addView(gainRow)
+
+        // ---------- 触摸板配置（速度 / 滚动比例 / 手势 / 颜色）----------
+        fun tpTitle(t: String) = TextView(this).apply {
+            textSize = 13f; setTextColor(Color.WHITE)
+            text = t; setPadding(0, dp(14), 0, 2)
+        }
+        fun minusPlus(label: String, get: () -> Float, set: (Float) -> Unit, step: Float, min: Float, max: Float): LinearLayout {
+            val tv = TextView(this).apply {
+                textSize = 14f; setTextColor(Color.WHITE); setPadding(0, 4, 8, 4)
+                text = String.format("%s  %.1f", label, get())
+            }
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            fun mk(delta: Float): Button = Button(this).apply {
+                text = if (delta < 0) "−" else "+"
+                setOnClickListener {
+                    set((get() + delta).coerceIn(min, max))
+                    tv.text = String.format("%s  %.1f", label, get())
+                }
+            }
+            row.addView(mk(-step))
+            row.addView(tv, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            row.addView(mk(step))
+            return row
+        }
+        details.addView(tpTitle("光标速度"))
+        details.addView(minusPlus("速度", { canvas.cursorSpeed }, {
+            canvas.cursorSpeed = it; prefs.edit().putFloat("tpSpeed", it).apply()
+        }, 0.1f, 0.2f, 3.0f))
+        details.addView(tpTitle("滚动比例"))
+        details.addView(minusPlus("滚动", { canvas.scrollScale }, {
+            canvas.scrollScale = it; prefs.edit().putFloat("tpScroll", it).apply()
+        }, 0.2f, 0.2f, 5.0f))
+
+        details.addView(tpTitle("触摸板手势（点击切换动作）"))
+        fun gestureRow(name: String, key: String, def: Int, allowed: IntArray): Button =
+            Button(this).apply {
+                text = "$name：${canvas.actionName(prefs.getInt(key, def))}"
+                setOnClickListener {
+                    val next = cycleGesture(key, prefs.getInt(key, def), allowed)
+                    text = "$name：${canvas.actionName(next)}"
+                }
+            }
+        details.addView(gestureRow("双指滑动", "g2Swipe", 1, intArrayOf(0, 1, 2)))
+        details.addView(gestureRow("双指点击", "g2Tap", 4, intArrayOf(0, 3, 4, 5)))
+        details.addView(gestureRow("三指点击", "g3Tap", 5, intArrayOf(0, 3, 4, 5, 6, 7)))
+        details.addView(gestureRow("三指左右滑", "g3Swipe", 8, intArrayOf(0, 8, 9)))
+        details.addView(gestureRow("四指点击", "g4Tap", 9, intArrayOf(0, 9)))
+
+        details.addView(tpTitle("触摸板颜色"))
+        val colorRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val colorChoices = linkedMapOf(
+            "暗灰" to 0xFF20242B.toInt(), "纯黑" to 0xFF000000.toInt(),
+            "深蓝" to 0xFF17223B.toInt(), "墨绿" to 0xFF16302B.toInt(), "酒红" to 0xFF3B1723.toInt())
+        for ((name, col) in colorChoices) {
+            colorRow.addView(Button(this).apply {
+                text = name
+                setBackgroundColor(col)
+                setTextColor(Color.WHITE)
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    .apply { setMargins(dp(2), 0, dp(2), 0) }
+                setOnClickListener {
+                    prefs.edit().putInt("tpColor", col).apply()
+                    canvas.trackpadColor = col
+                    canvas.invalidate()
+                }
+            })
+        }
+        details.addView(colorRow)
 
         // ---------- 版本信息与更新 ----------
         verText = TextView(this).apply {
@@ -525,17 +617,29 @@ class MainActivity : Activity() {
         workMode = m
         canvas.workMode = m
         prefs.edit().putInt("mode", m).apply()
-        if (::net.isInitialized) net.send(Protocol.buildMode(m))
+        if (::net.isInitialized) {
+            // 切出数位板模式时关掉桌面备注
+            if (m == Protocol.MODE_MOUSE && noteOn) toggleNote(false)
+            net.send(Protocol.buildMode(m))
+        }
         updateModeBtn()
-        Log.i("SpenTablet", "切换工作模式 -> ${if (m == Protocol.MODE_MOUSE) "鼠标" else "数位板"}")
+        updateModeUI()
+        Log.i("SpenTablet", "切换工作模式 -> ${if (m == Protocol.MODE_MOUSE) "触摸板" else "数位板"}")
+    }
+
+    /** 模式相关 UI 显隐：触摸板=滚轮条+三键；数位板=工具条（备注/清除/截图） */
+    private fun updateModeUI() {
+        val mouse = workMode == Protocol.MODE_MOUSE
+        if (::trackpadOverlay.isInitialized) trackpadOverlay.visibility = if (mouse) View.VISIBLE else View.GONE
+        if (::tabletToolbar.isInitialized) tabletToolbar.visibility = if (!mouse) View.VISIBLE else View.GONE
     }
 
     /** 模式按钮图标 = 当前模式（状态与按钮融合） */
     private fun updateModeBtn() {
         val mouse = workMode == Protocol.MODE_MOUSE
         modeBtn.setImageResource(if (mouse) R.drawable.ic_mouse else R.drawable.ic_pen)
-        modeBtn.contentDescription = if (mouse) "当前：鼠标模式（点击切换为数位板）"
-                                   else "当前：数位板模式（点击切换为鼠标）"
+        modeBtn.contentDescription = if (mouse) "当前：触摸板模式（点击切换为数位板）"
+                                   else "当前：数位板模式（点击切换为触摸板）"
     }
 
     /** 问号按钮：操作控制指南（含 PC 端下载链接） */
@@ -550,14 +654,17 @@ class MainActivity : Activity() {
             · <b>切换到另一台 PC</b>：点绿点 → 「局域网里的桌面」点击切换<br>
             · <b>自动发现失败</b>（路由器禁用组播等）：点齿轮 → 填 IP → 连接，<br>
               　或用「扫描网段找 PC」；USB 数据线 + adb 转发时填 127.0.0.1<br><br>
-            <b>【鼠标模式（默认，手指=触摸板）】</b><br>
+            <b>【触摸板模式（默认，手指=触摸板）】</b><br>
             · 单指滑动 = 移动光标；单击 = 左键；双击 = 右键<br>
+            · 右侧滚轮条滑动 = 滚动；底部按键 = 左/中/右键<br>
             · 双指滑动 = 滚动；双指捏合 = 缩放（Ctrl+滚轮）<br>
-            · 双指点击 = 右键；三指点击 = 中键；三指左右滑 = 前进/后退<br><br>
+            · 双指点击 = 右键；三指点击 = 中键；三指左右滑 = 前进/后退<br>
+            · 手势动作可在设置里自定义<br><br>
             <b>【数位板模式（S Pen 作画）】</b><br>
             · 笔在橙色框内 = 在 PC 上作画（压感 / 倾斜）<br>
             · 单指滑动 = 移动范围框；双指捏合 = 缩放范围框<br>
-            · 框可以拖到任意显示器（含多屏）<br><br>
+            · 框可以拖到任意显示器（含多屏）<br>
+            · 底部工具条：桌面备注（笔迹固定在桌面上）/ 清除 / 截图<br><br>
             <b>【屏幕方向】</b>循环按钮：陀螺仪全向 / 横屏双朝向 / 竖屏双朝向<br><br>
             <b>【PC 端下载】</b>（点击打开）：<br>
             <a href="$link">$link</a>
@@ -642,6 +749,178 @@ class MainActivity : Activity() {
         canvas.pressureGain = v.coerceIn(0.5f, 8f)
         prefs.edit().putFloat("gain", canvas.pressureGain).apply()
         gainText.text = "压感增益 ${String.format("%.1f", canvas.pressureGain)}"
+    }
+
+    // ================= 触摸板模式 UI（右侧滚轮条 + 底部左/中/右键）=================
+    private fun buildTrackpadUi(root: FrameLayout) {
+        trackpadOverlay = FrameLayout(this)
+        trackpadOverlay.visibility = View.GONE // 初始按当前模式在 updateModeUI 里定
+
+        // —— 右侧虚拟滚轮：手指上下滑 = 滚动滚轮 ——
+        val wheel = View(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                dp(52), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.parseColor("#33FFFFFF"))
+                cornerRadius = dp(10).toFloat()
+            }
+            setOnTouchListener { v, ev ->
+                when (ev.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        v.tag = ev.y; true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val last = (v.tag as? Float) ?: ev.y
+                        val dy = ev.y - last
+                        v.tag = ev.y
+                        if (canvas.height > 0) {
+                            canvas.sendWheel(dy / canvas.height)
+                        }
+                        true
+                    }
+                    else -> true
+                }
+            }
+        }
+        // —— 底部三个实体感按键：左键 / 中键 / 右键 ——
+        val keysBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(72), Gravity.BOTTOM)
+            setBackgroundColor(Color.parseColor("#CC111111"))
+        }
+        fun keyBtn(label: String, kind: Int): Button = Button(this).apply {
+            text = label
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+                .apply { setMargins(dp(4), dp(6), dp(4), dp(6)) }
+            setOnClickListener { canvas.sendClick(kind) }
+        }
+        keysBar.addView(keyBtn("左键", Protocol.MOUSE_LEFT_CLICK))
+        keysBar.addView(keyBtn("中键", Protocol.MOUSE_MIDDLE_CLICK))
+        keysBar.addView(keyBtn("右键", Protocol.MOUSE_RIGHT_CLICK))
+
+        trackpadOverlay.addView(wheel)
+        trackpadOverlay.addView(keysBar)
+        root.addView(trackpadOverlay, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+    }
+
+    // ================= 数位板工具条（备注 / 清除 / 截图）=================
+    private fun buildTabletToolbar(root: FrameLayout) {
+        tabletToolbar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(56), Gravity.BOTTOM)
+            setBackgroundColor(Color.parseColor("#B3222222"))
+        }
+        noteBtn = Button(this).apply {
+            text = "备注"
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+                .apply { setMargins(dp(4), dp(6), dp(4), dp(6)) }
+            setOnClickListener { toggleNote(!noteOn) }
+        }
+        val clearBtn = Button(this).apply {
+            text = "清除"
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+                .apply { setMargins(dp(4), dp(6), dp(4), dp(6)) }
+            setOnClickListener {
+                net.send(Protocol.buildNote(Protocol.NOTE_UNDO)) // 点击=撤销一笔
+            }
+            setOnLongClickListener {
+                net.send(Protocol.buildNote(Protocol.NOTE_CLEAR)) // 长按=清空
+                true
+            }
+        }
+        shotBtn = Button(this).apply {
+            text = "捕获"
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+                .apply { setMargins(dp(4), dp(6), dp(4), dp(6)) }
+            setOnClickListener { onShotButton() }
+        }
+        tabletToolbar.addView(noteBtn)
+        tabletToolbar.addView(clearBtn)
+        tabletToolbar.addView(shotBtn)
+        tabletToolbar.visibility = View.GONE
+        root.addView(tabletToolbar) // layoutParams 已带 Gravity.BOTTOM
+    }
+
+    private lateinit var noteBtn: Button
+    private lateinit var shotBtn: Button
+    /** 截图当前处于「已捕获」状态（按钮变成清空） */
+    private var shotCaptured = false
+
+    /** 桌面备注开关：开启后 S Pen 直接在 PC 桌面固定位置画笔迹（不随范围框移动） */
+    private fun toggleNote(on: Boolean) {
+        if (!::net.isInitialized) return
+        noteOn = on
+        net.send(Protocol.buildNote(if (on) Protocol.NOTE_ON else Protocol.NOTE_OFF))
+        noteBtn.text = if (on) "备注✓" else "备注"
+        noteBtn.isEnabled = true
+        DebugLog.write("[note] ${if (on) "开启" else "关闭"}")
+    }
+
+    /** 截图按钮状态机：捕获 → 清空 → 捕获…（捕获期间锁定范围框） */
+    private fun onShotButton() {
+        if (!shotCaptured) {
+            if (::net.isInitialized) net.send(Protocol.buildShotReq())
+            canvas.frameLocked = true
+            shotBtn.text = "清空"
+            shotCaptured = true
+        } else {
+            closeShot()
+        }
+    }
+
+    /** 显示 PC 传回的范围框截图（点一下关闭） */
+    private fun showShot(png: ByteArray) {
+        val bmp = BitmapFactory.decodeByteArray(png, 0, png.size)
+        if (bmp == null) {
+            DebugLog.write("[shot] 解码失败 ${png.size}B")
+            return
+        }
+        closeShot()
+        shotView = ImageView(this).apply {
+            setImageBitmap(bmp)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setBackgroundColor(Color.parseColor("#EE000000"))
+            setOnClickListener { closeShot() } // 点一下关闭
+        }
+        addContentView(shotView, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+    }
+
+    private fun closeShot() {
+        shotView?.let {
+            (it.parent as? android.view.ViewGroup)?.removeView(it)
+        }
+        shotView = null
+        if (shotCaptured) {
+            canvas.frameLocked = false
+            shotCaptured = false
+            shotBtn.text = "捕获"
+        }
+    }
+
+    // ================= 触摸板配置（速度/滚动/手势/颜色）=================
+    private fun applyTrackpadPrefs() {
+        canvas.cursorSpeed = prefs.getFloat("tpSpeed", 1.0f)
+        canvas.scrollScale = prefs.getFloat("tpScroll", 1.0f)
+        canvas.trackpadColor = prefs.getInt("tpColor", 0xFF20242B.toInt())
+        canvas.g2Swipe = prefs.getInt("g2Swipe", 1)
+        canvas.g2Tap = prefs.getInt("g2Tap", 4)
+        canvas.g3Tap = prefs.getInt("g3Tap", 5)
+        canvas.g3Swipe = prefs.getInt("g3Swipe", 8)
+        canvas.g4Tap = prefs.getInt("g4Tap", 9)
+        canvas.g4Swipe = prefs.getInt("g4Swipe", 0)
+    }
+
+    /** 循环切换一个手势槽的动作码（设置页按钮用） */
+    private fun cycleGesture(key: String, current: Int, allowed: IntArray): Int {
+        val idx = (allowed.indexOf(current) + 1).let { if (it >= allowed.size) 0 else it }
+        val next = allowed[idx]
+        prefs.edit().putInt(key, next).apply()
+        applyTrackpadPrefs()
+        return next
     }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()

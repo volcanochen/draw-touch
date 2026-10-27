@@ -46,6 +46,9 @@ class NetClient(
 
     /** 收到 PC 主机下发的 INFO 帧（版本号/计算机名/候选 IP 文本）时回调。 */
     var onInfo: ((String) -> Unit)? = null
+    /** 收到 PC 下发的完整截图（PNG 字节） */
+    var onShot: ((ByteArray) -> Unit)? = null
+    private val shotBuf = java.io.ByteArrayOutputStream()
 
     /** 设置变更后主动重发握手帧，通知 PC 采用新的比例模式（无需断开重连）。 */
     fun sendHelloNow() {
@@ -215,6 +218,25 @@ class NetClient(
                         val text = payload.toString(Charsets.UTF_8)
                         Log.i(TAG, "NET 收到 INFO：$text")
                         onInfo?.invoke(text)
+                    }
+                    Protocol.TYPE_SHOT -> {
+                        // 分片：[totalLen:uint32 LE][seq:uint16 LE][data...]
+                        if (payload.size >= 6) {
+                            val bb = java.nio.ByteBuffer.wrap(payload).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                            val total = bb.int
+                            val seq = bb.short.toInt() and 0xFFFF
+                            val data = payload.copyOfRange(6, payload.size)
+                            if (seq == 0) shotBuf.reset()
+                            if (total > 0 && shotBuf.size() + data.size <= total + 65536) {
+                                shotBuf.write(data)
+                                if (shotBuf.size() >= total) {
+                                    val png = shotBuf.toByteArray()
+                                    shotBuf.reset()
+                                    Log.i(TAG, "NET 收到截图 ${png.size} 字节")
+                                    onShot?.invoke(png)
+                                }
+                            }
+                        }
                     }
                     else -> { /* 其它类型暂忽略 */ }
                 }

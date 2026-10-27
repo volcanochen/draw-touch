@@ -40,6 +40,18 @@ object Protocol {
     const val TYPE_RESET: Int = 0x0A
     /** INFO 帧：PC 主机主动下发的版本号/计算机名/候选 IP（供手机端拓扑图展示） */
     const val TYPE_INFO: Int = 0x0C
+    /** 备注帧：数位板模式下控制「桌面笔迹」叠加层。payload[0]=action: 0=关 1=开 2=撤销一笔 3=清空 */
+    const val TYPE_NOTE: Int = 0x0D
+    /** 截图请求（上行）：PC 截取当前范围框画面，经 TYPE_SHOT 分片回传 */
+    const val TYPE_SHOT_REQ: Int = 0x0E
+    /** 截图数据（下行，分片）：头部为 totalLen(4字节) + seq(2字节)，其后是数据，seq 从 0 起 */
+    const val TYPE_SHOT: Int = 0x0F
+
+    // ---- 备注动作 ----
+    const val NOTE_OFF: Int = 0
+    const val NOTE_ON: Int = 1
+    const val NOTE_UNDO: Int = 2
+    const val NOTE_CLEAR: Int = 3
 
     // ---- 工作模式 ----
     const val MODE_TABLET: Int = 0   // 数位板：S Pen 在框内作画，手指拖动框
@@ -182,6 +194,31 @@ object Protocol {
         buf.put(MAGIC2)
         buf.put(VERSION)
         buf.put(TYPE_RESET.toByte())
+        buf.putShort(PAYLOAD_LEN.toShort())
+        for (i in 0 until PAYLOAD_LEN) buf.put(0)
+        return buf.array()
+    }
+
+    /** 备注帧：控制 PC 桌面笔迹叠加层（action 见 NOTE_*）。 */
+    fun buildNote(action: Int): ByteArray {
+        val buf = ByteBuffer.allocate(6 + PAYLOAD_LEN).order(ByteOrder.LITTLE_ENDIAN)
+        buf.put(MAGIC1)
+        buf.put(MAGIC2)
+        buf.put(VERSION)
+        buf.put(TYPE_NOTE.toByte())
+        buf.putShort(PAYLOAD_LEN.toShort())
+        buf.putFloat(action.toFloat())
+        for (i in 4 until PAYLOAD_LEN) buf.put(0)
+        return buf.array()
+    }
+
+    /** 截图请求：PC 截取当前范围框画面并分片回传。 */
+    fun buildShotReq(): ByteArray {
+        val buf = ByteBuffer.allocate(6 + PAYLOAD_LEN).order(ByteOrder.LITTLE_ENDIAN)
+        buf.put(MAGIC1)
+        buf.put(MAGIC2)
+        buf.put(VERSION)
+        buf.put(TYPE_SHOT_REQ.toByte())
         buf.putShort(PAYLOAD_LEN.toShort())
         for (i in 0 until PAYLOAD_LEN) buf.put(0)
         return buf.array()

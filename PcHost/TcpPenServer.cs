@@ -29,6 +29,12 @@ public sealed class TcpPenServer : IDisposable
     private const byte TYPE_STATUS = 0x0B;
     /// <summary>INFO 帧：连接握手后主机主动下发给手机，携带版本号/计算机名/候选 IP。</summary>
     private const byte TYPE_INFO = 0x0C;
+    /// <summary>备注帧：控制桌面笔迹叠加层。payload[0]=action: 0=关 1=开 2=撤销 3=清空</summary>
+    private const byte TYPE_NOTE = 0x0D;
+    /// <summary>截图请求：手机要 PC 截取当前范围框画面</summary>
+    private const byte TYPE_SHOT_REQ = 0x0E;
+    /// <summary>截图数据（下行分片）：payload = totalLen(u32) + seq(u16) + data</summary>
+    private const byte TYPE_SHOT = 0x0F;
 
     // 鼠标帧 kind（与手机端 Protocol.MOUSE_* 一致）
     private const int MOUSE_MOVE = 0;
@@ -57,6 +63,10 @@ public sealed class TcpPenServer : IDisposable
     private MdnsAdvertiser? _mdns;
     /// <summary>当前连接手机的流（握手后下发 INFO 帧用）。</summary>
     private NetworkStream? _clientStream;
+    /// <summary>桌面笔迹叠加层（屏幕备注）</summary>
+    private readonly NoteOverlay _note = new();
+    /// <summary>备注开启中：S Pen 笔迹画到桌面固定位置，不注入系统笔</summary>
+    private bool _noteOn;
 
     /// <summary>各类型帧计数，用于控制台周期性汇报（确认链路是否真的在跑）。</summary>
     public long CountDown, CountMove, CountUp, CountHover, CountNoop;
@@ -159,6 +169,12 @@ public sealed class TcpPenServer : IDisposable
                             // 手机端主动查询主机信息（一般不需要，握手时主机会主动下发）
                             SendInfo(ns);
                             break;
+                        case TYPE_NOTE:
+                            HandleNote(payload);
+                            break;
+                        case TYPE_SHOT_REQ:
+                            HandleShotReq(ns);
+                            break;
                         case TYPE_PEN_DOWN:
                         case TYPE_PEN_MOVE:
                         case TYPE_PEN_UP:
@@ -200,7 +216,7 @@ public sealed class TcpPenServer : IDisposable
         var r = _cfg.GetActiveRect();
         AppLog.Info($"[Hello] 手机书写区 {w:0}×{h:0} 宽高比={(_cfg.PhoneAspect > 0 ? _cfg.PhoneAspect : 0):0.###} " +
                     $"偏好={(mode >= 1f ? "保持等比" : "拉伸")}");
-        AppLog.Info($"[Hello] 工作模式={(_cfg.IsMouseMode ? "鼠标" : "数位板")} " +
+        AppLog.Info($"[Hello] 工作模式={(_cfg.IsMouseMode ? "触摸板" : "数位板")} " +
                     $"操作框 缩放×{_cfg.Scale:0.###} 位置({_cfg.FrameL:0.###},{_cfg.FrameT:0.###}) " +
                     $"→ 桌面映射区域 {r.x},{r.y} {r.w}×{r.h}");
     }
@@ -218,7 +234,7 @@ public sealed class TcpPenServer : IDisposable
         if (_cfg.IsMouseMode)
         {
             if (_panIgnored++ % 20 == 0)
-                AppLog.Warn("[Pan] 收到平移帧，但当前是鼠标模式，已忽略（手指应只控鼠标）");
+                AppLog.Warn("[Pan] 收到平移帧，但当前是触摸板模式，已忽略（手指应只控光标）");
             return;
         }
         _cfg.Pan(dx, dy);
@@ -240,7 +256,7 @@ public sealed class TcpPenServer : IDisposable
         _cfg.SetWorkMode(mouse);
         MouseControl.ReleaseAll();     // 避免左键卡在按下状态
         AppLog.Info(mouse
-            ? "[Mode] 切换到【鼠标模式】：取消操作范围框，手指=触摸板，单击=左键，双击=右键，S Pen=绝对定位鼠标笔"
+            ? "[Mode] 切换到【触摸板模式】：取消操作范围框，手指=触摸板，右侧滚轮条，底部左/中/右键，S Pen=绝对定位鼠标笔"
             : "[Mode] 切换到【数位板模式】：显示操作范围框，S Pen 在框内作画，手指滑动=移动范围框");
     }
 
@@ -313,6 +329,93 @@ public sealed class TcpPenServer : IDisposable
         _zoomLog = 0;          // 复位后重新计数，日志从第 1 帧开始打
         var r = _cfg.GetActiveRect();
         AppLog.Info($"[Reset] 操作框已复位 → 桌面范围 {r.x},{r.y} {r.w}×{r.h}");
+    }
+
+    private int _noteLog;
+
+    /// <summary>备注帧：开关桌面笔迹叠加层 / 撤销一笔 / 清空。</summary>
+    private void HandleNote(byte[] p)
+    {
+        if (p.Length < 4) return;
+        int action = (int)BitConverter.ToSingle(p, 0);
+        switch (action)
+        {
+            case 0: // 关
+                _noteOn = false;
+                _note.Hide();
+                break;
+            case 1: // 开
+                _noteOn = true;
+                _note.Show();
+                break;
+            case 2: // 撤销一笔
+                _note.Undo();
+                break;
+            case 3: // 清空
+                _note.Clear();
+                break;
+        }
+        if (_noteLog++ % 10 == 0 || action >= 2)
+            AppLog.Info($"[Note] action={action}（{(action == 0 ? "关" : action == 1 ? "开" : action == 2 ? "撤销" : "清空")}）");
+    }
+
+    /// <summary>截图请求：截取当前范围框画面，PNG 分片下发到手机。</summary>
+    private void HandleShotReq(Stream ns)
+    {
+        try
+        {
+            var r = _cfg.GetActiveRect();
+            int w = Math.Max(1, r.w), h = Math.Max(1, r.h);
+            using var bmp = new System.Drawing.Bitmap(w, h);
+            using (var g = System.Drawing.Graphics.FromImage(bmp))
+            {
+                g.CopyFromScreen(r.x, r.y, 0, 0, new System.Drawing.Size(w, h));
+            }
+            // 缩到宽 ≤720 再编码，减小传输量
+            System.Drawing.Bitmap send = bmp;
+            if (w > 720)
+            {
+                int nh = Math.Max(1, h * 720 / w);
+                send = new System.Drawing.Bitmap(bmp, 720, nh);
+            }
+            using var ms = new MemoryStream();
+            send.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+            var png = ms.ToArray();
+            if (!ReferenceEquals(send, bmp)) send.Dispose();
+            SendShot(ns, png);
+            AppLog.Info($"[Shot] 截取范围框 ({r.x},{r.y}) {w}×{h} → PNG {png.Length}B 已下发");
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"[Shot] 截图失败：{ex.Message}");
+        }
+    }
+
+    /// <summary>分片下发截图：每帧 payload = totalLen(u32 LE) + seq(u16 LE) + data(≤60000B)。</summary>
+    private void SendShot(Stream ns, byte[] png)
+    {
+        const int CHUNK = 60000;
+        int total = png.Length;
+        int seq = 0;
+        lock (ns)
+        {
+            for (int off = 0; ; off += CHUNK, seq++)
+            {
+                int n = Math.Min(CHUNK, total - off);
+                if (n < 0) n = 0;
+                var payload = new byte[6 + n];
+                BitConverter.GetBytes(total).CopyTo(payload, 0);
+                BitConverter.GetBytes((ushort)seq).CopyTo(payload, 4);
+                if (n > 0) Array.Copy(png, off, payload, 6, n);
+                var frame = new byte[6 + payload.Length];
+                frame[0] = MAGIC1; frame[1] = MAGIC2; frame[2] = 0x01; frame[3] = TYPE_SHOT;
+                frame[4] = (byte)(payload.Length & 0xFF);
+                frame[5] = (byte)((payload.Length >> 8) & 0xFF);
+                Array.Copy(payload, 0, frame, 6, payload.Length);
+                ns.Write(frame, 0, frame.Length);
+                if (n == 0) break;
+            }
+        }
     }
 
     private int _zoomIgnored;
@@ -414,6 +517,18 @@ public sealed class TcpPenServer : IDisposable
             _ => PenState.Move,
         };
 
+        // 桌面备注开启中：笔迹画到桌面**固定位置**（主屏 0..1 → 主屏全屏），
+        // 不随范围框移动，也不注入系统笔（不打扰当前应用）。
+        if (_noteOn)
+        {
+            if (state == PenState.Hover) return;
+            _note.AddPoint(x, y, state);
+            if (state == PenState.Down) { CountDown++; }
+            else if (state == PenState.Up) { CountUp++; }
+            else CountMove++;
+            return;
+        }
+
         // 鼠标模式：S Pen 当绝对定位的鼠标笔（覆盖整块虚拟屏幕），不再走合成笔注入
         if (_cfg.IsMouseMode)
         {
@@ -473,6 +588,7 @@ public sealed class TcpPenServer : IDisposable
     public void Dispose()
     {
         _cts?.Cancel();
+        try { _note.Dispose(); } catch { }
         try { _mdns?.Dispose(); } catch { }
         try { _listener.Stop(); } catch { }
         _cts?.Dispose();

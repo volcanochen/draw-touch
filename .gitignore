@@ -26,3 +26,9 @@ spen_log.txt
 
 # 截图临时文件
 shot_*.png
+v11_*.png
+
+# release 目录只跟踪发布说明，二进制走 GitHub Releases
+release/**/SpenTabletHost-*.zip
+release/**/SpenTabletPhone-*.apk
+release/**/stage/
