@@ -53,6 +53,22 @@ internal static class Program
         }
 
         using var server = new TcpPenServer(cfg, injector);
+        try
+        {
+            server.Start();
+        }
+        catch (System.Net.Sockets.SocketException ex)
+        {
+            // 端口被占用 = 大概率已经有一个 SpenTabletHost 在跑（托盘里没退出干净）
+            MessageBox.Show(
+                $"端口 {cfg.ListenPort} 已被占用（{ex.SocketErrorCode}）。\n\n" +
+                "多半是已经有一个 SpenTabletHost 在运行：\n" +
+                "· 看看右下角托盘图标，双击打开的可能是旧版本界面；\n" +
+                "· 请在托盘图标上右键 →「退出」，再重新启动本程序。\n\n" +
+                "（也可以用 --config 参数启动，确认打开的是哪个版本）",
+                "SpenTablet 启动失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
 
         void SetDebug(bool on)
         {
@@ -71,7 +87,6 @@ internal static class Program
         }
 
         if (cfg.Debug) SetDebug(true);
-        server.Start();
 
         // 桌面上的「操作范围框」：标出笔能覆盖的区域；映射变化或模式切换时自动跟随
         cfg.Changed += () => RegionFrame.Refresh(cfg);

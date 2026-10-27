@@ -13,6 +13,19 @@ namespace SpenTabletHost;
 /// </summary>
 internal sealed class ConfigForm : Form
 {
+    /// <summary>本 EXE 的构建时间（用于窗口标题区分版本）。</summary>
+    private static string BuildStamp()
+    {
+        try
+        {
+            var path = Environment.ProcessPath;
+            if (!string.IsNullOrEmpty(path))
+                return System.IO.File.GetLastWriteTime(path).ToString("MM-dd HH:mm");
+        }
+        catch { }
+        return "dev";
+    }
+
     /// <summary>设计尺寸（96DPI 基准）。高 DPI 下由 WinForms 自动等比放大。</summary>
     private const int DESIGN_W = 700;
     private const int DESIGN_H = 820;
@@ -50,7 +63,8 @@ internal sealed class ConfigForm : Form
         _server = server;
         _setDebug = setDebug;
 
-        Text = "SpenTablet 设置";
+        // 标题里带上构建时间戳：一眼看出当前跑的是哪个版本（避免对着旧窗口排查半天）
+        Text = "SpenTablet 设置  ·  " + BuildStamp();
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
