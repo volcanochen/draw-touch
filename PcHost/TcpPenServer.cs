@@ -875,14 +875,24 @@ public sealed class TcpPenServer : IDisposable
         return true;
     }
 
+    /// <summary>
+    /// 释放资源。**必须幂等**：托盘「退出」会先 `_server.Dispose()`，回到 Program.Main 时
+    /// `using var server` 还会再释放一次；以前第二次会在已释放的 CTS 上 `Cancel()`，
+    /// 抛 ObjectDisposedException 把退出流程搞成「未处理异常」（日志里一片红）。
+    /// </summary>
     public void Dispose()
     {
-        _cts?.Cancel();
+        if (_disposed) return;
+        _disposed = true;
+        try { _cts?.Cancel(); } catch { }
         try { _watchTimer?.Dispose(); } catch { }
         try { _note.Dispose(); } catch { }
         try { _hl.Dispose(); } catch { }
         try { _mdns?.Dispose(); } catch { }
         try { _listener.Stop(); } catch { }
-        _cts?.Dispose();
+        try { _cts?.Dispose(); } catch { }
+        _cts = null;
     }
+
+    private bool _disposed;
 }
