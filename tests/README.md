@@ -121,7 +121,24 @@ cd tests/TouchProbe
 /c/Users/adminlocal/.dotnet/dotnet.exe run -c Release
 ```
 
-**⑤ 手动验证（需要真机 + 人工观察，无自动化脚本）**
+**⑤ 光标注入实测（排查「指针在某个窗口里完全不动」）**
+
+```bash
+# 先编译探针
+cd tests/CursorProbe && /c/Users/adminlocal/.dotnet/dotnet.exe build -c Release
+# 回到仓库根目录，让 host 走一遍真实注入路径并比对光标位置
+cd ../.. && python tests/cursor_inject_check.py            # 默认 +240,+120
+```
+
+- `tests/CursorProbe`（不带参数）= 体检报告：前台窗口所属进程及**是否提权**、`ClipCursor` 裁剪区、
+  `SetCursorPos` / `SendInput(绝对/相对)` 的返回值与真实位移
+- `tests/CursorProbe --cursor` = 只打印 `x,y`，供脚本比对
+- `tests/cursor_inject_check.py` = 断言式：光标必须沿请求方向移动，否则判定注入被拦
+- **注意**：探针与 host 的 DPI 感知不同，同一光标在两边读到的坐标差一个固定比例（实测 1244 ↔ 2177，
+  比值 1.75 = 系统缩放），所以脚本只校验方向、不校验绝对量；精确位移看 host 日志
+  （设 `SPEN_DEBUG_MOVE=1` 启动 host 后会打印 `[MoveBy] p=… 目标=… 绝对后=…`）
+
+**⑥ 手动验证（需要真机 + 人工观察，无自动化脚本）**
 
 - 手机端安装：`PhoneTablet/app/build/outputs/apk/debug/app-debug.apk`（debug 签名，可覆盖安装）
 - PC 端运行：解压 `release/<版本>/assets/SpenTabletHost-win64-vX.Y.Z.zip` 双击 `SpenTabletHost.exe`（自包含，Win10 1809+）
@@ -137,7 +154,9 @@ SpenTablet/
 ├── tests/                                   # 本测试项目
 │   ├── protocol_smoke.py                    # 协议级冒烟测试（20 项断言，唯一“真断言”脚本）
 │   ├── release_gate.py                      # 发布门禁（串起单测 + PC 编译 + 冒烟）
-│   └── TouchProbe/                          # Windows 触摸注入参数诊断探针
+│   ├── cursor_inject_check.py               # 光标注入实测：位置→发移动帧→再读位置，验证注入是否真的生效
+│   ├── CursorProbe/                         # 光标/权限诊断探针（前台进程提权、ClipCursor、注入 API 实测）
+│   ├── TouchProbe/                          # Windows 触摸注入参数诊断探针
 │       ├── Program.cs                       #   探针主程序（11 组参数实验 + 环境信息打印）
 │       ├── TouchProbe.csproj                #   net8.0-windows 控制台工程（UseWindowsForms=true）
 │       ├── bin/  obj/                       #   构建产物（已加入 .gitignore，不入库）
@@ -163,6 +182,16 @@ SpenTablet/
 - 三段式门禁，路径与端口为脚本内常量（`GRADLE`/`JDK`/`SDK`/`DOTNET`/`HOST_EXE`/`PORT=6000`）
 - 自己负责 host 生命周期：`taskkill /IM SpenTabletHost.exe /F` → `subprocess.Popen` 启动 → 轮询 socket 探测 6000 端口（最多 15 秒）→ 跑冒烟 → `terminate()`
 - `--skip-gradle` / `--skip-smoke` 仅用于本地调试，**正式发布不得使用**
+
+**`tests/CursorProbe/Program.cs` + `tests/cursor_inject_check.py`**（排障工具，cursor_inject_check 带断言）
+- `CursorProbe` 先把自己设成 per-monitor DPI aware（不设会算出一堆假位移），然后打印：前台窗口/进程及
+  `TokenElevation`、关注的进程（SpenTabletHost / WorkBuddy / explorer）各自是否提权、`GetClipCursor` 裁剪区、
+  `SetCursorPos` 与 `SendInput(绝对/相对)` 的返回值 + `GetLastError` + 真实位移
+- `cursor_inject_check.py`：TCP 连 host → 发 `TYPE_MOUSE` 移动帧 → 比对光标位置，断言「确实动了且方向一致」
+- **坐标空间坑**：探针与 host 的 DPI 感知不同，同一光标在两边读到 1244 vs 2177（比值 1.75 = 系统缩放），
+  所以脚本只校验方向；精确位移看 host 的 `[MoveBy]`（`SPEN_DEBUG_MOVE=1` 开启）
+- 用途：定位「指针在某些窗口上完全动不了」——实测根因是**前台程序提权、host 未提权**，Windows 的 UIPI 会
+  静默丢弃注入（`SendInput` 返回 0 且 `GetLastError=5`）
 
 **`tests/TouchProbe/Program.cs`**
 - 自定义 `POINTER_INFO` / `TOUCH_INFO` 结构体（Sequential），打印 `Marshal.SizeOf` 与 `SM_REMOTESESSION`、`SM_MAXIMUMTOUCHES`

@@ -69,6 +69,25 @@ internal static class Program
         AppLog.Info($"注入模式: {cfg.Mode}｜比例: {cfg.Aspect}｜工作模式: {cfg.WorkMode}｜端口: {cfg.ListenPort}");
         AppLog.Info($"配置文件: {ConfigStore.Path}");
         AppLog.Info($"日志文件: {AppLog.FilePath}");
+        InputGuard.Init();
+
+        // ---- 提前补平权限 ----
+        // WorkBuddy 这类程序常以管理员身份运行。前台是它们时，普通权限的本进程
+        // SendInput / SetCursorPos 会被 Windows 的 UIPI **静默丢弃** ——
+        // 表现就是「指针在某些窗口上完全动不了，切到别的窗口又正常」。
+        // 这里在启动时一次性解决（只会弹一次 UAC），之后全程可用。
+        // 不想提权可以加参数 --no-elevate（此时靠 InputGuard 的气泡提示定向排障）。
+        bool noElevate = args != null && args.Any(a => a.Equals("--no-elevate", StringComparison.OrdinalIgnoreCase));
+        if (!InputGuard.IsElevated && !noElevate)
+        {
+            if (InputGuard.RelaunchElevated())
+            {
+                AppLog.Info("[Host] 已请求以管理员身份重启，本实例退出（把端口让给新实例）");
+                return;
+            }
+            AppLog.Warn("[Host] 未取得管理员权限，继续以普通权限运行：" +
+                        "当前台是管理员权限程序（如 WorkBuddy）时指针会控制不了");
+        }
 
         IInjector injector = cfg.Mode.Equals("Mouse", StringComparison.OrdinalIgnoreCase)
             ? new MouseInjector(cfg.VirtualX, cfg.VirtualY, cfg.VirtualW, cfg.VirtualH)

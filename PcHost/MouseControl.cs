@@ -82,6 +82,13 @@ internal static class MouseControl
     [DllImport("user32.dll")]
     private static extern bool GetCursorPos(out POINT lpPoint);
 
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int index);
+
+    /// <summary>设环境变量 SPEN_DEBUG_MOVE=1 可打印每一帧的坐标细节（排查「移位不对/Gain 不对」时用）。</summary>
+    private static readonly bool _debugMove =
+        Environment.GetEnvironmentVariable("SPEN_DEBUG_MOVE") == "1";
+
     public static bool LeftDown { get; private set; }
 
     /// <summary>读取当前光标位置（虚拟屏幕坐标）。</summary>
@@ -125,12 +132,31 @@ internal static class MouseControl
             Norm(tx, cfg.VirtualX, cfg.VirtualW), Norm(ty, cfg.VirtualY, cfg.VirtualH));
 
         if (!GetCursorPos(out var q)) return (0, 0);
+        if (_debugMove)
+            AppLog.Info($"[MoveBy] p=({p.X},{p.Y}) 目标=({tx},{ty}) 绝对后=({q.X},{q.Y}) " +
+                        $"cfg屏幕=({cfg.VirtualX},{cfg.VirtualY}) {cfg.VirtualW}x{cfg.VirtualH} " +
+                        $"GetSystemMetrics={GetSystemMetrics(76)},{GetSystemMetrics(77)} " +
+                        $"{GetSystemMetrics(78)}x{GetSystemMetrics(79)}");
         if (q.X == p.X && q.Y == p.Y)
         {
-            // 一个像素都没动：绝对定位被系统拒绝（典型是 Windows 虚拟桌面）→ 相对移动兜底
+            // 一个像素都没动：可能是绝对定位被系统拒绝（Windows 虚拟桌面 / 异构多屏），
+            // 也可能是权限级别不够被 UIPI 静默丢弃 → 先用相对移动兜底，再验一次。
             Send(MOUSEEVENTF_MOVE, dx, dy);
+            if (GetCursorPos(out var r))
+            {
+                if (r.X == p.X && r.Y == p.Y)
+                {
+                    // 绝对 + 相对都不动 = 不是坐标问题，是注入根本没生效（典型：前台是管理员权限程序）
+                    InputGuard.NoteCursorStuck();
+                }
+                else
+                {
+                    InputGuard.NoteOk();
+                }
+            }
             return (0, 0);
         }
+        InputGuard.NoteOk();
         // 走了一部分：把没走完的残量留给调用方（下一帧接着走）
         return (tx - q.X, ty - q.Y);
     }
@@ -514,7 +540,7 @@ internal static class MouseControl
                 mi = new MOUSEINPUT { mouseData = unchecked((uint)delta), dwFlags = flag }
             }
         };
-        SendInput(1, inputs, Marshal.SizeOf<INPUT>());
+        SendInputChecked(inputs, $"滚轮(flags=0x{flag:X4})");
     }
 
     private static void SendKey(int vk, bool up)
@@ -527,7 +553,7 @@ internal static class MouseControl
                 ki = new KEYBDINPUT { wVk = (ushort)vk, dwFlags = up ? KEYEVENTF_KEYUP : 0u }
             }
         };
-        SendInput(1, inputs, Marshal.SizeOf<INPUT>());
+        SendInputChecked(inputs, $"按键(vk=0x{vk:X2})");
     }
 
     private static void TapKey(int vk)
@@ -547,6 +573,20 @@ internal static class MouseControl
         return (int)Math.Round(f * 65535.0);
     }
 
+    /// <summary>
+    /// 统一的注入出口。
+    ///
+    /// **必须检查返回值**：前台窗口属于更高完整性级别的进程时（如以管理员身份运行的
+    /// WorkBuddy），UIPI 会让 SendInput 直接返回 0 并置 ERROR_ACCESS_DENIED，
+    /// 系统既不报错也不动光标。以前这里把返回值丢了，于是「指针冻住」只能靠猜。
+    /// </summary>
+    private static void SendInputChecked(INPUT[] inputs, string where)
+    {
+        uint n = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
+        if (n == 0) InputGuard.NoteSendFailed(where, Marshal.GetLastWin32Error());
+        else InputGuard.NoteOk();
+    }
+
     private static void Send(uint flags, int dx = 0, int dy = 0)
     {
         var inputs = new[]
@@ -557,6 +597,6 @@ internal static class MouseControl
                 mi = new MOUSEINPUT { dx = dx, dy = dy, dwFlags = flags }
             }
         };
-        SendInput(1, inputs, Marshal.SizeOf<INPUT>());
+        SendInputChecked(inputs, $"鼠标事件(flags=0x{flags:X4})");
     }
 }

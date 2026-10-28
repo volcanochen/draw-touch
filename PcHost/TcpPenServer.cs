@@ -127,7 +127,23 @@ public sealed class TcpPenServer : IDisposable
     public void Start()
     {
         _cts = new CancellationTokenSource();
-        _listener.Start();
+        // 提权重启时，新实例往往比旧实例先启动完成，端口要等一会儿才释放 ——
+        // 这里重试绑定最多约 6 秒，避免「以管理员身份重启」后弹一个「端口被占用」的假故障框。
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                _listener.Start();
+                break;
+            }
+            catch (System.Net.Sockets.SocketException ex)
+                when (ex.SocketErrorCode == System.Net.Sockets.SocketError.AddressAlreadyInUse && attempt < 20)
+            {
+                if (attempt == 0)
+                    AppLog.Warn($"[Server] 端口 {_cfg.ListenPort} 暂时被占用（大概率是刚被替换的旧实例），等待释放…");
+                System.Threading.Thread.Sleep(300);
+            }
+        }
         Console.WriteLine($"[Server] 监听端口 {_cfg.ListenPort}，等待手机连接（adb reverse tcp:{0} tcp:{0} 或填 PC IP）", _cfg.ListenPort);
         _ = AcceptLoop(_cts.Token);
 

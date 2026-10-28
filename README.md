@@ -61,7 +61,10 @@
 
 1. **PC 端**：从 [Releases](https://github.com/volcanochen/drawing-phone/releases/latest)  
    下载 `SpenTabletHost-win64-*.zip` 解压运行 `SpenTabletHost.exe`（自包含单文件、免安装、托盘常驻）；  
-   或自行编译：`cd PcHost && dotnet publish -c Release` → `publish/SpenTabletHost.exe`
+   或自行编译：`cd PcHost && dotnet publish -c Release` → `publish/SpenTabletHost.exe`  
+   > 首次运行会请求一次**管理员权限**（UAC）。原因：前台程序若以管理员身份运行（WorkBuddy 就是），
+   > Windows 会拦掉普通权限进程的鼠标注入，表现为「指针在这一窗口上完全动不了」。
+   > 不想提权可加参数 `--no-elevate`，届时托盘会提示并在菜单里提供一键提权重启。
 2. **手机端**：从 Releases 下载 `SpenTabletPhone-*.apk` 安装；  
    或 Android Studio 打开 `PhoneTablet/` 目录自行构建
 3. **连上就用**：PC 和手机连同一网络 → 打开 App → 绿点亮起 → 完成！  
@@ -289,6 +292,9 @@ SpenTablet/
 | PC 收到帧但没笔迹       | 确认绘画软件窗口在前台；用托盘菜单的调试浮窗验证笔数据                    |
 | 防火墙拦截            | PC 端首次运行会自动添加 6000 端口规则，被安全软件拦时手动放行            |
 | VPN / 多网卡导致连错 IP | PC 端日志会列出全部候选 IP；拓扑页可核对实际连接地址                  |
+| **指针在某些窗口上完全动不了**，切到别的窗口又正常 | 该窗口是**以管理员身份运行**的（如 WorkBuddy）。Windows 的 UIPI 会静默丢弃低权限进程的鼠标注入。右键托盘 →「以管理员身份重启」；或启动时接受 UAC（默认会自动提权）。加 `--no-elevate` 可跳过提权 |
+
+> 「指针冻住」这条在日志里能直接看到证据：`[Guard] 指针注入失效：…；前台：WorkBuddy (pid …, 管理员权限)`。
 
 ## 已知限制 / 后续可加
 

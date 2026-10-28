@@ -40,3 +40,7 @@ tests/TouchProbe/obj/
 # 排障临时副本
 PcHost/testcopy/
 PcHost/zipstage/
+
+# 测试探针构建产物
+tests/*/bin/
+tests/*/obj/

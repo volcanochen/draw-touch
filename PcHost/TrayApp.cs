@@ -65,6 +65,14 @@ internal sealed class TrayApp : ApplicationContext
                 _tray.Icon = conn ? _iconOn : _iconOff;
             }
             _tray.Text = $"{(_cfg.IsMouseMode ? "SpenTablet 鼠标模式" : "SpenTablet 数位板")}｜{(conn ? "已连接手机" : "未连接")}";
+
+            // 注入被权限拦截（前台是管理员权限程序）→ 弹一次气泡，告诉用户怎么一键修好
+            var notice = InputGuard.TakeNotice();
+            if (notice != null)
+            {
+                AppLog.Warn("[Host] 托盘提示：" + notice.Replace("\n", " "));
+                _tray.ShowBalloonTip(8000, "指针控制被系统拦截", notice, ToolTipIcon.Warning);
+            }
         };
         _tick.Start();
 
@@ -141,6 +149,37 @@ internal sealed class TrayApp : ApplicationContext
             catch (Exception ex) { MessageBox.Show($"打开日志失败：{ex.Message}", "SpenTablet"); }
         };
         menu.Items.Add(mLog);
+
+        // 权限补平入口：前台是「以管理员身份运行」的程序时，普通权限的注入会被 UIPI 丢弃
+        var mCheck = new ToolStripMenuItem("检查指针注入权限…");
+        mCheck.Click += (_, _) =>
+        {
+            string r = InputGuard.SelfCheck(_cfg);
+            AppLog.Info("[Host] 自检结果：" + r.Replace("\n", " "));
+            MessageBox.Show(r, "SpenTablet 注入自检", MessageBoxButtons.OK,
+                r.StartsWith("✅") ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+        };
+        menu.Items.Add(mCheck);
+
+        var mElev = new ToolStripMenuItem(InputGuard.IsElevated
+            ? "已是管理员权限运行"
+            : "以管理员身份重启（修复指针在管理员权限窗口失效）")
+        {
+            Enabled = !InputGuard.IsElevated
+        };
+        mElev.Click += (_, _) =>
+        {
+            if (!InputGuard.RelaunchElevated())
+            {
+                MessageBox.Show("提权未完成（可能被取消）。\n\n" +
+                                "也可以手动：右键 SpenTabletHost.exe →「以管理员身份运行」。",
+                    "SpenTablet", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            AppLog.Info("[Host] 用户从托盘请求以管理员身份重启");
+            Exit();
+        };
+        menu.Items.Add(mElev);
 
         menu.Items.Add(new ToolStripSeparator());
 
