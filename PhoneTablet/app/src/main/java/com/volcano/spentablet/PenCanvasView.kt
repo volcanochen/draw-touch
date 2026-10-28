@@ -349,6 +349,33 @@ class PenCanvasView(context: Context) : View(context) {
         panGate.reset()
     }
 
+    /**
+     * 兜底复位：屏幕上一根**手指**都不剩了。
+     *
+     * 为什么不能用 pointerCount 判断：笔按在屏幕上时 pointerCount 仍 > 0，
+     * 而 `handleTrackpad` 只数手指，于是「笔按着 + 最后一根手指抬起」这一帧
+     * 会在 `cnt == 0` 处直接 return —— 状态一个都不清：
+     *   · 手机端 tpActiveFingers 卡在非零 → 之后所有笔事件被"笔让位"逻辑 continue 掉；
+     *   · PC 端 _fingerOnPad 永远停在 true → 连悬停都丢。
+     * 结果就是「心跳正常、界面有响应，但光标一动不动」，只能切模式/重启才好。
+     *
+     * 这里只清触摸板手势状态，**不**补发左键抬起（左键可能真的被按钮按着）。
+     */
+    private fun resetTrackpadState() {
+        if (tpActiveFingers == 0) return
+        tpActiveFingers = 0
+        tpMaxPointers = 0
+        tpMoved = 0f
+        tpFingerId = -1
+        tpPinchMode = false
+        tpStartSpan = 0f
+        trackpadMoveGate.reset()
+        trackpadScrollGate.reset()
+        // onFingerState(false) 内部就会发 MOUSE_FINGER(0) 给 PC，不用再单独发一帧
+        onFingerState?.invoke(false)
+        onDebug?.invoke("手势状态兜底复位（手指已全部离开）")
+    }
+
     // ---- 诊断计数：index = toolType(0..4)，第二维 = down/move/up/hover ----
     private val counters = Array(5) { IntArray(4) }
 
@@ -479,8 +506,16 @@ class PenCanvasView(context: Context) : View(context) {
         if (contact && action == MotionEvent.ACTION_DOWN) onTouchDown?.invoke()
 
         // 鼠标模式：手指要**整体**处理（多点触控必须拿到所有手指的坐标）
-        if (contact && workMode == Protocol.MODE_MOUSE && countFingers(e) > 0) {
-            handleTrackpad(e)
+        if (contact && workMode == Protocol.MODE_MOUSE) {
+            val fingers = countFingers(e)
+            if (fingers > 0) {
+                handleTrackpad(e)
+            } else if (TrackpadState.mustReset(true, contact, fingers, action)) {
+                // 兜底：一根手指都不剩了（笔可能还按着屏幕，所以 pointerCount 不为 0）。
+                // 必须在派发笔事件**之前**复位，否则 tpActiveFingers 卡住会让下面
+                // 所有笔事件被"笔让位"逻辑吞掉 —— 这就是「手机突然怎么动都不动」的根因。
+                resetTrackpadState()
+            }
         }
 
         for (i in 0 until n) {
@@ -1037,7 +1072,10 @@ class PenCanvasView(context: Context) : View(context) {
             }
 
             MotionEvent.ACTION_POINTER_UP -> {
-                tpActiveFingers = maxOf(0, cnt - 1)
+                // 上面的统计循环已经排除了「抬起的那根」，cnt 本身就是剩下的手指数，
+                // 不能再减 1 —— 否则双指抬成单指时 tpActiveFingers 会掉到 0，
+                // 提前给 PC 发「手指全离开」，笔的悬停流立刻回来抢光标（表现为光标往回跳）。
+                tpActiveFingers = TrackpadState.fingersAfterPointerUp(cnt)
                 // 手指数变化：重置捏合判定基准（3 指收成 2 指后要能重新捏合）
                 tpStartSpan = span
                 tpPinchMode = false

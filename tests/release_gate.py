@@ -92,7 +92,8 @@ def gate_smoke():
         if not ok:
             return
         r = run([sys.executable, ROOT / "tests" / "protocol_smoke.py", "--port", str(PORT)])
-        step("protocol_smoke.py 16 项断言", r.returncode == 0)
+        # 不写死断言条数：用例会随回归项增加，写死容易与脚本实际不符
+        step("protocol_smoke.py 全部断言", r.returncode == 0)
     finally:
         host.terminate()
         try:

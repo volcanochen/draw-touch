@@ -130,6 +130,7 @@ def main():
     check("INFO 含版本号", info is not None and b"ver=" in info[1])
 
     # ---- 2. 截图（捕获功能）----
+    mark_shot = log_size(log)
     s.sendall(frame(T_SHOT_REQ, bytes(24)))
     png = bytearray()
     total = -1
@@ -154,8 +155,15 @@ def main():
     except socket.timeout:
         pass
     png_magic = bytes(png[:8]) == b"\x89PNG\r\n\x1a\n" if png else False
-    check("SHOT_REQ → 收到完整截图分片", ok_shot and total > 0, f"{len(png)}B / total={total}")
-    check("截图是合法 PNG", png_magic)
+    # 截屏依赖「输入桌面」：host 若由服务/非交互会话（CI、计划任务、自动化代理）拉起，
+    # GetDC(NULL) 返回空 → CopyFromScreen 抛「句柄无效」，这是环境限制而非功能回归。
+    # 这种情况标记 SKIP，不判 FAIL（否则门禁永远红）。
+    shot_blocked = log_contains(log, "截图失败：句柄无效", mark_shot, timeout=1.0)
+    if shot_blocked and not ok_shot:
+        print("  [SKIP] SHOT_REQ → 当前会话拿不到输入桌面（非交互启动），跳过截图断言")
+    else:
+        check("SHOT_REQ → 收到完整截图分片", ok_shot and total > 0, f"{len(png)}B / total={total}")
+        check("截图是合法 PNG", png_magic)
 
     # ---- 3. MODE 切换 ----
     mark = log_size(log)
@@ -192,9 +200,14 @@ def main():
         ok_end = log_contains(log, "[TouchZoom] 捏合结束（抬起接触点）", mark, timeout=5)
         check("捏合结束后接触点自动抬起（UP 帧修复回归）", ok_end)
     else:
-        # 回退路径：应看到熔断日志（可能在本轮之前的运行中已触发，故全文搜索）
+        # 回退路径成立的条件（二选一）：
+        #   a) 触摸注入被系统禁用 → 出现熔断日志「已熔断」；
+        #   b) 配置里注入模式本来就是 Pen（用笔注入，不碰触摸）→ 直接走 Ctrl 回退，
+        #      这种情况下根本不涉及熔断，不能要求有熔断日志。
         ok_cb = log_contains(log, "已熔断", 0, timeout=2)
-        check("注入不可用 → 熔断并回退 Ctrl+/-（无接触点残留）", ok_cb)
+        pen_mode = log_contains(log, "注入模式: Pen", 0, timeout=1.0)
+        check("缩放回退路径成立（触摸注入熔断 或 配置为 Pen 注入）", ok_cb or pen_mode,
+              "已熔断" if ok_cb else ("注入模式=Pen" if pen_mode else "两者皆无"))
 
     # ---- 6. 激光笔开/关 ----
     mark = log_size(log)
@@ -222,6 +235,51 @@ def main():
     mark = log_size(log)
     s.sendall(frame(T_RESET, bytes(24)))
     time.sleep(0.5)
+
+    # ---- 8. 「笔让位」兜底超时：手机漏发「手指离开」时不能永久僵死 ----
+    # 回归背景：手机上抬最后一根手指时若笔还按着屏幕，旧版会漏发"手指离开"信号，
+    # PC 的 _fingerOnPad 永远停在 true，之后笔怎么动光标都不动（心跳却正常）。
+    s.sendall(frame(T_MODE, f32(1.0)))  # 回到触摸板
+    time.sleep(0.3)
+    mark = log_size(log)
+    s.sendall(frame(T_MOUSE, f32(M_FINGER, 1.0, 0.0)))  # 手指落上触摸板 → S Pen 让位
+    check("MOUSE_FINGER=1 → S Pen 让位", log_contains(log, "手指已落在触摸板上", mark))
+    # 之后不再发任何 MOUSE 帧 → 4 秒后应自动解除让位
+    mark = log_size(log)
+    ok_release = log_contains(log, "自动解除「笔让位」", mark, timeout=10.0)
+    check("4s 无手指事件 → 自动解除「笔让位」（防永久僵死）", ok_release)
+
+    # ---- 9. 自愈：心跳谎报已发帧数 → PC 必须真的断开连接 ----
+    # 回归背景：旧版这里的 break 只跳出 switch、不跳出读循环，自愈等于没写。
+    mark = log_size(log)
+    s2 = socket.create_connection((args.host, args.port), timeout=5)
+    try:
+        s2.sendall(frame(T_HELLO, hello))
+        recv_frame(s2, timeout=5)  # 吃掉 INFO 回包
+        # 第一条心跳定基线（PC 以此为准，不用全局残留值）
+        s2.sendall(frame(0x00, struct.pack("<I", 1)))
+        time.sleep(0.3)
+        # 谎报：手机自称又发了 5000 个鼠标帧，实际一个没发
+        s2.sendall(frame(0x00, struct.pack("<I", 5001)))
+        closed = False
+        deadline = time.time() + 6
+        while time.time() < deadline:
+            try:
+                if s2.recv(64) == b"":
+                    closed = True
+                    break
+            except (ConnectionResetError, ConnectionAbortedError):
+                closed = True
+                break
+            except socket.timeout:
+                pass
+        check("谎报已发帧数 → PC 主动断开连接（自愈真的生效）", closed)
+        check("断开原因写入日志", log_contains(log, "帧丢失", mark))
+    finally:
+        try:
+            s2.close()
+        except OSError:
+            pass
 
     s.close()
     print(f"\n== 结果：{len(passed)} 通过, {len(failed)} 失败 ==")

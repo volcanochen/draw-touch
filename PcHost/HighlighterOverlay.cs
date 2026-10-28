@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
@@ -176,6 +177,74 @@ public sealed class HighlighterOverlay : IDisposable
         private static HookProc? _hookProc;      // 必须持有委托引用，否则会被 GC 回收
         private IntPtr _hook;
 
+        // ---- 「有意义」的系统光标：文本 I 型、手型、等待、调整大小……
+        // 这些位置如果也被换成激光笔，用户就完全看不出"这里能打字/能点/能拖动"，
+        // 之前的表现就是「一开激光笔，桌面上所有位置都是激光图标」。
+        // 只替换普通箭头（IDC_ARROW），这些一律保留原样。
+        private const int IDC_IBEAM = 32513;
+        private const int IDC_WAIT = 32514;
+        private const int IDC_CROSS = 32515;
+        private const int IDC_UPARROW = 32516;
+        private const int IDC_SIZENWSE = 32642;
+        private const int IDC_SIZENESW = 32643;
+        private const int IDC_SIZEWE = 32644;
+        private const int IDC_SIZENS = 32645;
+        private const int IDC_SIZEALL = 32646;
+        private const int IDC_NO = 32648;
+        private const int IDC_HAND = 32649;
+        private const int IDC_APPSTARTING = 32650;
+        private const int IDC_HELP = 32651;
+        private static readonly int[] ReservedCursorIds =
+        {
+            IDC_IBEAM, IDC_WAIT, IDC_CROSS, IDC_UPARROW,
+            IDC_SIZENWSE, IDC_SIZENESW, IDC_SIZEWE, IDC_SIZENS, IDC_SIZEALL,
+            IDC_NO, IDC_HAND, IDC_APPSTARTING, IDC_HELP,
+        };
+        /// <summary>保留光标的句柄集合（必须在 SPI_SETCURSORS 之后重建，否则句柄已失效）。</summary>
+        private readonly HashSet<IntPtr> _reservedCursors = new();
+
+        private void BuildReservedCursorSet()
+        {
+            _reservedCursors.Clear();
+            foreach (var id in ReservedCursorIds)
+            {
+                var h = LoadCursor(IntPtr.Zero, (IntPtr)id);
+                if (h != IntPtr.Zero) _reservedCursors.Add(h);
+            }
+            AppLog.Info($"[Highlighter] 已记录 {_reservedCursors.Count} 个保留光标（I型/手型/等待/调整大小…）");
+        }
+
+        /// <summary>
+        /// 只在当前光标是**普通箭头**时才换成激光笔。
+        /// 以前这里是无条件 SetCursor，于是应用刚把光标设成 I 型/手型，
+        /// 10ms 后就被定时器踩回激光图标 —— 整块屏幕任何位置都是激光笔。
+        /// </summary>
+        private void ApplyLaserIfArrow()
+        {
+            var laser = _cursor?.Handle ?? IntPtr.Zero;
+            if (laser == IntPtr.Zero) return;
+            var ci = new CURSORINFO { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<CURSORINFO>() };
+            if (!GetCursorInfo(ref ci)) return;
+            if (ci.hCursor == IntPtr.Zero) return;          // 光标被隐藏（全屏游戏/输入时）
+            if (ci.hCursor == laser) return;                // 已经是激光笔，不用重复设
+            if (_reservedCursors.Contains(ci.hCursor)) return; // 文本/手型/等待… → 保持原样
+            SetCursor(laser);
+            // 自证：只有**真正替换成功**那一次才校验（在钩子线程里 SetCursor 才生效；
+            // 叠加层线程调用通常是 no-op，在那里校验只会刷出误导日志）
+            if (!_cursorVerified)
+            {
+                _cursorVerified = true;
+                var ci2 = new CURSORINFO { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<CURSORINFO>() };
+                if (GetCursorInfo(ref ci2))
+                {
+                    bool ok = ci2.hCursor == laser;
+                    AppLog.Info($"[Highlighter] 系统光标 → 激光笔 " +
+                                $"{(ok ? "已生效 ✓" : "尚未替换（当前句柄不同）")}" +
+                                $"｜保留光标 {_reservedCursors.Count} 个（这些位置不会被替换）");
+                }
+            }
+        }
+
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr SetWindowsHookEx(int idHook, HookProc lpfn, IntPtr hMod, uint dwThreadId);
 
@@ -208,7 +277,6 @@ public sealed class HighlighterOverlay : IDisposable
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool SystemParametersInfo(uint uiAction, uint uiParam, IntPtr pvParam, uint fWinIni);
 
-        private IntPtr _origArrow;
         private bool _sysCursorReplaced;
         /// <summary>原来的箭头方案（注册表里 "Arrow" 的值），关掉时原样写回</summary>
         private string? _origCursorScheme;
@@ -270,6 +338,8 @@ public sealed class HighlighterOverlay : IDisposable
                 key.SetValue("Arrow", _curFilePath!, Microsoft.Win32.RegistryValueKind.String);
                 SystemParametersInfo(SPI_SETCURSORS, 0, IntPtr.Zero, SPIF_SENDCHANGE);
                 _sysCursorReplaced = true;
+                // 方案刷新后系统光标句柄全部重建 → 保留光标集合必须重新采集
+                BuildReservedCursorSet();
                 AppLog.Info("[Highlighter] 系统箭头 → 激光笔（游标方案已生效）");
             }
             catch (Exception ex)
@@ -500,6 +570,8 @@ public sealed class HighlighterOverlay : IDisposable
                 EnsureCursor();
                 InstallHook();
                 ReplaceSystemCursor();
+                // 即便方案替换失败也要有一份保留光标集合，否则又会退回「全部变激光」
+                if (_reservedCursors.Count == 0) BuildReservedCursorSet();
                 ClearTrail();
                 _timer ??= new System.Windows.Forms.Timer { Interval = 10 };
                 _timer.Tick -= OnTick;
@@ -561,7 +633,8 @@ public sealed class HighlighterOverlay : IDisposable
                         msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP || msg == WM_MBUTTONDOWN ||
                         msg == WM_MOUSEWHEEL)
                     {
-                        SetCursor(_cursor.Handle);
+                        // 只在箭头位置贴激光笔；I 型/手型/调整大小等保持原样
+                        ApplyLaserIfArrow();
                     }
                 }
             }
@@ -634,21 +707,12 @@ public sealed class HighlighterOverlay : IDisposable
             try
             {
                 if (!_enabled) return;
-                // 把系统指针换成激光笔（每帧重申一次：别的程序改光标后要抢回来）
-                if (_cursor?.Handle != null && _cursor.Handle != IntPtr.Zero)
+                // 把系统指针换成激光笔（每帧重申一次：别的程序改光标后要抢回来）。
+                // 注意只在「当前是普通箭头」时替换 —— 否则文本 I 型、链接手型、
+                // 等待、调整大小等光标都会被踩成激光图标。
+                if (_cursor is { } cur && cur.Handle != IntPtr.Zero)
                 {
-                    SetCursor(_cursor.Handle);
-                    // 自证：确认系统当前光标确实已经是我们的激光笔
-                    if (!_cursorVerified)
-                    {
-                        _cursorVerified = true;
-                        var ci = new CURSORINFO { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<CURSORINFO>() };
-                        if (GetCursorInfo(ref ci))
-                        {
-                            bool ok = ci.hCursor == _cursor.Handle;
-                            AppLog.Info($"[Highlighter] 系统光标 → 激光笔 {(ok ? "已生效 ✓" : "尚未替换（当前句柄不同）")}");
-                        }
-                    }
+                    ApplyLaserIfArrow();
                 }
                 TrackCursor();
             }

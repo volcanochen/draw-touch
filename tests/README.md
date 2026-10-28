@@ -76,7 +76,7 @@ MOUSE 动作码（`MOUSE_*`）：0 移动 / 1 左键按下 / 2 左键抬起 / 3 
 
 ### 2.3 运行命令
 
-**① Android 单元测试（34 项，纯 JVM，无需设备）**
+**① Android 单元测试（44 项，纯 JVM，无需设备）**
 
 ```bash
 cd SpenTablet/PhoneTablet
@@ -87,7 +87,7 @@ ANDROID_HOME=/c/VOLCANO/myws/myEnv/tools/android-sdk \
 
 > `--offline` 依赖本机 Gradle 缓存中已有 `junit:junit:4.13.2`；**首次使用需去掉 `--offline` 联网下载**。
 
-**② 协议级冒烟测试（16 项断言）**
+**② 协议级冒烟测试（20 项断言）**
 
 前置：PC 端 host 正在运行并监听 6000 端口。
 
@@ -135,7 +135,7 @@ cd tests/TouchProbe
 ```
 SpenTablet/
 ├── tests/                                   # 本测试项目
-│   ├── protocol_smoke.py                    # 协议级冒烟测试（16 项断言，唯一“真断言”脚本）
+│   ├── protocol_smoke.py                    # 协议级冒烟测试（20 项断言，唯一“真断言”脚本）
 │   ├── release_gate.py                      # 发布门禁（串起单测 + PC 编译 + 冒烟）
 │   └── TouchProbe/                          # Windows 触摸注入参数诊断探针
 │       ├── Program.cs                       #   探针主程序（11 组参数实验 + 环境信息打印）
@@ -146,7 +146,8 @@ SpenTablet/
     ├── ProtocolTest.kt                      # 帧编码字节级断言 + 动作码契约（9 项）
     ├── UpdateCheckerVersionTest.kt          # 语义化版本比较（7 项）
     ├── GestureDeadZoneTest.kt               # 移动死区闸门 + 捏合判定死区（13 项）
-    └── TwoFingerGestureTest.kt              # 双指手势状态机集成验证（5 项）
+    ├── TwoFingerGestureTest.kt              # 双指手势状态机集成验证（5 项）
+    └── TrackpadStateTest.kt                 # 触摸板状态防卡死（复位判定/手指数，10 项）
 ```
 
 ### 各文件职责
@@ -156,7 +157,7 @@ SpenTablet/
 - `recv_frame()`：按帧头长度精确收包，帧头非 `SP` 直接抛 `AssertionError`
 - `find_host_log()`：在 4 个候选目录（publish / bin-Release / bin-Debug / 根 publish）中**按 mtime 选最新**的 `SpenTabletHost.log`（host 日志写在各自 EXE 同目录）
 - `log_contains(log, needle, since_size, timeout)`：只检索「本次标记之后的日志增量」，避免匹配到历史日志造成假通过
-- 分 7 段用例：握手 → 截图 → 模式 → 鼠标 → 捏合 → 激光笔 → 备注/平移/复位
+- 分 9 段用例：握手 → 截图 → 模式 → 鼠标 → 捏合 → 激光笔 → 备注/平移/复位 → 笔让位兜底超时 → 自愈断连
 
 **`tests/release_gate.py`**
 - 三段式门禁，路径与端口为脚本内常量（`GRADLE`/`JDK`/`SDK`/`DOTNET`/`HOST_EXE`/`PORT=6000`）
@@ -251,7 +252,7 @@ SpenTablet/
 
 ## 5. 测试覆盖
 
-### 5.1 协议级冒烟测试（`tests/protocol_smoke.py`，16 项）
+### 5.1 协议级冒烟测试（`tests/protocol_smoke.py`，20 项）
 
 | # | 验证点 | 测试方式 | 断言依据 | 结果（2026-10-28 实测） |
 |---|---|---|---|---|
@@ -265,17 +266,21 @@ SpenTablet/
 | 8 | MOUSE 左键点击被处理 | 接口测试 + 日志断言 | 日志出现「单击 → 左键」 | 通过 |
 | 9 | 捏合缩放帧被处理 | 接口测试 + 日志断言 | 日志出现「[Mouse] 捏合 ×」 | 通过 |
 | 10 | 缩放路径生效（触摸注入 **或** Ctrl+/- 回退） | 接口测试 + 日志断言 | 出现「[TouchZoom] 开始捏合」或「Ctrl+ / Ctrl-」 | 通过（本机走回退路径） |
-| 11 | 触摸注入路径下接触点自动抬起 | 条件断言 | 仅当 #10 走注入路径时断言「[TouchZoom] 捏合结束（抬起接触点）」 | 本机不适用（本机注入不可用） |
-| 11' | 注入不可用时熔断并回退 | 条件断言 | 走回退路径时全文检索「已熔断」 | 通过 |
+| 11 | 触摸注入路径下接触点自动抬起 | 条件断言 | 仅当 #10 走注入路径时断言「[TouchZoom] 捏合结束（抬起接触点）」 | 本机不适用（本机注入模式=Pen） |
+| 11' | 缩放回退路径成立 | 条件断言 | 走回退路径时检索「已熔断」**或**启动日志「注入模式: Pen」（配置本来就是笔注入时不会熔断，属预期） | 通过 |
 | 12 | 激光笔开 | 接口测试 + 日志断言 | 日志出现「激光笔已开启」 | 通过 |
 | 13 | 激光笔关 | 接口测试 + 日志断言 | 日志出现「激光笔已关闭」 | 通过 |
 | 14 | 桌面笔迹开 | 接口测试 + 日志断言 | 日志出现「[Note] action=1」 | 通过 |
 | 15 | 桌面笔迹换色 | 接口测试 + 日志断言 | 日志出现「[Note] 笔迹颜色」 | 通过 |
 | 16 | 操作范围框平移 | 接口测试 + 日志断言 | 连发 13 帧 PAN 后出现「[Pan] 平移」（host 每 12 帧抽样记一次日志） | 通过 |
+| 17 | 「S Pen 让位」标志被置起 | 接口测试 + 日志断言 | 发 MOUSE_FINGER(1) → 日志出现「手指已落在触摸板上」 | 通过 |
+| 18 | **让位标志可被兜底解除（防永久僵死）** | 接口测试 + 日志断言 | 置起让位后 4s 内不发任何 MOUSE 帧 → 日志出现「自动解除「笔让位」」 | 通过 |
+| 19 | **自愈：心跳谎报已发帧数 → 真的断开** | 接口测试（独立连接） | 首帧心跳定基线，随后谎报 +5000 帧而实际 0 帧 → 服务端关闭 socket（回归：旧版 `break` 只跳出 switch，自愈形同虚设） | 通过 |
+| 20 | 自愈原因可追溯 | 日志断言 | 日志出现「帧丢失：手机称已发 …」 | 通过 |
 
-> 第 11/11' 为互斥分支，每次运行只会执行其中一条，因此单次运行的断言数为 16。
+> 第 11/11' 为互斥分支，每次运行只会执行其中一条，因此单次运行的断言数为 20。
 
-### 5.2 Android 单元测试（`PhoneTablet/app/src/test/`，34 项）
+### 5.2 Android 单元测试（`PhoneTablet/app/src/test/`，44 项）
 
 | # | 测试类 | 测试方法 | 验证点 | 结果 |
 |---|---|---|---|---|
@@ -313,6 +318,16 @@ SpenTablet/
 | 32 | TwoFingerGestureTest | `捏合中途回到起点会交还给双指滑动` | 捏合→退出→滑动恢复 | 通过 |
 | 33 | TwoFingerGestureTest | `两指靠得近时轻微变化不触发捏合` | span 50px 时 20% 变化仍被绝对阈值拦下 | 通过 |
 | 34 | TwoFingerGestureTest | `双指滚动的移动死区拦得住手抖` | 累计 10px（< 14px）不滚动，越过后恢复滚动 | 通过 |
+| 35 | TrackpadStateTest | `笔按着时最后一根手指抬起必须复位` | 笔还在屏上（pointerCount>0）但手指数为 0 的 `ACTION_POINTER_UP` → 必须触发复位 | 通过 |
+| 36 | TrackpadStateTest | `ACTION_UP 且没有手指时要复位` | 只剩笔时 `ACTION_UP` 也要复位 | 通过 |
+| 37 | TrackpadStateTest | `ACTION_CANCEL 且没有手指时要复位` | 系统取消手势（来电/切应用）时也要复位 | 通过 |
+| 38 | TrackpadStateTest | `还有手指在屏幕上时不能复位` | 双指抬成单指（剩 1 根）**不能**清零，否则 PC 提前认为手指全离开、笔悬停抢光标 | 通过 |
+| 39 | TrackpadStateTest | `按下和移动事件不触发复位` | 只有结束类事件才复位 | 通过 |
+| 40 | TrackpadStateTest | `数位板模式不复位触摸板状态` | 模式隔离 | 通过 |
+| 41 | TrackpadStateTest | `悬停事件不算接触不复位` | `contact=false` 的悬停不参与 | 通过 |
+| 42 | TrackpadStateTest | `抬起一根后剩余手指数直接取统计值` | `fingersAfterPointerUp(1) == 1`（回归：原代码 `cnt-1` 会得 0） | 通过 |
+| 43 | TrackpadStateTest | `最后一根手指抬起后剩余为零` | `0 → 0`，异常输入负数归零 | 通过 |
+| 44 | TrackpadStateTest | `结束类事件判定` | UP / CANCEL / POINTER_UP 为结束；DOWN / MOVE / POINTER_DOWN 不是 | 通过 |
 
 ### 5.3 诊断探针（`tests/TouchProbe/Program.cs`）—— 打印结果，非断言
 
@@ -338,6 +353,8 @@ SpenTablet/
 | **双指捏合不干扰双指滑动** | 两指做小幅捏合后继续平移 | **部分通过**（判定逻辑由 `TwoFingerGestureTest` #30~#33 覆盖；真机双指手势无法用 `adb input` 脚本化——该命令只支持单指，多点需 root 才能 `sendevent`） |
 | **移动死区：手抖不动光标** | 手指按下后微抖（< 死区）→ 观察 PC 光标 | **通过**（adb 单指注入实测：死区 20dp 时 3/15/30px 位移产生 0 条移动帧，60px 才放行；改 8dp 后 30px 起放行） |
 | **死区数值可配置并持久化** | 设置页调整三项死区 → 重启 App | **通过**（三项均写入 `SharedPreferences`（`tpMoveDz`/`tpPinchDzRel`/`tpPinchDzDp`），重启后读回生效，已用注入 prefs 实测） |
+| **激光笔只替换箭头，不吞掉 I 型/手型光标** | 开激光笔 → 移到文本框/链接/窗口边框 → 观察光标形态 | **待验证**（逻辑已改：`ApplyLaserIfArrow` 只在当前光标不属于 13 个保留系统光标时才替换；真机需肉眼确认） |
+| **触摸板手指状态不卡死** | 笔按在屏上 + 手指点一下再抬起 → 只动笔 → 观察 PC 光标 | **待验证**（根因已修：`cnt==0` 时强制 `resetTrackpadState`；兜底由冒烟 #17/#18 与单测 #35~#44 覆盖，真机笔+手指组合需人工） |
 
 ---
 

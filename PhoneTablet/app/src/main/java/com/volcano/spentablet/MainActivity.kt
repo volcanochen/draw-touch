@@ -739,6 +739,15 @@ class MainActivity : Activity() {
         updateModeUI()
     }
 
+    override fun onResume() {
+        super.onResume()
+        // 回到前台先把手势中间态清零。
+        // 锁屏 / 切应用 / 下拉通知栏时系统可能吞掉「手指抬起 / ACTION_CANCEL」，
+        // 残留的 tpActiveFingers 会让之后所有笔事件被"笔让位"逻辑吃掉，
+        // 表现为「回来手机就动不了了」。
+        if (::canvas.isInitialized) canvas.resetGestures()
+    }
+
     override fun onBackPressed() {
         if (settingsPage.visibility == View.VISIBLE) {
             closeSettings()
