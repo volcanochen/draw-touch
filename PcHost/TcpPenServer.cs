@@ -662,20 +662,46 @@ public sealed class TcpPenServer : IDisposable
             string name = "SpenTablet_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".png";
             if (toPc)
             {
-                string dir = _cfg.ShotSaveDir;
-                if (string.IsNullOrWhiteSpace(dir))
-                    dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "SpenTablet");
-                try
+                // 保存目录按优先级逐个试。真实环境里「图片库」可能根本建不了目录：
+                // OneDrive 重定向未落地、公司策略锁死、已知文件夹指向失效路径等，
+                // 都会让 Directory.CreateDirectory 直接抛「未能找到文件」。只认死一个
+                // 默认位置的话，用户点了截屏却哪儿都没有文件，等于功能没做。
+                var candidates = new List<string>();
+                if (!string.IsNullOrWhiteSpace(_cfg.ShotSaveDir))
+                    candidates.Add(_cfg.ShotSaveDir!);
+                candidates.Add(Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "SpenTablet"));
+                candidates.Add(Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "SpenTablet"));
+                candidates.Add(Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SpenTablet"));
+                candidates.Add(Path.Combine(AppContext.BaseDirectory, "shots"));
+
+                string? saved = null;
+                var errs = new List<string>();
+                int idx = 0;
+                foreach (var dir in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
                 {
-                    Directory.CreateDirectory(dir);
-                    string file = Path.Combine(dir, name);
-                    File.WriteAllBytes(file, png);
-                    AppLog.Info($"[Save] 已存到电脑：{file}（{png.Length}B）");
+                    try
+                    {
+                        Directory.CreateDirectory(dir);
+                        string file = Path.Combine(dir, name);
+                        File.WriteAllBytes(file, png);
+                        saved = file;
+                        AppLog.Info($"[Save] 已存到电脑：{file}（{png.Length}B）");
+                        // 落到备用位置要明说，否则用户会去图片库里翻半天
+                        if (idx > 0)
+                            AppLog.Warn($"[Save] 注意：默认位置不可用，本次改存到 {file}");
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        errs.Add($"{dir} → {ex.Message}");
+                    }
+                    idx++;
                 }
-                catch (Exception ex)
-                {
-                    AppLog.Warn($"[Save] 存到电脑失败：{ex.Message}");
-                }
+                if (saved == null)
+                    AppLog.Warn("[Save] 存到电脑失败，已依次试过：" + string.Join(" | ", errs));
             }
             if (toPhone)
             {

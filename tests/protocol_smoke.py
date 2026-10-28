@@ -11,6 +11,9 @@ SpenTablet PC 端协议级冒烟测试（回归套件核心）。
   5. MOUSE_ZOOM 捏合 → 触摸板缩放 API（接触点须正常抬起）或 Ctrl+滚轮 回退
   6. HL 激光笔开/关 → host.log 出现开启/关闭
   7. NOTE 备注/换色/撤销/清空、PAN 平移、RESET 复位 → host.log 断言
+  7b. 桌面笔迹走分层窗口：画布能建起来、画一笔不报错（去黑边回归）
+  8. 「笔让位」兜底超时 / 9. 心跳谎报自愈
+  10. SAVE_REQ 截屏保存 → 存到电脑图片库 + 下发手机相册
 
 用法：python tests/protocol_smoke.py [--host 127.0.0.1] [--port 6000]
 前置：PC 端 SpenTabletHost.exe 已启动（脚本会自动定位其日志文件）。
@@ -31,6 +34,8 @@ VER = 1
 
 T_HELLO, T_PAN, T_MOUSE, T_MODE, T_ZOOM, T_RESET = 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A
 T_INFO, T_NOTE, T_SHOT_REQ, T_SHOT, T_HL = 0x0C, 0x0D, 0x0E, 0x0F, 0x10
+T_SAVE_REQ, T_SAVE = 0x11, 0x12
+T_PEN_DOWN, T_PEN_MOVE, T_PEN_UP = 0x01, 0x02, 0x03
 
 M_MOVE, M_LEFT_DOWN, M_LEFT_UP, M_LEFT_CLICK, M_RIGHT_CLICK = 0, 1, 2, 3, 4
 M_SCROLL, M_ZOOM, M_MIDDLE, M_FINGER, M_LEFT_DOUBLE = 5, 6, 7, 15, 16
@@ -102,6 +107,14 @@ def log_contains(log: Path, needle: str, since_size: int, timeout=4.0) -> bool:
             pass
         time.sleep(0.2)
     return False
+
+
+def log_text_since(log: Path, since_size: int) -> str:
+    """取日志自 since_size 之后的全部文本（用来从日志里抠出保存路径等细节）。"""
+    try:
+        return log.read_bytes()[since_size:].decode("utf-8", "ignore")
+    except OSError:
+        return ""
 
 
 def log_size(log: Path) -> int:
@@ -235,9 +248,9 @@ def main():
     # ---- 7. NOTE / PAN / RESET ----
     s.sendall(frame(T_MODE, f32(0.0)))  # 回数位板
     time.sleep(0.3)
-    mark = log_size(log)
+    mark_note = log_size(log)
     s.sendall(frame(T_NOTE, f32(1.0, 0.0)))
-    check("NOTE 开 → 日志确认", log_contains(log, "[Note] action=1", mark))
+    check("NOTE 开 → 日志确认", log_contains(log, "[Note] action=1", mark_note))
     mark = log_size(log)
     s.sendall(frame(T_NOTE, f32(4.0, 2.0)))
     check("NOTE 换色 → 日志确认", log_contains(log, "[Note] 笔迹颜色", mark))
@@ -250,6 +263,31 @@ def main():
     mark = log_size(log)
     s.sendall(frame(T_RESET, bytes(24)))
     time.sleep(0.5)
+
+    # ---- 7b. 桌面笔迹分层窗口（去黑边回归）----
+    # 回归背景：旧实现是 Black 背景 + TransparencyKey=Black，抗锯齿边缘与黑底混色 → 笔迹带黑框。
+    # 现改为 WS_EX_LAYERED + PArgb DIB + UpdateLayeredWindow。这里断言「画布建得起来 + 画一笔不炸」。
+    # 注意：PEN 帧负载需 ≥24B：x, y, pressure, tiltX, tiltY, buttons(占位)
+    def pen(x: float, y: float, p: float = 1.0) -> bytes:
+        return f32(x, y, p, 0.0, 0.0, 0.0)
+
+    s.sendall(frame(T_PEN_DOWN, pen(0.35, 0.35)))
+    for i in range(12):
+        s.sendall(frame(T_PEN_MOVE, pen(0.35 + i * 0.02, 0.35 + i * 0.01)))
+        time.sleep(0.02)
+    s.sendall(frame(T_PEN_UP, pen(0.55, 0.45, 0.0)))
+    check("桌面笔迹 → 分层画布就绪（真透明，无黑边）",
+          log_contains(log, "[NoteOverlay] 分层画布就绪", mark_note, timeout=5))
+    # 四个失败锚点只要出现一个就算回归失败（用 mark_note 起算，覆盖整个笔迹阶段）
+    broke = [a for a in ("[NoteOverlay] 画笔迹异常", "[NoteOverlay] 推送画面失败",
+                         "[NoteOverlay] CreateDIBSection 失败", "[NoteOverlay] UpdateLayeredWindow 失败")
+             if log_contains(log, a, mark_note, timeout=0.6)]
+    check("画一笔笔迹不报错", not broke, "、".join(broke))
+    # 测试笔迹不能留在用户桌面上：画完立刻清空并关闭备注层
+    s.sendall(frame(T_NOTE, f32(3.0, 0.0)))   # 清空
+    time.sleep(0.2)
+    s.sendall(frame(T_NOTE, f32(0.0, 0.0)))   # 关
+    time.sleep(0.2)
 
     # ---- 8. 「笔让位」兜底超时：手机漏发「手指离开」时不能永久僵死 ----
     # 回归背景：手机上抬最后一根手指时若笔还按着屏幕，旧版会漏发"手指离开"信号，
@@ -295,6 +333,52 @@ def main():
             s2.close()
         except OSError:
             pass
+
+    # ---- 10. 截屏保存（TYPE_SAVE_REQ=0x11：full, 存电脑, 存手机）----
+    # 新功能回归：抓「桌面 + 笔迹」存成 PNG，电脑落盘 + 分片下发手机相册。
+    # 与 SHOT_REQ 同理，非交互会话拿不到输入桌面时标记 SKIP，不判 FAIL。
+    mark = log_size(log)
+    s.sendall(frame(T_SAVE_REQ, f32(0.0, 1.0, 1.0)))  # 范围框 / 存电脑 / 存手机
+    # 顺序很关键：**先把下发的分片读完**，再去做日志断言。
+    # PNG 动辄几百 KB，服务端 SendSave 会一路写满发送缓冲后阻塞；客户端这时候跑去
+    # 轮询日志 = 不读 socket，写就被卡死，最后抛「无法将数据写入传输连接」，
+    # 「已下发手机存相册」这条日志永远写不出来 —— 上一版就是这么误报的。
+    got = 0
+    total = -1
+    deadline = time.time() + 25
+    try:
+        while time.time() < deadline:
+            fr = recv_frame(s, timeout=10)
+            if fr is None:
+                break
+            if fr[0] != T_SAVE:
+                continue
+            t, _seq = struct.unpack("<IH", fr[1][:6])
+            if _seq == 0:
+                got = 0
+                total = t
+            if len(fr[1]) == 6:      # 终止帧（n=0）：收完它服务端才算写完
+                break
+            got += len(fr[1]) - 6
+    except socket.timeout:
+        pass
+    if total < 0 and log_contains(log, "[Save] 截屏失败：句柄无效", mark, timeout=1.0):
+        print("  [SKIP] SAVE_REQ → 当前会话拿不到输入桌面（非交互启动），跳过截屏断言")
+    else:
+        ok_pc = log_contains(log, "[Save] 已存到电脑：", mark, timeout=3.0)
+        check("SAVE_REQ → 已保存到电脑", ok_pc)
+        if ok_pc:
+            import re
+            m = re.search(r"\[Save\] 已存到电脑：(.+?)（", log_text_since(log, mark))
+            file_ok, detail = False, ""
+            if m:
+                fp = Path(m.group(1).strip())
+                file_ok = fp.exists() and fp.stat().st_size > 0 and \
+                    fp.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+                detail = f"{fp.name} {fp.stat().st_size if fp.exists() else 0}B"
+            check("落盘文件是合法 PNG", file_ok, detail)
+        check("SAVE_REQ → 收到下发给手机的分片 PNG",
+              total > 0 and got >= total, f"{got}/{total}B")
 
     s.close()
     print(f"\n== 结果：{len(passed)} 通过, {len(failed)} 失败 ==")
