@@ -130,15 +130,22 @@ object Protocol {
         return buf.array()
     }
 
-    /** 心跳/保活帧：type=0，服务器忽略但不关闭连接，用于维持 adb reverse 隧道活跃。 */
-    fun buildNoop(): ByteArray {
+    /**
+     * 心跳/保活帧：type=0，服务器忽略但不关闭连接，用于维持 adb reverse 隧道活跃。
+     *
+     * payload[0..3] 带上「手机已发出的鼠标帧数」（int LE）：PC 收到后与它自己
+     * 实际收到的鼠标帧数比对，差值过大就说明帧在链路上丢了（半死连接），
+     * PC 会主动断开重连。传 0 表示不参与比对。
+     */
+    fun buildNoop(mouseSent: Int = 0): ByteArray {
         val buf = ByteBuffer.allocate(6 + PAYLOAD_LEN).order(ByteOrder.LITTLE_ENDIAN)
         buf.put(MAGIC1)
         buf.put(MAGIC2)
         buf.put(VERSION)
         buf.put(0x00.toByte())
         buf.putShort(PAYLOAD_LEN.toShort())
-        for (i in 0 until PAYLOAD_LEN) buf.put(0)
+        buf.putInt(mouseSent)
+        for (i in 4 until PAYLOAD_LEN) buf.put(0)
         return buf.array()
     }
 

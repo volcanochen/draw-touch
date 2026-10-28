@@ -93,6 +93,15 @@ public sealed class TcpPenServer : IDisposable
 
     /// <summary>各类型帧计数，用于控制台周期性汇报（确认链路是否真的在跑）。</summary>
     public long CountDown, CountMove, CountUp, CountHover, CountNoop;
+    /// <summary>按帧类型统计实收数量（诊断：手机上发了什么帧、这里收到没有）。</summary>
+    public readonly System.Collections.Concurrent.ConcurrentDictionary<byte, long> FrameTypes =
+        new System.Collections.Concurrent.ConcurrentDictionary<byte, long>();
+    /// <summary>手机自报「已发出的鼠标帧数」（心跳帧里带过来的），用于发现链路丢帧。</summary>
+    private long _phoneMouseSent;
+    /// <summary>最近一次收到任意帧的时间（Environment.TickCount64）。</summary>
+    private long _lastFrameAt;
+    /// <summary>最近一次收到输入帧（鼠标/笔/手势）的时间。</summary>
+    private long _lastInputAt;
     public double LastPressure;
     public int LastX, LastY;
 
@@ -167,6 +176,19 @@ public sealed class TcpPenServer : IDisposable
                 _moveRemY = 0;
                 AppLog.Info($"[Desktop] 已切换 Windows 虚拟桌面（{DesktopInfo.CurrentDesktopName()}）→ 重新锚定光标");
             }
+
+            // 看门狗：连接还在、心跳也在收，但很久没有输入帧 → 提醒一次（不自动断，
+            // 因为「用户没碰手机」和「帧丢了」在这里长得一样；真正的判定靠心跳里的帧数比对）
+            var now = Environment.TickCount64;
+            var lastFrame = System.Threading.Interlocked.Read(ref _lastFrameAt);
+            var lastInput = System.Threading.Interlocked.Read(ref _lastInputAt);
+            if (_clientConnected && lastFrame > 0 && now - lastFrame < 5000 && lastInput > 0
+                && now - lastInput > 120000)
+            {
+                AppLog.Warn($"[Watchdog] 心跳正常但已 {(now - lastInput) / 1000}s 没有输入帧" +
+                            "（若手机在滑动却无反应，等手机心跳里的帧数比对日志出现即可自动重连）");
+                System.Threading.Interlocked.Exchange(ref _lastInputAt, now); // 只提醒一次，避免刷屏
+            }
         }
         catch (Exception ex)
         {
@@ -192,25 +214,42 @@ public sealed class TcpPenServer : IDisposable
     private void HandleClient(TcpClient client, CancellationToken token)
     {
         _clientConnected = true;
+        var remote = client.Client.RemoteEndPoint?.ToString() ?? "?";
+        AppLog.Info($"[Server] 手机接入 {remote}");
         try
         {
             using (client)
             using (var ns = client.GetStream())
             {
-                ns.ReadTimeout = Timeout.Infinite;
+                // 关键：不能无限等待读。半死的连接（手机写线程写进死链路）会让读线程
+                // 永远卡在一帧上，表现为「手机在发帧、但 PC 一帧都收不到」。
+                // 设一个读超时：超时抛 IOException → 连接被丢弃 → 手机自动重连 → 自愈。
+                ns.ReadTimeout = 20000;
+                ns.WriteTimeout = 5000;
                 _clientStream = ns;
                 var header = new byte[6];
+                // 本连接上的「帧丢失」检测：手机心跳里会报它已发多少鼠标帧，
+                // 这里记录基线；差值过大就说明帧在链路上丢了（半死连接）→ 主动断开重连。
+                long basePhone = _phoneMouseSent;
+                long recvMouse = 0;
                 while (!token.IsCancellationRequested)
                 {
                     if (!ReadExactly(ns, header, 6)) break;
                     if (header[0] != MAGIC1 || header[1] != MAGIC2)
                     {
-                        Console.Error.WriteLine("[Server] 帧头错误，丢弃连接");
+                        AppLog.Warn($"[Server] 帧头错误，丢弃连接 {remote}");
                         break;
                     }
                     int len = header[4] | (header[5] << 8);
                     var payload = new byte[len];
                     if (!ReadExactly(ns, payload, len)) break;
+                    FrameTypes.AddOrUpdate(header[3], 1L, (_, v) => v + 1);
+                    var now = Environment.TickCount64;
+                    System.Threading.Interlocked.Exchange(ref _lastFrameAt, now);
+                    // 输入帧（鼠标/笔/手势）：用于「心跳正常但输入帧不来」的看门狗
+                    if (header[3] == TYPE_MOUSE || (header[3] >= TYPE_PEN_DOWN && header[3] <= TYPE_PEN_HOVER)
+                        || header[3] == TYPE_PAN || header[3] == TYPE_ZOOM)
+                        System.Threading.Interlocked.Exchange(ref _lastInputAt, now);
 
                     switch (header[3])
                     {
@@ -222,6 +261,7 @@ public sealed class TcpPenServer : IDisposable
                             break;
                         case TYPE_MOUSE:
                             HandleMouse(payload);
+                            recvMouse++;
                             break;
                         case TYPE_MODE:
                             HandleMode(payload);
@@ -256,6 +296,19 @@ public sealed class TcpPenServer : IDisposable
                             break;
                         default:
                             CountNoop++;
+                            // 心跳帧（type=0）：payload[0..3] 是手机自报的「已发鼠标帧数」
+                            if (header[3] == 0x00 && payload.Length >= 4)
+                            {
+                                long said = BitConverter.ToInt32(payload, 0);
+                                if (said > 0) _phoneMouseSent = said;
+                                long delta = said - basePhone;
+                                if (delta > recvMouse + 100)
+                                {
+                                    AppLog.Warn($"[Server] 帧丢失：手机称已发 {delta} 个鼠标帧，PC 只收到 {recvMouse} 个 " +
+                                                $"→ 链路半死，断开重连（手机会自动重连）");
+                                    break;
+                                }
+                            }
                             break;
                     }
                 }

@@ -34,10 +34,16 @@ class NetClient(
     private val queue = ArrayBlockingQueue<ByteArray>(CAPACITY)
     @Volatile
     private var running = false
+    /** 写线程代次：stop() 后递增，旧线程据此自杀，杜绝「旧线程复活另开 socket」 */
+    @Volatile
+    private var generation = 0
     private var thread: Thread? = null
 
     /** 统计，供界面显示 */
     @Volatile var sentFrames = 0L
+        private set
+    /** 已发出的「鼠标帧」数量：写进心跳里，让 PC 判断帧有没有在链路上丢 */
+    @Volatile var mouseFramesSent = 0L
         private set
     @Volatile var droppedFrames = 0L
         private set
@@ -91,11 +97,17 @@ class NetClient(
     fun start() {
         if (running) return
         running = true
-        thread = Thread({ loop() }, "net-writer").apply { isDaemon = true; start() }
+        val gen = ++generation
+        thread = Thread({ loop(gen) }, "net-writer").apply { isDaemon = true; start() }
     }
 
     fun stop() {
         running = false
+        // 递增代次：让旧写线程即使被唤醒也立刻退出。
+        // 否则 stop() 后再 start()，旧线程会在 running 重新为 true 时「复活」，
+        // 另开一条 socket —— 两条写线程抢同一个队列，帧会写进其中一条（可能是死链路），
+        // 表现就是「手机一直在发帧、PC 却一帧收不到」。
+        generation++
         thread?.interrupt()
         thread = null
         synchronized(queue) { queue.clear() }
@@ -126,8 +138,8 @@ class NetClient(
         }
     }
 
-    private fun loop() {
-        while (running) {
+    private fun loop(gen: Int) {
+        while (running && gen == generation) {
             var socket: Socket? = null
             try {
                 socket = Socket()
@@ -154,12 +166,13 @@ class NetClient(
                 }
 
                 var lastBeat = 0L
-                while (running) {
+                while (running && gen == generation) {
                     val frame = queue.poll(200, TimeUnit.MILLISECONDS)
                     if (frame != null) {
                         out.write(frame)
                         out.flush()
                         sentFrames++
+                        if (frame[3] == Protocol.TYPE_MOUSE.toByte()) mouseFramesSent++
                         if (frame[3] == Protocol.TYPE_PEN_DOWN.toByte() ||
                             frame[3] == Protocol.TYPE_PEN_UP.toByte()
                         ) {
@@ -168,7 +181,8 @@ class NetClient(
                     }
                     val now = System.currentTimeMillis()
                     if (now - lastBeat >= 1000) {
-                        out.write(Protocol.buildNoop())
+                        // 心跳里带上「已发鼠标帧数」：PC 用它发现帧在链路上丢了
+                        out.write(Protocol.buildNoop(mouseFramesSent.toInt()))
                         out.flush()
                         lastBeat = now
                     }
@@ -183,6 +197,8 @@ class NetClient(
                 connected = false
                 try { socket?.close() } catch (_: Exception) { }
                 Log.w(TAG, "NET 断开，准备重连")
+                // 代次已被 stop() 推进 → 旧线程到此为止，绝不复活、绝不再开一条 socket
+                if (gen != generation) return
                 if (running) {
                     try { Thread.sleep(400) } catch (_: InterruptedException) { return }
                 }

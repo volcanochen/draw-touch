@@ -44,11 +44,16 @@ internal sealed class TrayApp : ApplicationContext
 
         // 每 2 秒把帧统计写进日志（无控制台时唯一的“还活着”信号）
         _tick = new System.Windows.Forms.Timer { Interval = 2000 };
+        string lastDist = "";
         _tick.Tick += (_, _) =>
         {
             AppLog.Info($"[统计] DOWN={_server.CountDown} MOVE={_server.CountMove} UP={_server.CountUp} " +
                         $"HOVER={_server.CountHover} NOOP={_server.CountNoop} | 最新 ({_server.LastX},{_server.LastY}) " +
                         $"p={_server.LastPressure:F2}");
+            // 帧类型分布（诊断用）：只在分布变化时记录，避免刷屏
+            var dist = string.Join(" ", _server.FrameTypes.OrderBy(k => k.Key)
+                .Select(k => $"0x{k.Key:X}={k.Value}"));
+            if (dist != lastDist) { lastDist = dist; AppLog.Info($"[帧分布] {dist}"); }
             // 手机端切换模式时同步托盘勾选（Changed 事件来自网络线程，这里在 UI 线程上跟）
             if (_mWork != null && _mWork.Checked != _cfg.IsMouseMode)
                 _mWork.Checked = _cfg.IsMouseMode;

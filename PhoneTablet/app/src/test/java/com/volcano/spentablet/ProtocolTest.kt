@@ -134,6 +134,23 @@ class ProtocolTest {
     }
 
     @Test
+    fun `心跳帧带上已发鼠标帧数 - PC 靠它发现链路丢帧`() {
+        val f = Protocol.buildNoop(123456)
+        val buf = ByteBuffer.wrap(f)
+        assertEquals(0, header(buf).first)          // type=0 心跳
+        buf.position(6)
+        assertEquals(123456, buf.int)                // payload[0..3] = 已发鼠标帧数
+        assertEquals(24, f.size - 6)                 // 负载长度仍是 24
+
+        // 不传时为 0（表示不参与比对）
+        val f0 = Protocol.buildNoop()
+        val b0 = ByteBuffer.wrap(f0)
+        header(b0)
+        b0.position(6)
+        assertEquals(0, b0.int)
+    }
+
+    @Test
     fun `动作码契约 - 与 README 及 PC 端约定一致`() {
         // 这些码一旦变更就是破坏性协议变更，测试钉死
         assertEquals(0, Protocol.MOUSE_MOVE)
