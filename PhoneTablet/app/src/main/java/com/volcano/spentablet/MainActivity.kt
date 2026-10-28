@@ -44,6 +44,8 @@ class MainActivity : Activity() {
     private lateinit var hostEdit: EditText
     private lateinit var portEdit: EditText
     private lateinit var topBar: LinearLayout
+    /** S Pen 悬浮提示（笔悬停在按钮上弹一句功能说明） */
+    private lateinit var hoverTip: HoverTip
 
     /** 主界面顶部左侧的连接状态点（绿=已连 红=未连），点击打开网络拓扑 */
     private lateinit var statusDot: View
@@ -134,6 +136,8 @@ class MainActivity : Activity() {
         //   settingsPage —— 全屏设置页，浮在 content 之上，默认 GONE
         val root = FrameLayout(this)
         val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        // 悬浮提示层：最早建好，后面各个按钮创建时就能直接挂上去（显示时会 bringToFront）
+        hoverTip = HoverTip(root)
 
         canvas = PenCanvasView(this)
         canvas.pressureGain = prefs.getFloat("gain", 3.0f)
@@ -211,6 +215,14 @@ class MainActivity : Activity() {
         topRow.addView(rotateBtn)
         topRow.addView(helpBtn)
         topRow.addView(settingsBtn)
+        // 笔悬停在这些图标上时弹一句说明（文案随状态取，模式按钮的说明会跟着当前模式变）
+        hoverTip.attach(modeBtn) {
+            if (workMode == Protocol.MODE_MOUSE) "切到「数位板」：笔在框内作画"
+            else "切到「触摸板」：手指当鼠标用"
+        }
+        hoverTip.attach(rotateBtn) { "切换屏幕方向：竖屏 / 横屏 / 跟随系统" }
+        hoverTip.attach(helpBtn) { "使用指南：各模式手势与按钮说明" }
+        hoverTip.attach(settingsBtn) { "设置：连接、增益、死区、手势动作" }
         // 固定满宽：状态文字(weight=1)占中间，四个图标恒定右对齐
         topRow.layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
@@ -305,24 +317,7 @@ class MainActivity : Activity() {
         updateModeUI()  // 触摸板 UI / 数位板工具条显隐
 
         // 第二个参数是「连接建立后要发的 Hello 帧」；顺带在这里同步笔迹颜色与备注状态
-        net = NetClient(host, port) {
-            if (::net.isInitialized) {
-                net.send(Protocol.buildNote(Protocol.NOTE_COLOR, noteColorIdx.toFloat()))
-                // 数位板模式默认开着桌面备注：重连后也要把状态补回去
-                if (workMode == Protocol.MODE_TABLET && !noteOn) {
-                    noteOn = true
-                    net.send(Protocol.buildNote(Protocol.NOTE_ON))
-                    updateNoteBtn()
-                }
-                // 激光笔状态也要补回去（PC 端不记状态）
-                if (highlighterOn) net.send(Protocol.buildHighlighter(true, highlighterColor))
-            }
-            helloFrame()
-        }
-        // 接收 PC 下发的 INFO（版本号 / 计算机名 / 候选 IP）
-        net.onInfo = { text -> parsePcInfo(text) }
-        // 接收 PC 下发的截图（PNG）
-        net.onShot = { png -> runOnUiThread { showShot(png) } }
+        net = newNetClient()
         net.start()
 
         // 开机静默 mDNS 发现：找到唯一一台 PC 且当前没连上 → 直接连上，用户零操作
@@ -797,6 +792,8 @@ class MainActivity : Activity() {
         if (::tabletToolbar.isInitialized) {
             tabletToolbar.visibility = if (!mouse && !covered) View.VISIBLE else View.GONE
         }
+        // 模式切换后按钮显隐会变，顺手把可能残留的悬浮气泡收掉
+        if (::hoverTip.isInitialized) hoverTip.hide()
     }
 
     /** 模式按钮图标 = 当前模式（状态与按钮融合） */
@@ -832,11 +829,13 @@ class MainActivity : Activity() {
             · 手指按住时 S Pen 会自动让位（笔放在平板上也不会把光标抢走）<br><br>
             <b>【数位板模式（S Pen 作画）】</b><br>
             · 笔在橙色框内 = 在 PC 上作画（压感 / 倾斜）<br>
-            · <b>默认就是「备注」模式</b>：笔迹直接画在桌面的框里，手机与桌面同步<br>
+            · <b>默认是「备注」模式</b>：笔迹直接画在桌面的框里，手机与桌面同步<br>
+            · 点底部<b>备注</b>按钮切到<b>「画笔」模式</b>：笔迹只画在手机上，桌面不受影响；再点一下切回「备注」<br>
             · 单指滑动 = 移动范围框；双指捏合 = 缩放范围框<br>
             · 框可以拖到任意显示器（含多屏 / 多桌面）<br>
-            · 底部浮动圆钮：<b>备注</b>（笔迹画在桌面固定位置，换色只影响之后的笔，手机与桌面同步）/ <b>撤销</b>（点击手机+桌面各撤一笔、长按两边一起清空）/ <b>$shotBtnLabel</b>（捕获：桌面框内容设为手机画布背景，可继续在上面画；再点完成恢复）<br>
-            · 浮动面板 = <b>备注 / 撤销 / 完成</b> + 7 色板，<b>按住可整体拖动</b>（挡住画面就拖走，位置会记住）<br><br>
+            · 底部浮动圆钮：<b>备注 / 画笔</b>（切模式）/ <b>撤销</b>（点击手机+桌面各撤一笔、长按两边一起清空）/ <b>$shotBtnLabel</b>（捕获：桌面框内容设为手机画布背景，可继续在上面画；再点完成恢复）<br>
+            · 浮动面板 = <b>备注 / 撤销 / 捕获</b> + 7 色板，<b>按住可整体拖动</b>（挡住画面就拖走，位置会记住）<br>
+            · 换色只影响之后画的笔；<b>笔悬停在按钮上会弹出该按钮的说明</b><br><br>
             <b>【屏幕方向】</b>循环按钮：陀螺仪全向 / 横屏双朝向 / 竖屏双朝向<br><br>
             <b>【PC 端下载】</b>（点击打开）：<br>
             <a href="$link">$link</a>
@@ -1065,6 +1064,14 @@ class MainActivity : Activity() {
         trackpadDock.addView(leftBtn)
         trackpadDock.addView(midBtn)
         trackpadDock.addView(rightBtn)
+        // 悬浮说明
+        hoverTip.attach(hl) { "激光笔：PC 指针变激光光斑（点击开关，长按换色）" }
+        hoverTip.attach(leftBtn) { "左键：按下不放再移动 = 拖拽 / 涂改" }
+        hoverTip.attach(midBtn) { "中键：多数程序里点击链接开新标签页" }
+        hoverTip.attach(rightBtn) { "右键：打开上下文菜单" }
+        hoverTip.attach(wheel) {
+            "滚轮条：上下滑 = 滚动；双击切换 普通滚动 / 无极滚动"
+        }
 
         trackpadOverlay.addView(wheel)
         trackpadOverlay.addView(trackpadDock)
@@ -1189,6 +1196,8 @@ class MainActivity : Activity() {
     private val flashBase = java.util.WeakHashMap<View, android.graphics.drawable.Drawable>()
 
     private fun flashButton(v: View) {
+        // 真的按下了 → 悬浮气泡立刻收掉（笔尖触屏时部分机型不发 HOVER_EXIT）
+        if (::hoverTip.isInitialized) hoverTip.hide()
         val base = flashBase[v] ?: (v.background as android.graphics.drawable.Drawable).also { flashBase[v] = it }
         val flash = flashBg()
         v.background = flash
@@ -1311,6 +1320,18 @@ class MainActivity : Activity() {
         btnRow.addView(noteBtn)
         btnRow.addView(undoBtn)
         btnRow.addView(shotBtn)
+        // 悬浮说明（文案随当前状态现取：备注/画笔、捕获/完成）
+        hoverTip.attach(noteBtn) {
+            if (noteOn) "「备注」模式：笔迹直接画在 PC 桌面上。点击切到「画笔」"
+            else "「画笔」模式：笔迹只画在手机上。点击切到「备注」"
+        }
+        hoverTip.attach(undoBtn) { "撤销一笔（长按 = 清空手机与桌面全部笔迹）" }
+        hoverTip.attach(shotBtn) {
+            if (shotCaptured) "「完成」：退出捕获，清掉背景并解除范围框锁定"
+            else "「捕获」：把桌面范围框的内容设为手机画布背景"
+        }
+        // 启动时按当前状态定文案（默认数位板会开备注，但可能是切的「画笔」）
+        updateNoteBtn()
         // —— 第二行：7 个笔迹颜色块 ——
         val colorRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1321,13 +1342,15 @@ class MainActivity : Activity() {
         // 手机屏上画的笔迹也用同一个颜色（落笔时锁定，之后换色不影响已画的笔）
         canvas.strokeColor = noteColors[noteColorIdx]
         repeat(noteColors.size) { i ->
-            colorRow.addView(View(this).apply {
+            val sw = View(this).apply {
                 layoutParams = LinearLayout.LayoutParams(dp(26), dp(26)).apply {
                     setMargins(dp(3), dp(3), dp(3), dp(2))
                 }
                 background = swatchBg(i)
                 setOnClickListener { flashButton(this); selectNoteColor(i) }
-            })
+            }
+            hoverTip.attach(sw) { "笔迹颜色 ${colorName(i)}（只影响之后画的笔）" }
+            colorRow.addView(sw)
         }
         tabletToolbar.addView(btnRow)
         tabletToolbar.addView(colorRow)
@@ -1346,6 +1369,11 @@ class MainActivity : Activity() {
         0xFFC86EFF.toInt(), // 紫
         0xFFFAFAFA.toInt()  // 白
     )
+
+    /** 色块名字（悬浮提示里用，顺序与 [noteColors] 一一对应） */
+    private val noteColorNames = arrayOf("红", "橙", "黄", "绿", "蓝", "紫", "白")
+    private fun colorName(idx: Int): String =
+        noteColorNames.getOrElse(idx) { "#$idx" }
 
     /** 色块外观：圆角方块，选中的加白描边 */
     private fun swatchBg(idx: Int) = android.graphics.drawable.GradientDrawable().apply {
@@ -1477,18 +1505,23 @@ class MainActivity : Activity() {
 
     /** 桌面备注开关：开启后 S Pen 直接在 PC 桌面固定位置画笔迹（不随范围框移动） */
     private fun toggleNote(on: Boolean) {
-        if (!::net.isInitialized) return
         noteOn = on
+        updateNoteBtn()          // 未连接时也要让按钮文案跟上，否则界面和实际状态对不上
+        if (!::net.isInitialized) return
         net.send(Protocol.buildNote(if (on) Protocol.NOTE_ON else Protocol.NOTE_OFF))
         if (on) net.send(Protocol.buildNote(Protocol.NOTE_COLOR, noteColorIdx.toFloat()))
-        updateNoteBtn()
-        DebugLog.write("[note] ${if (on) "开启" else "关闭"}")
+        DebugLog.write("[note] ${if (on) "备注模式" else "画笔模式"}")
     }
 
-    /** 备注按钮上的状态字（✓ = 桌面备注已开） */
+    /**
+     * 备注按钮的文案 = **当前模式名**（不再用 ✓ 后缀）：
+     *   备注 → 笔迹直接画在 PC 桌面上（默认）
+     *   画笔 → 原来的非备注模式，笔迹只画在手机上，桌面不受影响
+     * 点一下就在两个模式之间切换。
+     */
     private fun updateNoteBtn() {
         if (!::noteBtn.isInitialized) return
-        noteBtn.text = if (noteOn) "备注✓" else "备注"
+        noteBtn.text = if (noteOn) "备注" else "画笔"
     }
 
     /** 截图按钮状态机：捕获 → 完成 → 捕获…（捕获期间锁定范围框） */
@@ -1707,10 +1740,37 @@ class MainActivity : Activity() {
         false
     }
 
+    /**
+     * 创建 NetClient —— **全项目唯一**的连接创建点。
+     *
+     * 以前有两处（onCreate 和 restartNet），restartNet 那份漏挂了 `onShot`，
+     * 于是 mDNS 发现 / 手动重连之后「捕获」就静默失效：PC 端明明把 PNG 发过来了，
+     * 手机这边回调是 null，既没背景也不报错（查了很久才发现）。
+     * 所以：**下行回调和重连后状态补发，只允许写在这个函数里。**
+     */
+    private fun newNetClient(): NetClient = NetClient(host, port) {
+        if (::net.isInitialized) {
+            net.send(Protocol.buildNote(Protocol.NOTE_COLOR, noteColorIdx.toFloat()))
+            // 数位板模式默认开着桌面备注：重连后也要把状态补回去
+            if (workMode == Protocol.MODE_TABLET && !noteOn) {
+                noteOn = true
+                net.send(Protocol.buildNote(Protocol.NOTE_ON))
+                updateNoteBtn()
+            }
+            // 激光笔状态也要补回去（PC 端不记状态）
+            if (highlighterOn) net.send(Protocol.buildHighlighter(true, highlighterColor))
+        }
+        helloFrame()
+    }.also { n ->
+        // 接收 PC 下发的 INFO（版本号 / 计算机名 / 候选 IP）
+        n.onInfo = { text -> parsePcInfo(text) }
+        // 接收 PC 下发的截图（PNG）→ 设为书写区背景
+        n.onShot = { png -> runOnUiThread { showShot(png) } }
+    }
+
     private fun restartNet() {
         if (::net.isInitialized) net.stop()
-        net = NetClient(host, port) { helloFrame() }
-        net.onInfo = { text -> parsePcInfo(text) }
+        net = newNetClient()
         net.start()
         Log.i("SpenTablet", "重连 $host:$port")
     }
