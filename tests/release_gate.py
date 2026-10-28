@@ -45,10 +45,24 @@ def gate_gradle():
     step("gradle testReleaseUnitTest", r.returncode == 0)
 
 
+def kill_host():
+    """结束残留的 SpenTabletHost 进程。
+
+    必须在做 dotnet build **之前**调用：运行中的 host 会锁住
+    bin/Release 下的 SpenTabletHost.dll，导致编译报「无法复制文件」。
+    """
+    subprocess.run(["taskkill", "/IM", "SpenTabletHost.exe", "/F"],
+                   capture_output=True)
+    time.sleep(1)
+
+
 def gate_pcbuild():
     print("\n[2/3] PC 端 Release 编译")
+    # 编译前先结束残留 host —— 运行中的进程会锁住输出 DLL
+    kill_host()
     r = run([DOTNET, "build", ROOT / "PcHost" / "SpenTabletHost.csproj", "-c", "Release"])
-    step("dotnet build -c Release", r.returncode == 0)
+    detail = "" if r.returncode == 0 else (r.stdout or b"").decode(errors="ignore")[-400:]
+    step("dotnet build -c Release", r.returncode == 0, detail)
 
 
 def gate_smoke():
@@ -57,9 +71,7 @@ def gate_smoke():
         step("host 可执行文件存在", False, str(HOST_EXE))
         return
     # 杀掉残留 host，门禁自己拉起一个干净实例
-    subprocess.run(["taskkill", "/IM", "SpenTabletHost.exe", "/F"],
-                   capture_output=True)
-    time.sleep(1)
+    kill_host()
     env = dict(os.environ, DOTNET_ROOT=str(DOTNET))
     host = subprocess.Popen([str(HOST_EXE)], env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

@@ -36,3 +36,7 @@ release/**/stage/
 # 探针构建产物
 tests/TouchProbe/bin/
 tests/TouchProbe/obj/
+
+# 排障临时副本
+PcHost/testcopy/
+PcHost/zipstage/

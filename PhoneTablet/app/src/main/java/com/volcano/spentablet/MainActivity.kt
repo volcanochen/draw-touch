@@ -475,17 +475,18 @@ class MainActivity : Activity() {
             textSize = 13f; setTextColor(Color.WHITE)
             text = t; setPadding(0, dp(14), 0, 2)
         }
-        fun minusPlus(label: String, get: () -> Float, set: (Float) -> Unit, step: Float, min: Float, max: Float): LinearLayout {
+        fun minusPlus(label: String, get: () -> Float, set: (Float) -> Unit, step: Float, min: Float, max: Float,
+                      fmt: String = "%s  %.1f"): LinearLayout {
             val tv = TextView(this).apply {
                 textSize = 14f; setTextColor(Color.WHITE); setPadding(0, 4, 8, 4)
-                text = String.format("%s  %.1f", label, get())
+                text = String.format(fmt, label, get())
             }
             val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             fun mk(delta: Float): Button = Button(this).apply {
                 text = if (delta < 0) "−" else "+"
                 setOnClickListener {
                     set((get() + delta).coerceIn(min, max))
-                    tv.text = String.format("%s  %.1f", label, get())
+                    tv.text = String.format(fmt, label, get())
                 }
             }
             row.addView(mk(-step))
@@ -501,6 +502,18 @@ class MainActivity : Activity() {
         details.addView(minusPlus("滚动", { canvas.scrollScale }, {
             canvas.scrollScale = it; prefs.edit().putFloat("tpScroll", it).apply()
         }, 0.5f, 0.2f, 30.0f))
+
+        // ---------- 手势死区（防误触 / 防抖动）----------
+        details.addView(tpTitle("手势死区（0 = 关闭）"))
+        details.addView(minusPlus("移动死区 dp", { canvas.moveDeadZoneDp }, {
+            canvas.moveDeadZoneDp = it; prefs.edit().putFloat("tpMoveDz", it).apply()
+        }, 1f, 0f, 30f))
+        details.addView(minusPlus("捏合死区 %", { canvas.pinchDeadZoneRel * 100f }, {
+            canvas.pinchDeadZoneRel = it / 100f; prefs.edit().putFloat("tpPinchDzRel", canvas.pinchDeadZoneRel).apply()
+        }, 1f, 0f, 60f, "%s  %.0f%%"))
+        details.addView(minusPlus("捏合死区 dp", { canvas.pinchDeadZoneDp }, {
+            canvas.pinchDeadZoneDp = it; prefs.edit().putFloat("tpPinchDzDp", it).apply()
+        }, 1f, 0f, 40f))
 
         details.addView(tpTitle("触摸板手势（点击切换动作）"))
         fun gestureRow(name: String, key: String, def: Int, allowed: IntArray): Button =
@@ -1536,6 +1549,10 @@ class MainActivity : Activity() {
         }
         canvas.cursorSpeed = prefs.getFloat("tpSpeed", 1.5f)
         canvas.scrollScale = prefs.getFloat("tpScroll", 5.0f)
+        // 手势死区：0 = 关闭
+        canvas.moveDeadZoneDp = prefs.getFloat("tpMoveDz", 8f)
+        canvas.pinchDeadZoneRel = prefs.getFloat("tpPinchDzRel", 0.15f)
+        canvas.pinchDeadZoneDp = prefs.getFloat("tpPinchDzDp", 10f)
         canvas.trackpadColor = prefs.getInt("tpColor", 0xFF20242B.toInt())
         canvas.g2Swipe = prefs.getInt("g2Swipe", 1)
         canvas.g2Pinch = prefs.getInt("g2Pinch", 2)

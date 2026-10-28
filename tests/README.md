@@ -76,7 +76,7 @@ MOUSE 动作码（`MOUSE_*`）：0 移动 / 1 左键按下 / 2 左键抬起 / 3 
 
 ### 2.3 运行命令
 
-**① Android 单元测试（15 项，纯 JVM，无需设备）**
+**① Android 单元测试（34 项，纯 JVM，无需设备）**
 
 ```bash
 cd SpenTablet/PhoneTablet
@@ -143,8 +143,10 @@ SpenTablet/
 │       ├── bin/  obj/                       #   构建产物（已加入 .gitignore，不入库）
 │       └── (运行结果仅打印到控制台，无断言、无退出码语义)
 └── PhoneTablet/app/src/test/java/com/volcano/spentablet/   # Android 端单元测试（与主源码同 module）
-    ├── ProtocolTest.kt                      # 帧编码字节级断言 + 动作码契约（8 项）
-    └── UpdateCheckerVersionTest.kt          # 语义化版本比较（7 项）
+    ├── ProtocolTest.kt                      # 帧编码字节级断言 + 动作码契约（9 项）
+    ├── UpdateCheckerVersionTest.kt          # 语义化版本比较（7 项）
+    ├── GestureDeadZoneTest.kt               # 移动死区闸门 + 捏合判定死区（13 项）
+    └── TwoFingerGestureTest.kt              # 双指手势状态机集成验证（5 项）
 ```
 
 ### 各文件职责
@@ -166,13 +168,24 @@ SpenTablet/
 - 11 组实验：A 基线(hist=1+真实 QPC) / L frameId=0 / M 加 NEW 标志 / N feedback=DEFAULT / O dwTime=tick / P L+M 组合 / Q hover 起始 / R feedback=INDIRECT / S maxCount=256 / T 加压力与方向掩码
 - 每组实验打印 `OK` 或 `FAIL err=<GetLastError>`，**没有断言与退出码判定**，属于排障工具而非测试
 
-**`PhoneTablet/app/src/test/.../ProtocolTest.kt`**（8 项）
+**`PhoneTablet/app/src/test/.../ProtocolTest.kt`**（9 项）
 - 逐字节校验各帧的头部（`SP` + ver + type + u16 长度）与 payload 布局
 - `动作码契约` 一项把 MOUSE/HELLO/HL 等码值钉死，防止破坏性协议变更 unnoticed
+- `心跳帧带上已发鼠标帧数` 钉死「心跳携带鼠标帧计数」这一链路自愈协议约定
 
 **`PhoneTablet/app/src/test/.../UpdateCheckerVersionTest.kt`**（7 项）
 - 覆盖「更新 / 不更新 / 逐段数值比较（1.10.0 > 1.9.0）/ 当前版本为空 / v 前缀与后缀 / 段数补零 / parseVer 基础行为」
 - 依赖 `UpdateChecker.isNewer`、`parseVer` 已在源码中由 `private` 改为 `internal` 以便同 module 测试
+
+**`PhoneTablet/app/src/test/.../GestureDeadZoneTest.kt`**（13 项）
+- 覆盖 `MoveDeadZone`（移动死区闸门）：死区内无输出、越过阈值只输出超出部分、越过后 1:1 跟随、
+  `catchUp` 模式补回死区量、阈值 0 = 无死区、`reset` 重新计数、阈值动态调整
+- 覆盖 `PinchDeadZone`（捏合判定）：相对阈值、绝对阈值兜底、起始跨度无效、迟滞退出、参数可配置
+
+**`PhoneTablet/app/src/test/.../TwoFingerGestureTest.kt`**（5 项）
+- 复现 `PenCanvasView.handleTrackpad` 双指分支的判定顺序，做集成级验证：
+  双指滑动全程不被微小捏合抢走、真正的捏合能触发、捏合中途回到起点交还给滑动、
+  两指靠得近时轻微变化不触发捏合、双指滚动的移动死区拦得住手抖
 
 **仓库根目录的一次性排查脚本（未纳入 `tests/`，也未纳入 git 版本控制）**
 `test_fixes.py`（触摸板微动方向 / S Pen 让位）、`test_protocol.py`（模式互斥）、`gesture_test.py`（滚轮/缩放/中键/前进后退）、`zoom_test.py`（手机端与 PC 端缩放算法一致性）、`pinch_test.py`（adb sendevent 造双指手势）、`repro_crash.py`（捕获→绘制→移框→再绘制的崩溃回放）、`shot.py`（ctypes 抓窗口截图）、`png_stat.py`（纯 Python 解 PNG 比对亮度）。
@@ -262,25 +275,44 @@ SpenTablet/
 
 > 第 11/11' 为互斥分支，每次运行只会执行其中一条，因此单次运行的断言数为 16。
 
-### 5.2 Android 单元测试（`PhoneTablet/app/src/test/`，15 项）
+### 5.2 Android 单元测试（`PhoneTablet/app/src/test/`，34 项）
 
-| # | 测试方法 | 验证点 | 结果 |
-|---|---|---|---|
-| 1 | `pen 帧 - 头部与 24 字节负载` | PEN 帧头、长度、x/y/pressure/tilt/buttons/reserved 布局 | 通过 |
-| 2 | `mouse 帧 - kind 放在 payload0 且小端` | MOUSE 帧 kind/dx/dy 小端编码 | 通过 |
-| 3 | `zoom 帧 - scale 与焦点坐标` | ZOOM 帧 scale/focusX/focusY 布局 | 通过 |
-| 4 | `hello 帧 - 28 字节 7 个 float` | HELLO 帧长度 28 与 7 个 float 顺序 | 通过 |
-| 5 | `note 帧 - action 与 arg` | NOTE 帧 action/arg 布局 | 通过 |
-| 6 | `激光笔帧 - 开关与颜色索引` | HL 帧 on/colorIdx 布局 | 通过 |
-| 7 | `shot 请求与 noop 与 mode 与 reset 帧` | SHOT_REQ/NOOP/MODE/RESET 帧头与类型 | 通过 |
-| 8 | `动作码契约 - 与 README 及 PC 端约定一致` | MOUSE_* 与 TYPE_HELLO/MOUSE/HL 码值钉死 | 通过 |
-| 9 | `更新版本大于当前版本` | 1.3.1 > 1.3.0、1.4.0 > 1.3.9、2.0.0 > 1.9.9 | 通过 |
-| 10 | `同版本或更旧不更新` | 相等与更旧均判为不更新 | 通过 |
-| 11 | `逐段比较不按字符串` | 1.10.0 > 1.9.0（字符串比较会误判） | 通过 |
-| 12 | `当前版本为空视为可更新` | 当前版本为空/空白 | 通过 |
-| 13 | `带 v 前缀与后缀的版本号也能解析` | `v1.3.1`、`1.3.1-beta` | 通过 |
-| 14 | `段数不足补零` | `1.4` 视为 1.4.0 | 通过 |
-| 15 | `parseVer 基础行为` | 解析结果与非法输入兜底 | 通过 |
+| # | 测试类 | 测试方法 | 验证点 | 结果 |
+|---|---|---|---|---|
+| 1 | ProtocolTest | `pen 帧 - 头部与 24 字节负载` | PEN 帧头、长度、x/y/pressure/tilt/buttons/reserved 布局 | 通过 |
+| 2 | ProtocolTest | `mouse 帧 - kind 放在 payload0 且小端` | MOUSE 帧 kind/dx/dy 小端编码 | 通过 |
+| 3 | ProtocolTest | `zoom 帧 - scale 与焦点坐标` | ZOOM 帧 scale/focusX/focusY 布局 | 通过 |
+| 4 | ProtocolTest | `hello 帧 - 28 字节 7 个 float` | HELLO 帧长度 28 与 7 个 float 顺序 | 通过 |
+| 5 | ProtocolTest | `note 帧 - action 与 arg` | NOTE 帧 action/arg 布局 | 通过 |
+| 6 | ProtocolTest | `激光笔帧 - 开关与颜色索引` | HL 帧 on/colorIdx 布局 | 通过 |
+| 7 | ProtocolTest | `shot 请求与 noop 与 mode 与 reset 帧` | SHOT_REQ/NOOP/MODE/RESET 帧头与类型 | 通过 |
+| 8 | ProtocolTest | `动作码契约 - 与 README 及 PC 端约定一致` | MOUSE_* 与 TYPE_HELLO/MOUSE/HL 码值钉死 | 通过 |
+| 9 | ProtocolTest | `心跳帧带上已发鼠标帧数 - PC 靠它发现链路丢帧` | 心跳 payload 带鼠标帧计数（链路自愈协议约定） | 通过 |
+| 10 | UpdateCheckerVersionTest | `更新版本大于当前版本` | 1.3.1 > 1.3.0、1.4.0 > 1.3.9、2.0.0 > 1.9.9 | 通过 |
+| 11 | UpdateCheckerVersionTest | `同版本或更旧不更新` | 相等与更旧均判为不更新 | 通过 |
+| 12 | UpdateCheckerVersionTest | `逐段比较不按字符串` | 1.10.0 > 1.9.0（字符串比较会误判） | 通过 |
+| 13 | UpdateCheckerVersionTest | `当前版本为空视为可更新` | 当前版本为空/空白 | 通过 |
+| 14 | UpdateCheckerVersionTest | `带 v 前缀与后缀的版本号也能解析` | `v1.3.1`、`1.3.1-beta` | 通过 |
+| 15 | UpdateCheckerVersionTest | `段数不足补零` | `1.4` 视为 1.4.0 | 通过 |
+| 16 | UpdateCheckerVersionTest | `parseVer 基础行为` | 解析结果与非法输入兜底 | 通过 |
+| 17 | GestureDeadZoneTest | `死区内不产生任何位移` | 移动死区内累计位移全部被吃掉 | 通过 |
+| 18 | GestureDeadZoneTest | `越过阈值后只输出超出部分` | 起步不跳一大段（相对移动模式） | 通过 |
+| 19 | GestureDeadZoneTest | `越过阈值后 1 1 跟随` | 越过后原样透传 | 通过 |
+| 20 | GestureDeadZoneTest | `catchUp 模式越过阈值时补回死区内的位移` | 绝对映射（拖框）保持 1:1 不偏移 | 通过 |
+| 21 | GestureDeadZoneTest | `阈值 0 等价于无死区` | 0 = 关闭死区 | 通过 |
+| 22 | GestureDeadZoneTest | `reset 后死区重新生效` | 新手势重新计累计量 | 通过 |
+| 23 | GestureDeadZoneTest | `阈值可动态调整` | provider 改阈值立即生效 | 通过 |
+| 24 | GestureDeadZoneTest | `微小捏合不判定为捏合` | 相对阈值内不判捏合 | 通过 |
+| 25 | GestureDeadZoneTest | `相对变化够大才判为捏合` | 20% 变化判为捏合 | 通过 |
+| 26 | GestureDeadZoneTest | `绝对阈值兜底小跨度场景` | 两指靠得近时绝对阈值拦住误判 | 通过 |
+| 27 | GestureDeadZoneTest | `起始跨度无效时不判定` | startSpan ≤ 1 不判捏合 | 通过 |
+| 28 | GestureDeadZoneTest | `捏合迟滞退出` | 回到起点附近交还给双指滑动 | 通过 |
+| 29 | GestureDeadZoneTest | `捏合死区参数可配置` | 放宽相对/绝对阈值后不再判定 | 通过 |
+| 30 | TwoFingerGestureTest | `双指滑动全程不被微小捏合抢走` | 跨度抖动 ±6px 全程走滚动 | 通过 |
+| 31 | TwoFingerGestureTest | `真正的捏合能正常触发` | span +60% 判定为捏合 | 通过 |
+| 32 | TwoFingerGestureTest | `捏合中途回到起点会交还给双指滑动` | 捏合→退出→滑动恢复 | 通过 |
+| 33 | TwoFingerGestureTest | `两指靠得近时轻微变化不触发捏合` | span 50px 时 20% 变化仍被绝对阈值拦下 | 通过 |
+| 34 | TwoFingerGestureTest | `双指滚动的移动死区拦得住手抖` | 累计 10px（< 14px）不滚动，越过后恢复滚动 | 通过 |
 
 ### 5.3 诊断探针（`tests/TouchProbe/Program.cs`）—— 打印结果，非断言
 
@@ -302,7 +334,10 @@ SpenTablet/
 | 悬浮按钮转屏不越界 | 手机横竖屏切换 → 观察浮动面板位置 | **待验证**（代码含 `onLayout` 钳制与转屏按比例还原，无 UI 自动化） |
 | 激光笔光斑造型与换色 | 触摸板模式开启激光笔 → 观察指针形状 → 长按换色 | **待验证**（仅验证了开/关指令链路，造型需肉眼） |
 | 触摸板手势（滚动/三指/四指/动作槽） | 手指在板上做各手势 | **待验证**（脚本化手势需 adb evvent，仓库仅有未入库的 `pinch_test.py` 辅助脚本） |
-| 检查更新 → 下载 → 安装 APK | 触发「检查更新」→ 系统安装弹窗 | **待验证**（版本比较逻辑已单测覆盖 #9~#15；下载与安装流程无自动化） |
+| 检查更新 → 下载 → 安装 APK | 触发「检查更新」→ 系统安装弹窗 | **待验证**（版本比较逻辑已单测覆盖 #10~#16；下载与安装流程无自动化） |
+| **双指捏合不干扰双指滑动** | 两指做小幅捏合后继续平移 | **部分通过**（判定逻辑由 `TwoFingerGestureTest` #30~#33 覆盖；真机双指手势无法用 `adb input` 脚本化——该命令只支持单指，多点需 root 才能 `sendevent`） |
+| **移动死区：手抖不动光标** | 手指按下后微抖（< 死区）→ 观察 PC 光标 | **通过**（adb 单指注入实测：死区 20dp 时 3/15/30px 位移产生 0 条移动帧，60px 才放行；改 8dp 后 30px 起放行） |
+| **死区数值可配置并持久化** | 设置页调整三项死区 → 重启 App | **通过**（三项均写入 `SharedPreferences`（`tpMoveDz`/`tpPinchDzRel`/`tpPinchDzDp`），重启后读回生效，已用注入 prefs 实测） |
 
 ---
 

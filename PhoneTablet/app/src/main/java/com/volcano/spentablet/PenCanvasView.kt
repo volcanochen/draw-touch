@@ -122,6 +122,35 @@ class PenCanvasView(context: Context) : View(context) {
     /** 触摸板区域背景色 */
     var trackpadColor: Int = 0xFF20242B.toInt()
 
+    // ---- 手势死区（可在设置页调整，0 = 关闭）----
+    /**
+     * 捏合死区（相对阈值，比例）：双指跨度相对变化超过它才可能判定为捏合。
+     * 默认 0.15（15%）。太小会让「双指滑动」被误判成捏合。
+     */
+    var pinchDeadZoneRel: Float = 0.15f
+    /**
+     * 捏合死区（绝对阈值，dp）：双指跨度至少要变化这么多像素才算捏合。
+     * 两指靠得近时相对阈值会变得很敏感，绝对阈值用来兜底。
+     */
+    var pinchDeadZoneDp: Float = 10f
+    /**
+     * 移动死区（dp）：手指按下后，累计位移超过它才开始驱动光标/滚动/拖框。
+     * 手抖时不会误触，移动手势起步更稳。默认 8dp（与 Android 的 touch slop 一致）。
+     */
+    var moveDeadZoneDp: Float = 8f
+
+    /** dp → px（按当前屏幕密度换算） */
+    private fun dpPx(dp: Float): Float = dp * resources.displayMetrics.density
+
+    /** 触摸板：单指移动光标的死区闸门（相对移动，不补回死区量） */
+    private val trackpadMoveGate = MoveDeadZone { dpPx(moveDeadZoneDp) }
+
+    /** 触摸板：双指滑动的死区闸门（相对移动，不补回） */
+    private val trackpadScrollGate = MoveDeadZone { dpPx(moveDeadZoneDp) }
+
+    /** 数位板：手指拖操作框的死区闸门（绝对映射，需补回死区量保持 1:1） */
+    private val panGate = MoveDeadZone(catchUp = true) { dpPx(moveDeadZoneDp) }
+
     /**
      * 手机屏上本地笔迹的颜色。落笔（DOWN）时取当时的值写进 paint，
      * 所以换色只影响**之后的新笔**，已经画好的笔保留各自的颜色 —— 与 PC 端一致。
@@ -314,6 +343,10 @@ class PenCanvasView(context: Context) : View(context) {
         tpStartSpan = 0f
         panning = false
         hasLast = false
+        // 死区闸门也要清干净，避免切换模式后残留上一模式的死区状态
+        trackpadMoveGate.reset()
+        trackpadScrollGate.reset()
+        panGate.reset()
     }
 
     // ---- 诊断计数：index = toolType(0..4)，第二维 = down/move/up/hover ----
@@ -753,23 +786,30 @@ class PenCanvasView(context: Context) : View(context) {
         when (action) {
             MotionEvent.ACTION_DOWN -> {
                 panLastX = px; panLastY = py; panning = true
+                // 移动死区：手指按下后累计位移超过阈值才开始拖框（手抖不误触）
+                panGate.reset()
                 onDebug?.invoke("手指按下：拖动操作框")
             }
             MotionEvent.ACTION_MOVE -> {
                 if (panning && width > 0 && height > 0) {
                     // 位移相对书写区 → 与桌面框 1:1 跟随
-                    val dx = (px - panLastX) / width.toFloat()
-                    val dy = (py - panLastY) / height.toFloat()
-                    // 不钳制到 [0,1]：让操作框能移出书写区、去到屏幕任意位置（含其它显示器）。
-                    // PC 端会按虚拟屏幕约束实际位置；这里只把原始位移发给 PC，保证两端相对量一致。
-                    val nl = frameL + dx
-                    val nt = frameT + dy
-                    val adx = nl - frameL
-                    val ady = nt - frameT
-                    frameL = nl; frameT = nt
+                    // 死区用 catchUp 模式：越过阈值后补回死区内的位移，
+                    // 保证操作框与手指始终严格 1:1（不会有固定偏移）
+                    val gate = panGate.feed(px - panLastX, py - panLastY)
+                    if (!gate.isZero) {
+                        val dx = gate.dx / width.toFloat()
+                        val dy = gate.dy / height.toFloat()
+                        // 不钳制到 [0,1]：让操作框能移出书写区、去到屏幕任意位置（含其它显示器）。
+                        // PC 端会按虚拟屏幕约束实际位置；这里只把原始位移发给 PC，保证两端相对量一致。
+                        val nl = frameL + dx
+                        val nt = frameT + dy
+                        val adx = nl - frameL
+                        val ady = nt - frameT
+                        frameL = nl; frameT = nt
+                        onPan?.invoke(adx, ady)
+                    }
                     panLastX = px; panLastY = py
                     invalidate()
-                    onPan?.invoke(adx, ady)
                 }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
@@ -848,6 +888,9 @@ class PenCanvasView(context: Context) : View(context) {
                 tpLastSpan = span
                 tpStartSpan = span
                 tpPinchMode = false
+                // 新手势开始 → 移动死区重新生效（手抖不再让光标乱飘）
+                trackpadMoveGate.reset()
+                trackpadScrollGate.reset()
                 // 手指一落上来，S Pen 就让位（PC 端收到这个信号后会松开笔的按键）
                 tpPenDown = false
                 onFingerState?.invoke(true)
@@ -866,6 +909,8 @@ class PenCanvasView(context: Context) : View(context) {
                 tpLastSpan = span
                 tpStartSpan = span     // 进入多点手势：以当前跨度为捏合判定基准
                 tpPinchMode = false
+                // 双指手势重新开始 → 滚动死区重新计算
+                trackpadScrollGate.reset()
             }
 
             MotionEvent.ACTION_MOVE -> {
@@ -913,9 +958,22 @@ class PenCanvasView(context: Context) : View(context) {
                         // 捏合判定：用**手势开始到现在的累计跨度变化**。
                         // 以前用单帧 dSpan/tpLastSpan > 12% —— 真实捏合每帧只变化 1~2%，
                         // 单帧永远到不了阈值，结果触摸板模式的捏合从来没触发过。
-                        val relSpanTotal = if (tpStartSpan > 1f)
-                            kotlin.math.abs(span - tpStartSpan) / tpStartSpan else 0f
-                        if (!tpPinchMode && relSpanTotal > PINCH_REL) tpPinchMode = true
+                        //
+                        // 死区（双重条件）：
+                        //  · 相对阈值：跨度变化 > 起始跨度的 pinchDeadZoneRel（默认 15%）
+                        //  · 绝对阈值：跨度变化 > pinchDeadZoneDp 换算的像素（默认 6dp）
+                        // 两者都满足才算捏合。否则两指靠得近时，15% 也只有几像素，
+                        // 手指轻微抖动就把「双指滑动」抢走。
+                        if (!tpPinchMode && PinchDeadZone.engaged(
+                                tpStartSpan, span, pinchDeadZoneRel, dpPx(pinchDeadZoneDp))) {
+                            tpPinchMode = true
+                        }
+                        // 迟滞退出：捏合过程中如果跨度回到起点附近，放弃捏合、交还给双指滑动
+                        if (tpPinchMode && PinchDeadZone.released(tpStartSpan, span, dpPx(pinchDeadZoneDp))) {
+                            tpPinchMode = false
+                            tpStartSpan = span
+                            trackpadScrollGate.reset()
+                        }
                         if (tpPinchMode && g2Pinch != 0) {
                             // 捏合 → 按「双指捏合」槽位配置的动作分发（默认缩放）
                             // 音量/任务切换这类一次性动作要节流，否则一次捏合会连发几十次
@@ -930,8 +988,12 @@ class PenCanvasView(context: Context) : View(context) {
                         } else if (g2Swipe != 0 && (kotlin.math.abs(dCx) > 0.5f || kotlin.math.abs(dCy) > 0.5f)) {
                             // 双指滑动 → 滚轮（滚动比例可配置）
                             // 与光标移动同理：横纵都用 h 归一化，横向/纵向滚动速度才一致
-                            onMouse?.invoke(Protocol.MOUSE_SCROLL, dCx / h * scrollScale, dCy / h * scrollScale)
-                            onDebug?.invoke("双指滑动 dx=${String.format("%.3f", dCx / h)} dy=${String.format("%.3f", dCy / h)} → 滚动")
+                            // 移动死区：累计位移超过阈值才开始滚，避免手抖造成误滚
+                            val gate = trackpadScrollGate.feed(dCx, dCy)
+                            if (!gate.isZero) {
+                                onMouse?.invoke(Protocol.MOUSE_SCROLL, gate.dx / h * scrollScale, gate.dy / h * scrollScale)
+                                onDebug?.invoke("双指滑动 dx=${String.format("%.3f", gate.dx / h)} dy=${String.format("%.3f", gate.dy / h)} → 滚动")
+                            }
                         }
                     }
                     tpLastCx = cx
@@ -947,6 +1009,9 @@ class PenCanvasView(context: Context) : View(context) {
                     // ② 提升采样率：Android 会把同一帧内的高频采样点合并进
                     //    getHistoricalX/Y（不单独派发事件），只吃最新点会丢掉中间的采样，
                     //    慢速移动就变成了几段折线。这里逐个历史点补发。
+                    //
+                    // 移动死区（moveDeadZoneDp）：手指按下后先累计位移，
+                    // 超过死区才开始驱动光标 —— 手抖不再让光标乱飘，起步更稳。
                     val idx = if (tpFingerId >= 0) e.findPointerIndex(tpFingerId) else -1
                     val hs = if (idx >= 0) e.historySize else 0
                     var prevX = tpSingleX
@@ -956,14 +1021,16 @@ class PenCanvasView(context: Context) : View(context) {
                             val hx = e.getHistoricalX(idx, k)
                             val hy = e.getHistoricalY(idx, k)
                             tpMoved += kotlin.math.abs(hx - prevX) + kotlin.math.abs(hy - prevY)
-                            sendMouseMove(hx - prevX, hy - prevY)
+                            val gate = trackpadMoveGate.feed(hx - prevX, hy - prevY)
+                            if (!gate.isZero) sendMouseMove(gate.dx, gate.dy)
                             prevX = hx; prevY = hy
                         }
                     }
                     val dx = cx - prevX
                     val dy = cy - prevY
                     tpMoved += kotlin.math.abs(dx) + kotlin.math.abs(dy)
-                    sendMouseMove(dx, dy)
+                    val gate = trackpadMoveGate.feed(dx, dy)
+                    if (!gate.isZero) sendMouseMove(gate.dx, gate.dy)
                     tpSingleX = cx
                     tpSingleY = cy
                 }
@@ -1047,8 +1114,6 @@ class PenCanvasView(context: Context) : View(context) {
         private const val MIN_FRAME = 0.05f
         /** 三指左右滑的触发阈值(px) */
         private const val SWIPE_PX = 140f
-        /** 判定为「捏合」而不是「滚动」的相对跨度变化阈值 */
-        private const val PINCH_REL = 0.12f
         /** 捏合触发一次性动作（音量/任务切换等）的冷却时间(ms) */
         private const val PINCH_ACTION_COOLDOWN_MS = 320L
         /** 左右滑动触发一次性动作的冷却时间(ms)：一次滑动只触发一次，不会连发 */
