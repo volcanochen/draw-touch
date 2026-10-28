@@ -186,6 +186,9 @@ internal static class InputGuard
 
     // ================= 提权重启 =================
 
+    /// <summary>提权重启时传给新实例的标记：看到它就绝不再提权一次（防「探测异常 → 无限弹 UAC」）。</summary>
+    public const string RestartMarker = "--elevated-restart";
+
     /// <summary>
     /// 以管理员身份重启本程序（会弹一次 UAC）。
     /// 调用方随后应立刻退出当前实例：新实例启动时会重试绑定端口，等旧进程释放。
@@ -204,7 +207,8 @@ internal static class InputGuard
             Process.Start(new ProcessStartInfo(exe)
             {
                 UseShellExecute = true,
-                Verb = "runas",       // UAC 提权；用户取消会抛 Win32Exception(1223)
+                Verb = "runas",              // UAC 提权；用户取消会抛 Win32Exception(1223)
+                Arguments = RestartMarker,   // 新实例不再尝试提权，避免死循环
             });
             return true;
         }

@@ -77,7 +77,9 @@ internal static class Program
         // 表现就是「指针在某些窗口上完全动不了，切到别的窗口又正常」。
         // 这里在启动时一次性解决（只会弹一次 UAC），之后全程可用。
         // 不想提权可以加参数 --no-elevate（此时靠 InputGuard 的气泡提示定向排障）。
-        bool noElevate = args != null && args.Any(a => a.Equals("--no-elevate", StringComparison.OrdinalIgnoreCase));
+        bool noElevate = args != null && args.Any(a =>
+            a.Equals("--no-elevate", StringComparison.OrdinalIgnoreCase) ||
+            a.Equals(InputGuard.RestartMarker, StringComparison.OrdinalIgnoreCase));   // 已提权重启过 → 不再尝试
         if (!InputGuard.IsElevated && !noElevate)
         {
             if (InputGuard.RelaunchElevated())

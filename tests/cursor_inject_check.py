@@ -44,6 +44,20 @@ def cursor_pos():
     return int(x), int(y)
 
 
+def inject(sock, dx, dy):
+    """按方向发一串移动帧（每帧 0.02 归一化步长，增益=1 时约 38px/帧）。"""
+    step = 0.02
+    n = max(1, int(round(max(abs(dx), abs(dy)) / (step * 1920))))
+    scale = max(abs(dx), abs(dy))
+    sx = (dx / scale) * step if dx else 0.0
+    sy = (dy / scale) * step if dy else 0.0
+    for _ in range(n):
+        sock.sendall(frame(T_MOUSE, f32(M_MOVE, sx, sy)))
+        time.sleep(0.02)
+    time.sleep(0.3)
+    return n
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
@@ -66,26 +80,24 @@ def main():
     x0, y0 = cursor_pos()
     print(f"注入前光标: ({x0},{y0})")
 
-    # 每帧位移 = dx/VirtualH*…，这里用小数步进多帧逼近目标像素量（与真机手感一致）
-    # 用 0.02 的归一化步长，分若干帧走完；增益=1 时 0.02*1920 ≈ 38px/帧
-    step = 0.02
-    n = max(1, int(round(max(abs(a.dx), abs(a.dy)) / (step * 1920))))
-    sx = (a.dx / max(abs(a.dx), abs(a.dy))) * step if a.dx else 0.0
-    sy = (a.dy / max(abs(a.dx), abs(a.dy))) * step if a.dy else 0.0
-    for _ in range(n):
-        s.sendall(frame(T_MOUSE, f32(M_MOVE, sx, sy)))
-        time.sleep(0.02)
-    time.sleep(0.3)
-
+    n = inject(s, a.dx, a.dy)
     x1, y1 = cursor_pos()
+    # 光标贴着屏幕边缘时，朝外的方向本来就推不动（会被夹住）→ 反向再来一次
+    if (x1, y1) == (x0, y0):
+        print(f"朝 ({a.dx},{a.dy}) 推不动（可能已到屏幕边缘），反向重试…")
+        a.dx, a.dy = -a.dx, -a.dy
+        x0, y0 = x1, y1
+        n = inject(s, a.dx, a.dy)
+        x1, y1 = cursor_pos()
+
     s.close()
     dx_got, dy_got = x1 - x0, y1 - y0
-    print(f"注入后光标: ({x1},{y1})  位移=({dx_got},{dy_got})  帧数={n}")
+    print(f"注入后光标: ({x1},{y1})  位移=({dx_got},{dy_got})  帧数={n}  方向=({a.dx},{a.dy})")
 
     # 注意：探针与 host 的 DPI 感知不同，同一个光标在两边读到的坐标差一个固定比例
     #（实测 1244 ↔ 2177，比值 1.75 = 系统缩放）。所以这里只校验「方向对不对、确实动了」，
     # 精确位移请看 host 日志里 SPEN_DEBUG_MOVE=1 时的 [MoveBy] p→目标→实际。
-    if (dx_got, dy_got) == (0, 0):
+    if abs(dx_got) <= 2 and abs(dy_got) <= 2:
         print("FAIL 光标完全没动 → 注入被拦截（前台程序的权限高于 host）")
         return 1
     same_dir = (a.dx == 0 or dx_got * a.dx > 0) and (a.dy == 0 or dy_got * a.dy > 0)
