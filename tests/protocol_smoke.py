@@ -109,6 +109,21 @@ def log_contains(log: Path, needle: str, since_size: int, timeout=4.0) -> bool:
     return False
 
 
+def log_offset_after_last(log: Path, needle: str) -> int:
+    """返回日志里最后一次出现 needle 之后的字节偏移。
+
+    用途：有些日志只在**首次**发生时打一条（比如分层画布只建一次），第二条以后同进程
+    不再重复。断言这类「一次性」日志时，起点必须锚在「本次 host 进程启动」处，
+    否则同一进程跑第二轮冒烟就会误判 FAIL。
+    """
+    try:
+        data = log.read_bytes()
+        i = data.rfind(needle.encode("utf-8"))
+        return 0 if i < 0 else i + len(needle.encode("utf-8"))
+    except OSError:
+        return 0
+
+
 def log_text_since(log: Path, since_size: int) -> str:
     """取日志自 since_size 之后的全部文本（用来从日志里抠出保存路径等细节）。"""
     try:
@@ -276,8 +291,11 @@ def main():
         s.sendall(frame(T_PEN_MOVE, pen(0.35 + i * 0.02, 0.35 + i * 0.01)))
         time.sleep(0.02)
     s.sendall(frame(T_PEN_UP, pen(0.55, 0.45, 0.0)))
+    # 分层画布只在首次显示时建一次，同一 host 进程跑第二轮就不会再有这条日志 ——
+    # 所以起点锚在「本次进程启动」而不是「本轮测试开始」，否则第二轮起必然误报 FAIL。
+    boot = log_offset_after_last(log, "[Host] 已驻留系统托盘")
     check("桌面笔迹 → 分层画布就绪（真透明，无黑边）",
-          log_contains(log, "[NoteOverlay] 分层画布就绪", mark_note, timeout=5))
+          log_contains(log, "[NoteOverlay] 分层画布就绪", boot, timeout=5))
     # 四个失败锚点只要出现一个就算回归失败（用 mark_note 起算，覆盖整个笔迹阶段）
     broke = [a for a in ("[NoteOverlay] 画笔迹异常", "[NoteOverlay] 推送画面失败",
                          "[NoteOverlay] CreateDIBSection 失败", "[NoteOverlay] UpdateLayeredWindow 失败")
