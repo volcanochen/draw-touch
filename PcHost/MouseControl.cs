@@ -485,22 +485,6 @@ internal static class MouseControl
         if (_tzActive) EndTouchZoom();
     }
 
-    /// <summary>Ctrl + “+” （放大）。</summary>
-    public static void CtrlPlus()
-    {
-        SendKey(VK_CONTROL, up: false);
-        TapKey(0xBB); // VK_OEM_PLUS（主键盘的 +/=）
-        SendKey(VK_CONTROL, up: true);
-    }
-
-    /// <summary>Ctrl + “-” （缩小）。</summary>
-    public static void CtrlMinus()
-    {
-        SendKey(VK_CONTROL, up: false);
-        TapKey(0xBD); // VK_OEM_MINUS（主键盘的 -/_）
-        SendKey(VK_CONTROL, up: true);
-    }
-
     /// <summary>中键点击（浏览器里=新标签页打开链接；绘图软件里常用来平移画布）。</summary>
     public static void MiddleClick()
     {

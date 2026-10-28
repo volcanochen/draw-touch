@@ -8,7 +8,7 @@ SpenTablet PC 端协议级冒烟测试（回归套件核心）。
   2. SHOT_REQ 截图 → 收到 TYPE_SHOT 分片并重组为合法 PNG（捕获功能回归）
   3. MODE 切触摸板/数位板 → host.log 出现模式切换日志
   4. MOUSE 移动/按键 → host.log 出现对应日志
-  5. MOUSE_ZOOM 捏合 → 触摸注入开始+220ms 自动抬起（接触点必须正常结束）
+  5. MOUSE_ZOOM 捏合 → 触摸板缩放 API（接触点须正常抬起）或 Ctrl+滚轮 回退
   6. HL 激光笔开/关 → host.log 出现开启/关闭
   7. NOTE 备注/换色/撤销/清空、PAN 平移、RESET 复位 → host.log 断言
 
@@ -184,25 +184,25 @@ def main():
     s.sendall(frame(T_MOUSE, f32(M_LEFT_CLICK, 0, 0)))
     check("MOUSE 左键点击 → 日志确认", log_contains(log, "单击 → 左键", mark))
 
-    # ---- 5. 捏合缩放：触摸注入路径或 Ctrl+/- 回退路径二选一，必须有一条生效 ----
-    # （部分 Windows 版本触摸注入被系统禁用/损坏 → 熔断后走 Ctrl 回退，同样算通过）
+    # ---- 5. 捏合缩放：触摸板缩放 API 或 Ctrl+滚轮 二选一，必须有一条生效 ----
+    # （部分 Windows 版本触摸注入被系统禁用/损坏 → 熔断后走 Ctrl+滚轮，同样算通过）
     mark = log_size(log)
     for f in (1.1, 1.1, 1.1, 1.1, 1.1):
         s.sendall(frame(T_MOUSE, f32(M_ZOOM, f, 0)))
         time.sleep(0.05)
     ok_any = log_contains(log, "[Mouse] 捏合 ×", mark)
     used_touch = log_contains(log, "[TouchZoom] 开始捏合", mark)
-    used_fallback = log_contains(log, "Ctrl+ / Ctrl-", mark)
+    used_fallback = log_contains(log, "Ctrl+滚轮", mark)
     check("MOUSE_ZOOM → 缩放帧被处理", ok_any)
-    check("缩放路径生效（触摸注入 或 Ctrl+/- 回退）", used_touch or used_fallback,
-          "触摸注入" if used_touch else ("Ctrl回退" if used_fallback else "两者皆无"))
+    check("缩放路径生效（触摸板缩放 API 或 Ctrl+滚轮）", used_touch or used_fallback,
+          "触摸板缩放API" if used_touch else ("Ctrl+滚轮" if used_fallback else "两者皆无"))
     if used_touch:
         ok_end = log_contains(log, "[TouchZoom] 捏合结束（抬起接触点）", mark, timeout=5)
         check("捏合结束后接触点自动抬起（UP 帧修复回归）", ok_end)
     else:
         # 回退路径成立的条件（二选一）：
         #   a) 触摸注入被系统禁用 → 出现熔断日志「已熔断」；
-        #   b) 配置里注入模式本来就是 Pen（用笔注入，不碰触摸）→ 直接走 Ctrl 回退，
+        #   b) 配置里注入模式本来就是 Pen（用笔注入，不碰触摸）→ 直接走 Ctrl+滚轮，
         #      这种情况下根本不涉及熔断，不能要求有熔断日志。
         ok_cb = log_contains(log, "已熔断", 0, timeout=2)
         pen_mode = log_contains(log, "注入模式: Pen", 0, timeout=1.0)

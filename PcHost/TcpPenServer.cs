@@ -632,6 +632,12 @@ public sealed class TcpPenServer : IDisposable
     /// <summary>残量上限：系统在虚拟桌面/异构多屏下截断位移时，残量不能无限堆积。</summary>
     private const double MoveRemainLimit = 600;
 
+    // 捏合缩放（Ctrl+滚轮方案）：不足 1 格的余量跨帧累计，避免慢速捏合「没反应」
+    private double _zoomNotch;
+
+    /// <summary>捏合系数 → 滚轮格数的换算系数：ln(1.105)×10 ≈ 1 格，即放大 10.5% 走一格。</summary>
+    private const double ZoomNotchPerLn = 10.0;
+
     /// <summary>激光笔帧：开关 + 颜色索引。</summary>
     private void HandleHighlighter(byte[] p)
     {
@@ -731,18 +737,29 @@ public sealed class TcpPenServer : IDisposable
                 // 手机端把缩放系数放在 dx 字段里（相对量，>1 张开 / <1 捏拢）。
                 double factor = dx;
                 if (factor <= 0) break;
+
+                // ① 优先「真实触摸板捏合」：把两个接触点喂给系统，由系统翻译成前台应用的缩放手势。
+                //    这台机器的 InjectTouchInput 会熔断（err=87），此时自动降级到 ②。
                 bool usedTouch = false;
-                if (_cfg.PinchMode != "Keys" && MouseControl.TryGetCursorPos(out var zx, out var zy))
-                {
+                if (_cfg.PinchMode != "Wheel" && MouseControl.TryGetCursorPos(out var zx, out var zy))
                     usedTouch = MouseControl.UpdateTouchZoom(factor, zx, zy);
-                }
-                if (!usedTouch)
+                if (usedTouch)
                 {
-                    // 回退：Ctrl++ / Ctrl+-（兼容性最好）
-                    if (factor > 1) MouseControl.CtrlPlus();
-                    else MouseControl.CtrlMinus();
+                    AppLog.Info($"[Mouse] 捏合 ×{factor:F3} → 触摸板真实缩放");
+                    break;
                 }
-                AppLog.Info($"[Mouse] 捏合 ×{factor:F3} → {(usedTouch ? "触摸板真实缩放" : "Ctrl+ / Ctrl-")}");
+
+                // ② 通用方案：Ctrl + 滚轮 —— Office/OneNote/浏览器/PDF/看图 都认这个，
+                //    而且不会和任何文本排版快捷键撞车。真实触摸板捏合在系统里也等价于它。
+                //    factor 是对数关系换算成滚轮格数：×1.105 ≈ 1 格；零散余量累计到下一次。
+                _zoomNotch = Math.Clamp(_zoomNotch + Math.Log(factor) * ZoomNotchPerLn, -6, 6);
+                int notches = (int)_zoomNotch;
+                if (notches != 0)
+                {
+                    _zoomNotch -= notches;
+                    MouseControl.CtrlWheel(notches);
+                    AppLog.Info($"[Mouse] 捏合 ×{factor:F3} → Ctrl+滚轮 {notches:+0;-0} 格{(notches > 0 ? "（放大）" : "（缩小）")}");
+                }
                 break;
             }
             case MOUSE_MIDDLE_CLICK:

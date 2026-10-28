@@ -43,11 +43,16 @@ public sealed class MappingConfig
     public double MouseSpeed { get; set; } = 1.0;
 
     /// <summary>
-    /// 双指捏合缩放方式：
-    ///   Touch —— 优先用真实「触摸板缩放 API」（模拟双指捏合的触摸注入，
-    ///             浏览器/地图/Office/图片查看器等原生支持，手感与真实触摸板一致）；
-    ///   Keys  —— 直接发 Ctrl++ / Ctrl+-（兼容性最好，但只有支持这两个快捷键的软件才有效）。
-    /// 系统若不支持触摸注入，则无论设什么都会自动回退到 Keys。
+    /// 双指捏合缩放方式（只有两种）：
+    ///   Touch —— 触摸板缩放 API：模拟双指捏合的触摸注入，由系统翻译成前台应用的缩放手势，
+    ///            浏览器/地图/Office/图片查看器等原生支持，手感与真实触摸板一致；
+    ///   Wheel —— Ctrl + 滚轮：通用方案，OneNote / Office / 浏览器 / PDF / 看图 都认，
+    ///            且不会和文本排版快捷键撞车。
+    /// 系统若不支持触摸注入（实测部分 Win11 版本 InjectTouchInput 返回 err=87），
+    /// 选 Touch 也会自动降级到 Wheel。
+    ///
+    /// 历史值 "Keys"（Ctrl+加号/减号）已废弃：在 OneNote/Word 里那是「下标 / 删除线」，
+    /// 不是缩放，会误改文档格式 —— 现在按 "Wheel" 处理。
     /// </summary>
     public string PinchMode { get; set; } = "Touch";
 

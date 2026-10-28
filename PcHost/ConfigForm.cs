@@ -218,10 +218,12 @@ internal sealed class ConfigForm : Form
         _cmbPinch = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 380 };
         _cmbPinch.Items.AddRange(new object[]
         {
-            "真实触摸板缩放（双指捏合注入，手感最真实）",
-            "Ctrl++ / Ctrl+-（兼容性最好）",
+            "触摸板缩放 API（真实双指捏合注入，手感最真实）",
+            "Ctrl + 滚轮（通用：OneNote / Office / 浏览器 / PDF）",
         });
-        _cmbPinch.SelectedIndex = cfg.PinchMode.Equals("Keys", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+        // 只有两种。旧配置里的 "Keys"（Ctrl+加号/减号）已废弃 —— 那是排版快捷键，
+        // 在 OneNote 里会变成「下标 / 删除线」，直接按「Ctrl+滚轮」处理。
+        _cmbPinch.SelectedIndex = cfg.PinchMode.Equals("Wheel", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
         AddRow("捏合缩放方式", _cmbPinch);
 
         var zoomRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
@@ -461,7 +463,7 @@ internal sealed class ConfigForm : Form
         _cfg.Debug = _chkDebug.Checked;
         _cfg.ShowRegion = _chkShowRegion.Checked;
         _cfg.MouseSpeed = (double)_nudMouseSpeed.Value;
-        _cfg.PinchMode = _cmbPinch.SelectedIndex == 1 ? "Keys" : "Touch";
+        _cfg.PinchMode = _cmbPinch.SelectedIndex == 1 ? "Wheel" : "Touch";
         // 操作框的缩放/位置由手机端捏合控制，PC 这里只读不写
         _cfg.SetWorkMode(_cmbWork.SelectedIndex == 1);
         if (_cfg.IsMouseMode) MouseControl.ReleaseAll();
