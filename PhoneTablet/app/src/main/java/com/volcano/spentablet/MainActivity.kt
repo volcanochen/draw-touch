@@ -129,6 +129,8 @@ class MainActivity : Activity() {
         port = prefs.getInt("port", Protocol.DEFAULT_PORT)
         aspectMode = prefs.getInt("aspect", Protocol.ASPECT_KEEP)
         workMode = prefs.getInt("mode", Protocol.MODE_MOUSE) // 默认鼠标模式
+        // 备注/画笔模式：记住用户的选择；没选过时数位板默认「备注」（笔迹直接上桌面）
+        noteOn = prefs.getBoolean("noteOn", workMode == Protocol.MODE_TABLET)
         orientMode = prefs.getInt("orient", 0)
 
         // 结构：FrameLayout
@@ -769,10 +771,10 @@ class MainActivity : Activity() {
             net.send(Protocol.buildMode(m))
         }
         // 备注跟随模式走：
-        //   数位板 → 默认**开启**桌面备注（笔直接画在桌面框内，不用再点一次「备注」）
+        //   数位板 → 恢复上次选的模式（没选过则默认「备注」：笔直接画在桌面框内）
         //   触摸板 → 关掉备注（备注是桌面的笔迹层，和光标控制互斥）
         if (m == Protocol.MODE_TABLET) {
-            if (!noteOn) toggleNote(true)
+            toggleNote(prefs.getBoolean("noteOn", true))
         } else if (noteOn) {
             toggleNote(false)
         }
@@ -1506,6 +1508,7 @@ class MainActivity : Activity() {
     /** 桌面备注开关：开启后 S Pen 直接在 PC 桌面固定位置画笔迹（不随范围框移动） */
     private fun toggleNote(on: Boolean) {
         noteOn = on
+        prefs.edit().putBoolean("noteOn", on).apply()   // 记住选择，切模式/重启后沿用
         updateNoteBtn()          // 未连接时也要让按钮文案跟上，否则界面和实际状态对不上
         if (!::net.isInitialized) return
         net.send(Protocol.buildNote(if (on) Protocol.NOTE_ON else Protocol.NOTE_OFF))
@@ -1750,14 +1753,17 @@ class MainActivity : Activity() {
      */
     private fun newNetClient(): NetClient = NetClient(host, port) {
         if (::net.isInitialized) {
-            net.send(Protocol.buildNote(Protocol.NOTE_COLOR, noteColorIdx.toFloat()))
-            // 数位板模式默认开着桌面备注：重连后也要把状态补回去
-            if (workMode == Protocol.MODE_TABLET && !noteOn) {
-                noteOn = true
-                net.send(Protocol.buildNote(Protocol.NOTE_ON))
-                updateNoteBtn()
-            }
-            // 激光笔状态也要补回去（PC 端不记状态）
+            // 备注状态**每次连接都完整同步一遍**（手机才是信息源）。
+            // 以前只在 `!noteOn` 时才补发 NOTE_ON，可是 PC 重启后 _noteOn 是 false，
+            // 手机这边如果本来就已经是"开"，就永远不会再发 —— 两边状态错位，
+            // 表现为「笔迹只画在手机上，桌面什么都不出」（捕获正常，但备注像消失了一样）。
+            // 注意这里**不**强行打开备注：用户选了「画笔」，重连后也要保持画笔。
+            if (workMode != Protocol.MODE_TABLET) noteOn = false  // 触摸板与备注互斥
+            net.send(Protocol.buildNote(
+                if (noteOn) Protocol.NOTE_ON else Protocol.NOTE_OFF))
+            if (noteOn) net.send(Protocol.buildNote(Protocol.NOTE_COLOR, noteColorIdx.toFloat()))
+            updateNoteBtn()
+            // 激光笔状态也要补回去（PC 端同样不记状态）
             if (highlighterOn) net.send(Protocol.buildHighlighter(true, highlighterColor))
         }
         helloFrame()
