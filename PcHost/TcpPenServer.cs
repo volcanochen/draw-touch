@@ -35,9 +35,13 @@ public sealed class TcpPenServer : IDisposable
     private const byte TYPE_SHOT_REQ = 0x0E;
     /// <summary>截图数据（下行分片）：payload = totalLen(u32) + seq(u16) + data</summary>
     private const byte TYPE_SHOT = 0x0F;
+    /// <summary>荧光笔帧：payload[0]=开关(0/1)，payload[1]=颜色索引</summary>
+    private const byte TYPE_HL = 0x10;
 
     // 鼠标帧 kind（与手机端 Protocol.MOUSE_* 一致）
     private const int MOUSE_MOVE = 0;
+    private const int MOUSE_LEFT_DOWN = 1;
+    private const int MOUSE_LEFT_UP = 2;
     private const int MOUSE_LEFT_CLICK = 3;
     private const int MOUSE_RIGHT_CLICK = 4;
     private const int MOUSE_SCROLL = 5;
@@ -50,6 +54,8 @@ public sealed class TcpPenServer : IDisposable
     private const int MOUSE_VOL_MUTE = 12;    // 静音
     private const int MOUSE_TASK_NEXT = 13;   // 任务切换 Alt+Tab
     private const int MOUSE_TASK_PREV = 14;   // 任务反向切换 Alt+Shift+Tab
+    /// <summary>手指是否正落在触摸板上（1=在，0=离开）。用来让笔在手指操作期间让位。</summary>
+    private const int MOUSE_FINGER = 15;
 
     /// <summary>
     /// 手指划过整个书写区高度 = 滚动多少**像素**。
@@ -70,8 +76,20 @@ public sealed class TcpPenServer : IDisposable
     private NetworkStream? _clientStream;
     /// <summary>桌面笔迹叠加层（屏幕备注）</summary>
     private readonly NoteOverlay _note = new();
+    /// <summary>荧光笔叠加层（触摸板模式：把桌面指针变成荧光笔）</summary>
+    private readonly HighlighterOverlay _hl = new();
     /// <summary>备注开启中：S Pen 笔迹画到桌面固定位置，不注入系统笔</summary>
     private bool _noteOn;
+    /// <summary>
+    /// 手指是否正压在触摸板上。
+    /// 触摸板模式下 **S Pen 的悬停流会不停把光标拽回笔的位置**：
+    /// 笔只要在平板上（哪怕只是放着），桌面光标就会一帧一帧地被重定位，
+    /// 手指的相对移动被反复覆盖 —— 表现就是「手指往右下微动，光标却往左跑」。
+    /// 所以手指一按上来，笔就完全让位（光标只听手指的）。
+    /// </summary>
+    private volatile bool _fingerOnPad;
+    /// <summary>上一次检测到的 Windows 虚拟桌面（切换桌面时坐标空间会变）</summary>
+    private IntPtr _lastDesktopId = IntPtr.Zero;
 
     /// <summary>各类型帧计数，用于控制台周期性汇报（确认链路是否真的在跑）。</summary>
     public long CountDown, CountMove, CountUp, CountHover, CountNoop;
@@ -102,6 +120,9 @@ public sealed class TcpPenServer : IDisposable
         Console.WriteLine($"[Server] 监听端口 {_cfg.ListenPort}，等待手机连接（adb reverse tcp:{0} tcp:{0} 或填 PC IP）", _cfg.ListenPort);
         _ = AcceptLoop(_cts.Token);
 
+        // 每秒检查一次显示器布局 / Windows 虚拟桌面是否变化
+        _watchTimer = new System.Threading.Timer(_ => WatchDisplay(), null, 1000, 1000);
+
         // mDNS 广播：手机端自动发现本机，免手填 IP
         try
         {
@@ -111,6 +132,45 @@ public sealed class TcpPenServer : IDisposable
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[Server] mDNS 广播启动失败（不影响手动填 IP 连接）：{ex.Message}");
+        }
+    }
+
+    /// <summary>显示器布局 / 虚拟桌面变化的监视器。</summary>
+    private System.Threading.Timer? _watchTimer;
+
+    /// <summary>
+    /// 每秒检查两件事：
+    ///   ① 虚拟屏幕尺寸有没有变（插拔显示器 / 改分辨率 / 远程桌面）——
+    ///      变了就重新解析映射区域，并把备注层、荧光笔层的画布一起重建；
+    ///   ② Windows 虚拟桌面有没有切换 —— 切换后光标的绝对坐标空间变了，
+    ///      累积的残量必须作废，否则会出现「突然跳一大段」。
+    /// </summary>
+    private void WatchDisplay()
+    {
+        try
+        {
+            if (_cfg.RefreshVirtualScreenIfChanged(Environment.TickCount64))
+            {
+                _hl.ResizeToVirtualScreen();
+                _note.ResizeToVirtualScreen();
+            }
+
+            var did = DesktopInfo.CurrentDesktopId();
+            if (_lastDesktopId == IntPtr.Zero)
+            {
+                _lastDesktopId = did;
+            }
+            else if (did != _lastDesktopId)
+            {
+                _lastDesktopId = did;
+                _moveRemX = 0;
+                _moveRemY = 0;
+                AppLog.Info($"[Desktop] 已切换 Windows 虚拟桌面（{DesktopInfo.CurrentDesktopName()}）→ 重新锚定光标");
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error($"[Display] 监视异常：{ex.GetType().Name} {ex.Message}");
         }
     }
 
@@ -181,6 +241,9 @@ public sealed class TcpPenServer : IDisposable
                             break;
                         case TYPE_NOTE:
                             HandleNote(payload);
+                            break;
+                        case TYPE_HL:
+                            HandleHighlighter(payload);
                             break;
                         case TYPE_SHOT_REQ:
                             HandleShotReq(ns);
@@ -463,6 +526,19 @@ public sealed class TcpPenServer : IDisposable
     // 触摸板相对移动：不足 1 像素的位移残量（跨帧累积，避免慢速移动"不动/跳"）
     private double _moveRemX, _moveRemY;
 
+    /// <summary>残量上限：系统在虚拟桌面/异构多屏下截断位移时，残量不能无限堆积。</summary>
+    private const double MoveRemainLimit = 600;
+
+    /// <summary>荧光笔帧：开关 + 颜色索引。</summary>
+    private void HandleHighlighter(byte[] p)
+    {
+        if (p.Length < 4) return;
+        bool on = BitConverter.ToSingle(p, 0) >= 1f;
+        int cidx = p.Length >= 8 ? (int)BitConverter.ToSingle(p, 4) : 0;
+        if (cidx >= 0) _hl.SetColorIndex(cidx);
+        _hl.SetEnabled(on);
+    }
+
     /// <summary>鼠标帧：手指当触摸板（相对移动 / 左键 / 右键）。</summary>
     private void HandleMouse(byte[] p)
     {
@@ -486,13 +562,49 @@ public sealed class TcpPenServer : IDisposable
                 int my = (int)_moveRemY;
                 _moveRemX -= mx;
                 _moveRemY -= my;
-                if (mx != 0 || my != 0) MouseControl.MoveBy(_cfg, mx, my);
+                if (mx != 0 || my != 0)
+                {
+                    // 绝对定位可能被系统截断（虚拟桌面 / 异构多屏）→ 没走完的部分下帧继续
+                    var (remX, remY) = MouseControl.MoveBy(_cfg, mx, my);
+                    if (remX != 0 || remY != 0)
+                    {
+                        _moveRemX = Math.Clamp(_moveRemX + remX, -MoveRemainLimit, MoveRemainLimit);
+                        _moveRemY = Math.Clamp(_moveRemY + remY, -MoveRemainLimit, MoveRemainLimit);
+                    }
+                }
                 if (_mouseLog++ % 20 == 0)
                     AppLog.Info($"[Mouse] 移动 dx={dx:F3} dy={dy:F3} → 光标位移 ({mx},{my}) 残量({_moveRemX:F2},{_moveRemY:F2}) 增益={_cfg.MouseSpeed:0.##}");
                 break;
+            case MOUSE_FINGER:
+            {
+                // 手指在触摸板上的状态：手指一按上来，S Pen 就把光标完全让给手指
+                bool on = dx >= 1f;
+                if (on != _fingerOnPad)
+                {
+                    _fingerOnPad = on;
+                    if (on)
+                    {
+                        // 笔可能正按着（笔在平板上压到会误触）→ 先松开，别把左键卡住
+                        MouseControl.Up();
+                        AppLog.Info("[Mouse] 手指已落在触摸板上 → S Pen 让位，光标只跟手指");
+                    }
+                    else
+                    {
+                        AppLog.Info("[Mouse] 手指离开触摸板 → S Pen 恢复控制光标");
+                    }
+                }
+                break;
+            }
             case MOUSE_LEFT_CLICK:
                 MouseControl.LeftClick();
                 AppLog.Info("[Mouse] 单击 → 左键");
+                break;
+            case MOUSE_LEFT_DOWN:
+                // 按住不放（触摸板模式下：按住「左」键按钮 + 移动手指 = 拖拽 / 涂荧光）
+                MouseControl.Down();
+                break;
+            case MOUSE_LEFT_UP:
+                MouseControl.Up();
                 break;
             case MOUSE_RIGHT_CLICK:
                 MouseControl.RightClick();
@@ -512,12 +624,22 @@ public sealed class TcpPenServer : IDisposable
             }
             case MOUSE_ZOOM:
             {
-                // 捏合张开(factor>1) → Ctrl+滚轮向上 = 放大
-                // 手机端把缩放系数放在 dx 字段里
+                // 捏合张开(factor>1) → 放大；捏拢(<1) → 缩小。
+                // 手机端把缩放系数放在 dx 字段里（相对量，>1 张开 / <1 捏拢）。
                 double factor = dx;
-                int n = PreciseDelta((factor - 1.0) * ZOOM_PIXELS_PER_FULL);
-                if (n != 0) MouseControl.CtrlWheelPixels(n);
-                AppLog.Info($"[Mouse] 缩放 ×{factor:F3} → Ctrl+滚轮 {n}px");
+                if (factor <= 0) break;
+                bool usedTouch = false;
+                if (_cfg.PinchMode != "Keys" && MouseControl.TryGetCursorPos(out var zx, out var zy))
+                {
+                    usedTouch = MouseControl.UpdateTouchZoom(factor, zx, zy);
+                }
+                if (!usedTouch)
+                {
+                    // 回退：Ctrl++ / Ctrl+-（兼容性最好）
+                    if (factor > 1) MouseControl.CtrlPlus();
+                    else MouseControl.CtrlMinus();
+                }
+                AppLog.Info($"[Mouse] 捏合 ×{factor:F3} → {(usedTouch ? "触摸板真实缩放" : "Ctrl+ / Ctrl-")}");
                 break;
             }
             case MOUSE_MIDDLE_CLICK:
@@ -592,6 +714,11 @@ public sealed class TcpPenServer : IDisposable
         // 鼠标模式：S Pen 当绝对定位的鼠标笔（覆盖整块虚拟屏幕），不再走合成笔注入
         if (_cfg.IsMouseMode)
         {
+            // 手指正压在触摸板上时，光标只听手指的：笔的悬停流不能再来抢光标
+            // （笔只要在平板上就会一直发悬停，把光标一帧一帧拽回笔的位置 ——
+            //   表现出来就是「手指往右下微动，光标却往左跑」）。
+            if (_fingerOnPad) return;
+
             var (mx, my) = _cfg.ToPixelsFull(x, y);
             LastX = mx; LastY = my; LastPressure = pressure;
             CountMousePen(state);
@@ -648,7 +775,9 @@ public sealed class TcpPenServer : IDisposable
     public void Dispose()
     {
         _cts?.Cancel();
+        try { _watchTimer?.Dispose(); } catch { }
         try { _note.Dispose(); } catch { }
+        try { _hl.Dispose(); } catch { }
         try { _mdns?.Dispose(); } catch { }
         try { _listener.Stop(); } catch { }
         _cts?.Dispose();

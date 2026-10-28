@@ -134,14 +134,36 @@ class PenCanvasView(context: Context) : View(context) {
     var g2Pinch: Int = 2   // 双指捏合：缩放（独立槽位，与双指滑动分开）
     var g2Tap: Int = 4     // 双指点击：右键
     var g3Tap: Int = 5     // 三指点击：中键
-    var g3Swipe: Int = 8   // 三指左右滑：后退/前进
-    var g4Tap: Int = 9     // 四指点击：切换模式
-    var g4Swipe: Int = 0   // 四指滑动：无
+    // 三指 / 四指滑动：左右、上下各拆成独立槽位（每个方向可单独配置动作）
+    var g3L: Int = 7   // 三指右滑：前进
+    var g3R: Int = 6   // 三指左滑：后退
+    var g3U: Int = 5   // 三指上滑：中键
+    var g3D: Int = 3   // 三指下滑：左键
+    var g4L: Int = 9   // 四指右滑：切换模式
+    var g4R: Int = 0   // 四指左滑：无
+    var g4U: Int = 10  // 四指上滑：音量+
+    var g4D: Int = 11  // 四指下滑：音量-
+    var g4Tap: Int = 9   // 四指点击：切换模式
     /** 四指等手势触发「切换模式」时回调给 MainActivity */
     var onSwitchMode: (() -> Unit)? = null
 
+    /**
+     * 某个鼠标动作（点击类：左/中/右键等）被触发时回调，用于在手机端对应的浮动按钮上
+     * 给出视觉反馈（闪烁高亮），让用户看清「这次手势打中了哪个键」。
+     * [code] 即 Protocol.MOUSE_* 动作码。
+     */
+    var onActionVisual: ((Int) -> Unit)? = null
+
     /** 手指/笔刚按下屏幕（每次手势一次）。MainActivity 用来打断无极滚动的惯性 */
     var onTouchDown: (() -> Unit)? = null
+
+    /**
+     * 手指是否正落在触摸板上（true=落下，false=离开）。
+     * 触摸板模式下用来通知 PC「S Pen 让位」——
+     * 笔只要在平板上（哪怕只是放着），它的悬停流就会一帧一帧把桌面光标拽回笔的位置，
+     * 手指的相对移动被反复覆盖，表现为「手指往右下微动，光标却往左跑」。
+     */
+    var onFingerState: ((Boolean) -> Unit)? = null
 
     /** 截图捕获后锁定：忽略手指拖框/捏合，直到截图清除 */
     var frameLocked: Boolean = false
@@ -154,6 +176,16 @@ class PenCanvasView(context: Context) : View(context) {
     /** 发送点击（底部按键用）：kind 见 Protocol.MOUSE_LEFT/RIGHT/MIDDLE_CLICK */
     fun sendClick(kind: Int) {
         onMouse?.invoke(kind, 0f, 0f)
+    }
+
+    /** 鼠标左键「按下」（按住不放 = 拖拽 / 涂荧光） */
+    fun sendLeftDown() {
+        onMouse?.invoke(Protocol.MOUSE_LEFT_DOWN, 0f, 0f)
+    }
+
+    /** 鼠标左键「抬起」 */
+    fun sendLeftUp() {
+        onMouse?.invoke(Protocol.MOUSE_LEFT_UP, 0f, 0f)
     }
 
     /**
@@ -516,6 +548,14 @@ class PenCanvasView(context: Context) : View(context) {
                 "${EvtDump.actionName(e.action)} ${EvtDump.toolName(tt)} " +
                         "p=${String.format("%.2f", pressure)} gain=${String.format("%.1f", pressureGain)}"
             )
+            // 触摸板模式：手指正压在板上时，S Pen **完全让位**（一个笔事件都不发）。
+            // 原因：PC 端把每个笔事件都当成「绝对定位光标」，
+            // 笔的悬停流（笔在平板上时每秒 60 帧）会不断把光标拽回笔的位置，
+            // 手指的相对移动刚动一下就被覆盖 → 看起来就是「指针反向跑」。
+            if (workMode == Protocol.MODE_MOUSE && tpActiveFingers > 0) {
+                tpPenDown = (type == Protocol.TYPE_PEN_DOWN)
+                continue
+            }
             if (workMode == Protocol.MODE_MOUSE) {
                 tpPenDown = (type == Protocol.TYPE_PEN_DOWN)
             }
@@ -623,6 +663,8 @@ class PenCanvasView(context: Context) : View(context) {
             13 -> onMouse?.invoke(Protocol.MOUSE_TASK_NEXT, 0f, 0f)
             14 -> onMouse?.invoke(Protocol.MOUSE_TASK_PREV, 0f, 0f)
         }
+        // 任何由手势触发的鼠标动作都在手机端对应浮动按钮上闪一下（看见「打中了哪个键」）
+        onActionVisual?.invoke(code)
     }
 
     /**
@@ -638,6 +680,15 @@ class PenCanvasView(context: Context) : View(context) {
             else -> dispatchAction(code, tag)
         }
         onDebug?.invoke("$tag${if (back) "（向右）" else "（向左）"} → ${actionName(code)}")
+    }
+
+    /**
+     * 方向滑动（三指/四指 左右/上下）分发：按方向算出 back 后复用 [dispatchSwipe]。
+     * 视觉反馈由 [dispatchAction] 末尾的 onActionVisual 统一触发（鼠标按钮类动作
+     * 会在手机端对应浮动键上闪一下），这里不再重复触发，避免按钮卡在亮色。
+     */
+    private fun dispatchDirSwipe(code: Int, tag: String, right: Boolean, up: Boolean) {
+        dispatchSwipe(code, tag, right)
     }
 
     /** 捏合专用分发：factor 是本次的相对缩放量（>1 张开 / <1 捏拢） */
@@ -771,6 +822,9 @@ class PenCanvasView(context: Context) : View(context) {
                 tpLastSpan = span
                 tpStartSpan = span
                 tpPinchMode = false
+                // 手指一落上来，S Pen 就让位（PC 端收到这个信号后会松开笔的按键）
+                tpPenDown = false
+                onFingerState?.invoke(true)
             }
 
             MotionEvent.ACTION_POINTER_DOWN -> {
@@ -795,29 +849,39 @@ class PenCanvasView(context: Context) : View(context) {
                     val dCy = cy - tpLastCy
                     val dSpan = span - tpLastSpan
                     tpMoved += kotlin.math.abs(dCx) + kotlin.math.abs(dCy) + kotlin.math.abs(dSpan)
-                    if (cnt >= 4) {
-                        // 四指左右滑（可配置动作）
+                    if (cnt >= 3) {
+                        // 三指 / 四指滑动：左右、上下各拆成独立槽位，按主方向分发配置好的动作
                         val totalDx = cx - tpStartX
-                        if (g4Swipe != 0 && kotlin.math.abs(totalDx) > SWIPE_PX &&
-                            kotlin.math.abs(cy - tpStartY) < SWIPE_PX) {
-                            val now = android.os.SystemClock.uptimeMillis()
-                            if (now - lastSwipeActionAt > SWIPE_ACTION_COOLDOWN_MS) {
-                                lastSwipeActionAt = now
-                                dispatchSwipe(g4Swipe, "四指滑动", totalDx > 0)
+                        val totalDy = cy - tpStartY
+                        if (kotlin.math.hypot(totalDx.toDouble(), totalDy.toDouble()) > SWIPE_PX) {
+                            val horiz = kotlin.math.abs(totalDx) >= kotlin.math.abs(totalDy)
+                            val right = totalDx > 0f
+                            val up = totalDy < 0f
+                            val code = if (cnt == 3) {
+                                when {
+                                    horiz && right -> g3L
+                                    horiz -> g3R
+                                    up -> g3U
+                                    else -> g3D
+                                }
+                            } else {
+                                when {
+                                    horiz && right -> g4L
+                                    horiz -> g4R
+                                    up -> g4U
+                                    else -> g4D
+                                }
                             }
-                            tpStartX = cx
-                        }
-                    } else if (cnt == 3) {
-                        // 三指左右滑（可配置动作：后退/前进、切换模式、音量、任务切换……）
-                        val totalDx = cx - tpStartX
-                        if (g3Swipe != 0 && kotlin.math.abs(totalDx) > SWIPE_PX &&
-                            kotlin.math.abs(cy - tpStartY) < SWIPE_PX) {
-                            val now = android.os.SystemClock.uptimeMillis()
-                            if (now - lastSwipeActionAt > SWIPE_ACTION_COOLDOWN_MS) {
-                                lastSwipeActionAt = now
-                                dispatchSwipe(g3Swipe, "三指滑动", totalDx > 0)
+                            if (code != 0) {
+                                val now = android.os.SystemClock.uptimeMillis()
+                                if (now - lastSwipeActionAt > SWIPE_ACTION_COOLDOWN_MS) {
+                                    lastSwipeActionAt = now
+                                    dispatchDirSwipe(code, if (cnt == 3) "三指" else "四指", right, up)
+                                }
                             }
+                            // 一次完整滑动只触发一次：发完后把基准点移到当前位置
                             tpStartX = cx
+                            tpStartY = cy
                         }
                     } else {
                         // 捏合判定：用**手势开始到现在的累计跨度变化**。
@@ -890,12 +954,15 @@ class PenCanvasView(context: Context) : View(context) {
                 tpLastCx = cx
                 tpLastCy = cy
                 tpLastSpan = span
+                // 最后一根手指离开触摸板 → S Pen 恢复控制光标
+                if (tpActiveFingers == 0) onFingerState?.invoke(false)
             }
 
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 tpActiveFingers = 0
                 tpFingerId = -1
                 tpPinchMode = false
+                onFingerState?.invoke(false)
                 val dur = android.os.SystemClock.uptimeMillis() - tpStartTime
                 val isTap = tpMoved < tapSlopPx * 1.5f && dur < TAP_TIMEOUT_MS
                 when {

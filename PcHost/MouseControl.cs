@@ -84,6 +84,15 @@ internal static class MouseControl
 
     public static bool LeftDown { get; private set; }
 
+    /// <summary>读取当前光标位置（虚拟屏幕坐标）。</summary>
+    public static bool TryGetCursorPos(out int x, out int y)
+    {
+        x = 0; y = 0;
+        if (!GetCursorPos(out var p)) return false;
+        x = p.X; y = p.Y;
+        return true;
+    }
+
     /// <summary>把归一化坐标(0..1)换算成虚拟屏幕像素并绝对定位光标。</summary>
     public static void MoveTo(MappingConfig cfg, int px, int py)
     {
@@ -92,14 +101,38 @@ internal static class MouseControl
         Send(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESKTOP, ax, ay);
     }
 
-    /// <summary>相对当前光标位置平移（像素）。超出虚拟屏幕会被夹住。</summary>
-    public static void MoveBy(MappingConfig cfg, int dx, int dy)
+    /// <summary>
+    /// 相对当前光标位置平移（像素）。超出虚拟屏幕会被夹住。
+    ///
+    /// 返回**没走完的残量**（系统截断掉的部分），交给调用方下一帧继续走。
+    ///
+    /// 为什么需要读回：绝对定位在下面这些场景会被系统改写或直接拒绝 ——
+    ///   · Windows 虚拟桌面（Win+Ctrl+←/→）：每个桌面有自己的显示器布局，
+    ///     目标坐标在当前桌面无效 → 系统不动光标（表现为「完全控制不了」）；
+    ///   · 异构多屏 / 缩放不同的显示器：坐标会被夹到当前桌面的有效范围。
+    /// 所以这里发完立刻读回光标真实位置：没走完就记残量；一个像素都没动
+    /// 说明这次绝对定位被系统拒绝 → 退回「相对移动」保证控制不失效。
+    /// </summary>
+    public static (int remX, int remY) MoveBy(MappingConfig cfg, int dx, int dy)
     {
-        if (dx == 0 && dy == 0) return;
-        if (!GetCursorPos(out var p)) return;
-        int nx = Math.Clamp(p.X + dx, cfg.VirtualX, cfg.VirtualX + cfg.VirtualW - 1);
-        int ny = Math.Clamp(p.Y + dy, cfg.VirtualY, cfg.VirtualY + cfg.VirtualH - 1);
-        MoveTo(cfg, nx, ny);
+        if (dx == 0 && dy == 0) return (0, 0);
+        if (!GetCursorPos(out var p)) return (0, 0);
+
+        int tx = (int)Math.Clamp((long)p.X + dx, cfg.VirtualX, cfg.VirtualX + cfg.VirtualW - 1);
+        int ty = (int)Math.Clamp((long)p.Y + dy, cfg.VirtualY, cfg.VirtualY + cfg.VirtualH - 1);
+
+        Send(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESKTOP,
+            Norm(tx, cfg.VirtualX, cfg.VirtualW), Norm(ty, cfg.VirtualY, cfg.VirtualH));
+
+        if (!GetCursorPos(out var q)) return (0, 0);
+        if (q.X == p.X && q.Y == p.Y)
+        {
+            // 一个像素都没动：绝对定位被系统拒绝（典型是 Windows 虚拟桌面）→ 相对移动兜底
+            Send(MOUSEEVENTF_MOVE, dx, dy);
+            return (0, 0);
+        }
+        // 走了一部分：把没走完的残量留给调用方（下一帧接着走）
+        return (tx - q.X, ty - q.Y);
     }
 
     public static void Down()
@@ -175,6 +208,220 @@ internal static class MouseControl
         if (pixels == 0) return;
         SendKey(VK_CONTROL, up: false);
         SendWheel(MOUSEEVENTF_WHEEL, pixels);
+        SendKey(VK_CONTROL, up: true);
+    }
+
+    // ================= 真实「触摸板缩放」：模拟双指捏合（触摸注入） =================
+    // 这是 Windows 精密触摸板的捏合缩放在系统层的等价物：把两个触摸接触点喂给系统，
+    // 系统再像真实触摸板那样把它翻译成前台应用的缩放手势。浏览器 / 地图 / Office /
+    // 图片查看器 / PDF 等都原生支持，手感与真实触摸板一致。
+    // 若系统不支持触摸注入（很老的系统 / 注入失败），调用方应回退到 Ctrl++/-。
+
+    private const uint POINTER_TYPE_TOUCH = 0x00000002;
+    private const uint POINTER_FLAG_DOWN = 0x00000001;
+    private const uint POINTER_FLAG_UPDATE = 0x00000002;
+    private const uint POINTER_FLAG_UP = 0x00000004;
+    private const uint POINTER_FLAG_INRANGE = 0x00000008;
+    private const uint POINTER_FLAG_INCONTACT = 0x00000010;
+    private const uint TOUCH_MASK_CONTACTAREA = 0x0001;
+    private const uint TOUCH_FEEDBACK_NONE = 0x00000001;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TZPoint { public int X; public int Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT { public int left, top, right, bottom; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINTER_INFO
+    {
+        public uint pointerType;
+        public uint pointerId;
+        public uint frameId;
+        public uint pointerFlags;
+        public IntPtr sourceDevice;
+        public IntPtr hwndTarget;
+        public TZPoint ptPixelLocation;
+        public TZPoint ptHimetricLocation;
+        public TZPoint ptPixelLocationRaw;
+        public TZPoint ptHimetricLocationRaw;
+        public uint dwTime;
+        public uint historyCount;
+        public int inputData;
+        public uint dwKeyStates;
+        public ulong performanceCount;
+        public uint buttonChangeType;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINTER_TOUCH_INFO
+    {
+        public POINTER_INFO pointerInfo;
+        public uint touchFlags;
+        public uint touchMask;
+        public RECT rcContact;
+        public RECT rcContactRaw;
+        public uint orientation;
+        public uint pressure;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool InitializeTouchInjection(uint maxCount, uint dwMode);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool InjectTouchInput(uint count, [In] POINTER_TOUCH_INFO[] contacts);
+
+    private static bool _touchInit;
+    private static bool _touchReady;
+    private static bool _tzActive;
+    private static uint _tzFrameId;
+    private static int _tzCx, _tzCy;     // 捏合中心（屏幕像素）
+    private static int _tzSpan;          // 当前半跨度（像素）
+    private static long _tzLastMs;
+    private static readonly System.Threading.Timer? _tzEndTimer =
+        new System.Threading.Timer(_ => EndTouchZoom(), null, System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
+
+    /// <summary>系统是否支持触摸注入（用于决定能否走真实触摸板缩放）。</summary>
+    public static bool TouchZoomAvailable()
+    {
+        EnsureTouchInit();
+        return _touchReady;
+    }
+
+    private static void EnsureTouchInit()
+    {
+        if (_touchInit) return;
+        _touchInit = true;
+        try
+        {
+            // maxCount=2：同时两个接触点；dwMode=TOUCH_FEEDBACK_NONE 关掉系统的视觉反馈
+            _touchReady = InitializeTouchInjection(2, TOUCH_FEEDBACK_NONE);
+            if (!_touchReady)
+                AppLog.Warn($"[TouchZoom] 初始化触摸注入失败 err={Marshal.GetLastWin32Error()}（将回退 Ctrl++/-）");
+        }
+        catch (Exception ex)
+        {
+            _touchReady = false;
+            AppLog.Warn($"[TouchZoom] 不支持触摸注入：{ex.Message}（将回退 Ctrl++/-）");
+        }
+    }
+
+    /// <summary>捏合基准半跨度（像素）。</summary>
+    private const int TZ_BASE_SPAN = 90;
+    private const int TZ_MIN_SPAN = 24;
+    private const int TZ_MAX_SPAN = 600;
+    /// <summary>手指停止发捏合帧超过此时长(ms)就抬起接触点，结束这次捏合。</summary>
+    private const int TZ_IDLE_MS = 220;
+
+    private static void EndTouchZoom()
+    {
+        if (!_tzActive) return;
+        _tzActive = false;
+        InjectOneFrame(down: false, _tzCx, _tzCy, _tzSpan);
+        AppLog.Info("[TouchZoom] 捏合结束（抬起接触点）");
+    }
+
+    /// <summary>
+    /// 推进一次捏合缩放。
+    /// factor&gt;1 张开（放大），&lt;1 捏拢（缩小）。以当前光标位置为捏合中心。
+    /// 返回 true 表示已成功用真实触摸注入发出（调用方无需再发 Ctrl++/-）；
+    /// false 表示系统不支持或注入失败（调用方应回退到 Ctrl++/-）。
+    /// </summary>
+    public static bool UpdateTouchZoom(double factor, int cx, int cy)
+    {
+        EnsureTouchInit();
+        if (!_touchReady) return false;
+        long now = Environment.TickCount64;
+        if (!_tzActive || now - _tzLastMs > TZ_IDLE_MS)
+        {
+            // 开新一轮捏合：在当前光标处落下两个接触点（基准跨度）
+            _tzCx = cx; _tzCy = cy;
+            _tzSpan = TZ_BASE_SPAN;
+            if (!InjectOneFrame(down: true, cx, cy, _tzSpan)) return false;
+            _tzActive = true;
+            AppLog.Info($"[TouchZoom] 开始捏合 @({cx},{cy}) 跨度±{_tzSpan}");
+        }
+        else
+        {
+            // 按相对系数缩放当前跨度（前台应用据此算出缩放量）
+            int ns = (int)Math.Clamp(_tzSpan * factor, TZ_MIN_SPAN, TZ_MAX_SPAN);
+            _tzSpan = ns;
+            if (!InjectOneFrame(down: false, cx, cy, _tzSpan)) return false;
+        }
+        _tzLastMs = now;
+        // 220ms 内没新帧就自动抬起（结束捏合）
+        try { _tzEndTimer?.Change(TZ_IDLE_MS, System.Threading.Timeout.Infinite); } catch { }
+        return true;
+    }
+
+    /// <summary>构造并发出一帧（两个接触点）：down=true 落点，false 移动/抬起。</summary>
+    private static bool InjectOneFrame(bool down, int cx, int cy, int span)
+    {
+        try
+        {
+            var a = MakeContact(0, cx - span, cy, down);
+            var b = MakeContact(1, cx + span, cy, down);
+            var arr = new[] { a, b };
+            _tzFrameId++;
+            bool ok = InjectTouchInput(2, arr);
+            if (!ok) AppLog.Warn($"[TouchZoom] InjectTouchInput 失败 err={Marshal.GetLastWin32Error()}");
+            return ok;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"[TouchZoom] 注入异常：{ex.Message}");
+            return false;
+        }
+    }
+
+    private static POINTER_TOUCH_INFO MakeContact(uint id, int x, int y, bool down)
+    {
+        const int r = 3; // 接触点包围盒半径（像素）
+        return new POINTER_TOUCH_INFO
+        {
+            pointerInfo = new POINTER_INFO
+            {
+                pointerType = POINTER_TYPE_TOUCH,
+                pointerId = id,
+                frameId = _tzFrameId,
+                pointerFlags = down
+                    ? (POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT)
+                    : (POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT),
+                sourceDevice = IntPtr.Zero,
+                hwndTarget = IntPtr.Zero,
+                ptPixelLocation = new TZPoint { X = x, Y = y },
+                ptHimetricLocation = new TZPoint { X = 0, Y = 0 },
+                ptPixelLocationRaw = new TZPoint { X = x, Y = y },
+                ptHimetricLocationRaw = new TZPoint { X = 0, Y = 0 },
+                dwTime = 0,
+                historyCount = 0,
+                inputData = 0,
+                dwKeyStates = 0,
+                performanceCount = 0,
+                buttonChangeType = 0,
+            },
+            touchFlags = 0,
+            touchMask = TOUCH_MASK_CONTACTAREA,
+            rcContact = new RECT { left = x - r, top = y - r, right = x + r, bottom = y + r },
+            rcContactRaw = new RECT { left = x - r, top = y - r, right = x + r, bottom = y + r },
+            orientation = 0,
+            pressure = 0,
+        };
+    }
+
+    /// <summary>Ctrl + “+” （放大）。</summary>
+    public static void CtrlPlus()
+    {
+        SendKey(VK_CONTROL, up: false);
+        TapKey(0xBB); // VK_OEM_PLUS（主键盘的 +/=）
+        SendKey(VK_CONTROL, up: true);
+    }
+
+    /// <summary>Ctrl + “-” （缩小）。</summary>
+    public static void CtrlMinus()
+    {
+        SendKey(VK_CONTROL, up: false);
+        TapKey(0xBD); // VK_OEM_MINUS（主键盘的 -/_）
         SendKey(VK_CONTROL, up: true);
     }
 

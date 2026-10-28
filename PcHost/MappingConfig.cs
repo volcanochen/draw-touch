@@ -42,6 +42,15 @@ public sealed class MappingConfig
     /// <summary>鼠标模式下手指位移的增益（1.0 = 划过整个手机宽 ≈ 光标走过整个虚拟屏宽）。</summary>
     public double MouseSpeed { get; set; } = 1.0;
 
+    /// <summary>
+    /// 双指捏合缩放方式：
+    ///   Touch —— 优先用真实「触摸板缩放 API」（模拟双指捏合的触摸注入，
+    ///             浏览器/地图/Office/图片查看器等原生支持，手感与真实触摸板一致）；
+    ///   Keys  —— 直接发 Ctrl++ / Ctrl+-（兼容性最好，但只有支持这两个快捷键的软件才有效）。
+    /// 系统若不支持触摸注入，则无论设什么都会自动回退到 Keys。
+    /// </summary>
+    public string PinchMode { get; set; } = "Touch";
+
     /// <summary>当前是否为鼠标模式。</summary>
     public bool IsMouseMode => WorkMode.Equals("Mouse", StringComparison.OrdinalIgnoreCase);
 
@@ -109,6 +118,40 @@ public sealed class MappingConfig
             _mapW = MappingW <= 0 ? VirtualW : MappingW;
             _mapH = MappingH <= 0 ? VirtualH : MappingH;
         }
+    }
+
+    /// <summary>上次刷新虚拟屏幕的时刻（毫秒），用于限流。</summary>
+    private long _lastResolveAt;
+
+    /// <summary>
+    /// 虚拟屏幕**变化时**才重新解析并通知外部刷新。
+    ///
+    /// 以前只在启动时取一次虚拟屏幕尺寸：插拔第二块显示器、改分辨率、接远程桌面之后，
+    /// 映射区域就成了过期的旧值 —— 光标被夹在过期范围里（完全控制不了），
+    /// 桌面框和笔的落点也跟着错（笔在框框之外）。这里按需复查，变了就更新。
+    ///
+    /// 最多每 500ms 查一次（GetSystemMetrics 很便宜，但没必要每帧都调）。
+    /// </summary>
+    public bool RefreshVirtualScreenIfChanged(long nowMs)
+    {
+        if (nowMs - _lastResolveAt < 500) return false;
+        _lastResolveAt = nowMs;
+
+        int x = GetSystemMetrics(76);
+        int y = GetSystemMetrics(77);
+        int w = GetSystemMetrics(78);
+        int h = GetSystemMetrics(79);
+        if (w <= 0) w = GetSystemMetrics(0);
+        if (h <= 0) h = GetSystemMetrics(1);
+        if (x == VirtualX && y == VirtualY && w == VirtualW && h == VirtualH) return false;
+
+        int oldX = VirtualX, oldY = VirtualY, oldW = VirtualW, oldH = VirtualH;
+        ResolveVirtualScreen();
+        // 框要重新夹回合法区间（虚拟屏幕变小后，原来的位置可能越界）
+        ClampFrame();
+        AppLog.Info($"[Display] 虚拟屏幕变化：{oldX},{oldY} {oldW}×{oldH} → {VirtualX},{VirtualY} {VirtualW}×{VirtualH}");
+        Changed?.Invoke();
+        return true;
     }
 
     /// <summary>手机握手：上报绘制面像素宽高、比例偏好、工作模式，以及当前操作框状态。</summary>

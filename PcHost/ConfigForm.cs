@@ -45,6 +45,7 @@ internal sealed class ConfigForm : Form
     private readonly ComboBox _cmbMode;
     private readonly ComboBox _cmbWork;
     private readonly NumericUpDown _nudMouseSpeed;
+    private readonly ComboBox _cmbPinch;
     private readonly NumericUpDown _nudScale;
     private readonly ComboBox _cmbAspect;
     private readonly CheckBox _chkFull;
@@ -213,6 +214,15 @@ internal sealed class ConfigForm : Form
             Value = (decimal)Math.Clamp(cfg.MouseSpeed, 0.2, 4.0), Width = 100
         };
         AddRow("鼠标速度", _nudMouseSpeed);
+
+        _cmbPinch = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 380 };
+        _cmbPinch.Items.AddRange(new object[]
+        {
+            "真实触摸板缩放（双指捏合注入，手感最真实）",
+            "Ctrl++ / Ctrl+-（兼容性最好）",
+        });
+        _cmbPinch.SelectedIndex = cfg.PinchMode.Equals("Keys", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+        AddRow("捏合缩放方式", _cmbPinch);
 
         var zoomRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
         _nudScale = new NumericUpDown
@@ -451,6 +461,7 @@ internal sealed class ConfigForm : Form
         _cfg.Debug = _chkDebug.Checked;
         _cfg.ShowRegion = _chkShowRegion.Checked;
         _cfg.MouseSpeed = (double)_nudMouseSpeed.Value;
+        _cfg.PinchMode = _cmbPinch.SelectedIndex == 1 ? "Keys" : "Touch";
         // 操作框的缩放/位置由手机端捏合控制，PC 这里只读不写
         _cfg.SetWorkMode(_cmbWork.SelectedIndex == 1);
         if (_cfg.IsMouseMode) MouseControl.ReleaseAll();

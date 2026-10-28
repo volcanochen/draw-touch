@@ -46,6 +46,8 @@ object Protocol {
     const val TYPE_SHOT_REQ: Int = 0x0E
     /** 截图数据（下行，分片）：头部为 totalLen(4字节) + seq(2字节)，其后是数据，seq 从 0 起 */
     const val TYPE_SHOT: Int = 0x0F
+    /** 荧光笔帧：触摸板模式下把桌面指针变成荧光笔。payload[0]=开关(0/1)，payload[1]=颜色索引 */
+    const val TYPE_HL: Int = 0x10
 
     // ---- 备注动作 ----
     const val NOTE_OFF: Int = 0
@@ -85,6 +87,13 @@ object Protocol {
     const val MOUSE_TASK_NEXT: Int = 13
     /** 任务反向切换：Alt+Shift+Tab */
     const val MOUSE_TASK_PREV: Int = 14
+    /**
+     * 手指是否正落在触摸板上（dx=1 在 / 0 离开）。
+     * 触摸板模式下 S Pen 的悬停流会不停把桌面光标拽回笔的位置，
+     * 手指的相对移动被反复覆盖 —— 手指往右下微动、光标却往左跑就是这个原因。
+     * 手指一按上来，PC 端就让 S Pen 彻底让位（光标只跟手指）。
+     */
+    const val MOUSE_FINGER: Int = 15
 
     const val DEFAULT_PORT: Int = 6000
 
@@ -239,6 +248,23 @@ object Protocol {
         buf.put(TYPE_SHOT_REQ.toByte())
         buf.putShort(PAYLOAD_LEN.toShort())
         for (i in 0 until PAYLOAD_LEN) buf.put(0)
+        return buf.array()
+    }
+
+    /**
+     * 荧光笔帧：开关桌面上的荧光笔（把指针变成荧光笔）。
+     * payload[0] = on(0/1)，payload[1] = 颜色索引（0 黄 / 1 绿 / 2 粉 / 3 蓝）。
+     */
+    fun buildHighlighter(on: Boolean, colorIdx: Int = 0): ByteArray {
+        val buf = ByteBuffer.allocate(6 + PAYLOAD_LEN).order(ByteOrder.LITTLE_ENDIAN)
+        buf.put(MAGIC1)
+        buf.put(MAGIC2)
+        buf.put(VERSION)
+        buf.put(TYPE_HL.toByte())
+        buf.putShort(PAYLOAD_LEN.toShort())
+        buf.putFloat(if (on) 1f else 0f)
+        buf.putFloat(colorIdx.toFloat())
+        for (i in 8 until PAYLOAD_LEN) buf.put(0)
         return buf.array()
     }
 

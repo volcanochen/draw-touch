@@ -108,6 +108,18 @@ public sealed class NoteOverlay : IDisposable
             // 已有笔迹存的是绝对坐标，框变化不需要重绘（笔迹留在原处）
         }
 
+        /// <summary>
+        /// 跟随虚拟屏幕尺寸（插拔显示器 / 改分辨率后调用）。
+        /// 笔迹存的是绝对坐标，窗口挪动或变大小都不影响已画的笔迹。
+        /// </summary>
+        public void ResizeToVirtualScreen()
+        {
+            var v = SystemInformation.VirtualScreen;
+            if (v.Width <= 0 || v.Height <= 0) return;
+            if (Bounds == new Rectangle(v.Left, v.Top, v.Width, v.Height)) return;
+            Bounds = new Rectangle(v.Left, v.Top, v.Width, v.Height);
+        }
+
         /// <summary>切换「之后新笔画」的颜色；已画好的笔画保持各自的颜色。</summary>
         public void SetColor(Color c)
         {
@@ -245,6 +257,9 @@ public sealed class NoteOverlay : IDisposable
     public void Clear() => Post(f => f.ClearAll());
     public void AddPoint(float nx, float ny, PenState st) => Post(f => f.AddPoint(nx, ny, st));
     public void SetRect(int x, int y, int w, int h) => Post(f => f.SetRect(x, y, w, h));
+
+    /// <summary>虚拟屏幕尺寸变了 → 叠加层跟着重建（否则笔迹层会盖不满新屏）。</summary>
+    public void ResizeToVirtualScreen() => Post(f => f.ResizeToVirtualScreen());
 
     /// <summary>按索引切换笔迹颜色（索引由手机端色板下发）</summary>
     public void SetColorIndex(int idx)

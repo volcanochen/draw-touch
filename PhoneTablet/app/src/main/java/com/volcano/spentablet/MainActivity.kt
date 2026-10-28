@@ -58,6 +58,13 @@ class MainActivity : Activity() {
 
     // ---- 触摸板模式 UI（滚轮条 + 左/中/右键）----
     private lateinit var trackpadOverlay: android.widget.FrameLayout
+    /** 可拖动浮动面板：荧光笔 + 左 / 中 / 右 键合并在一起 */
+    private lateinit var trackpadDock: DraggablePanel
+    private lateinit var hlBtn: Button
+    /** 浮动面板里的左 / 中 / 右 键（手势触发时要在对应键上闪烁反馈） */
+    private lateinit var tLeftBtn: Button
+    private lateinit var tMidBtn: Button
+    private lateinit var tRightBtn: Button
     // ---- 数位板模式工具条（备注/撤销/完成 + 色板，合并成一个可拖动面板）----
     private lateinit var tabletToolbar: android.widget.LinearLayout
     /** 工具条第二行的 7 个笔迹颜色块（高亮切换用） */
@@ -283,16 +290,32 @@ class MainActivity : Activity() {
         canvas.onSwitchMode = { runOnUiThread { cycleWorkMode() } }
         // 任意触摸落下都打断无极滚动的惯性（滚轮条自己的 ACTION_DOWN 也会停）
         canvas.onTouchDown = { stopInertia() }
+        // 手指是否压在触摸板上 → 告诉 PC「S Pen 让位」（否则笔的悬停流会抢光标）
+        canvas.onFingerState = { on ->
+            if (::net.isInitialized) {
+                net.send(Protocol.buildMouse(Protocol.MOUSE_FINGER, if (on) 1f else 0f, 0f))
+            }
+        }
+        // 手势触发的鼠标动作（如三指点击→中键）→ 在手机端对应的浮动键上闪烁，看得见「打中哪个键」
+        canvas.onActionVisual = { code -> runOnUiThread { flashActionVisual(code) } }
 
         setContentView(root)
         applyOrientationMode()
         updateModeBtn() // 模式按钮图标 = 当前模式
         updateModeUI()  // 触摸板 UI / 数位板工具条显隐
 
-        // 第二个参数是「连接建立后要发的 Hello 帧」；顺带在这里同步一次笔迹颜色
+        // 第二个参数是「连接建立后要发的 Hello 帧」；顺带在这里同步笔迹颜色与备注状态
         net = NetClient(host, port) {
             if (::net.isInitialized) {
                 net.send(Protocol.buildNote(Protocol.NOTE_COLOR, noteColorIdx.toFloat()))
+                // 数位板模式默认开着桌面备注：重连后也要把状态补回去
+                if (workMode == Protocol.MODE_TABLET && !noteOn) {
+                    noteOn = true
+                    net.send(Protocol.buildNote(Protocol.NOTE_ON))
+                    updateNoteBtn()
+                }
+                // 荧光笔状态也要补回去（PC 端不记状态）
+                if (highlighterOn) net.send(Protocol.buildHighlighter(true, highlighterColor))
             }
             helloFrame()
         }
@@ -304,6 +327,9 @@ class MainActivity : Activity() {
 
         // 开机静默 mDNS 发现：找到唯一一台 PC 且当前没连上 → 直接连上，用户零操作
         startMdnsDiscovery(manual = false)
+
+        // 开机静默检查更新：仅在发现新版本时弹窗提示，不打扰日常使用
+        checkForUpdate(silent = true)
 
         Thread {
             var tick = 0
@@ -493,9 +519,15 @@ class MainActivity : Activity() {
         details.addView(gestureRow("双指捏合", "g2Pinch", 2, intArrayOf(0, 1, 2, 10, 11, 12, 13, 14)))
         details.addView(gestureRow("双指点击", "g2Tap", 4, tapActions))
         details.addView(gestureRow("三指点击", "g3Tap", 5, tapActions))
-        details.addView(gestureRow("三指左右滑", "g3Swipe", 8, swipeActions))
-        details.addView(gestureRow("四指左右滑", "g4Swipe", 0, swipeActions))
+        details.addView(gestureRow("三指右滑", "g3L", 7, swipeActions))
+        details.addView(gestureRow("三指左滑", "g3R", 6, swipeActions))
+        details.addView(gestureRow("三指上滑", "g3U", 5, swipeActions))
+        details.addView(gestureRow("三指下滑", "g3D", 3, swipeActions))
         details.addView(gestureRow("四指点击", "g4Tap", 9, intArrayOf(0, 9)))
+        details.addView(gestureRow("四指右滑", "g4L", 9, swipeActions))
+        details.addView(gestureRow("四指左滑", "g4R", 0, swipeActions))
+        details.addView(gestureRow("四指上滑", "g4U", 10, swipeActions))
+        details.addView(gestureRow("四指下滑", "g4D", 11, swipeActions))
 
         details.addView(tpTitle("右侧滚轮条"))
         // 无极滚动：抬手后按动量继续滚一阵再停（双击滚轮条切换）
@@ -542,14 +574,11 @@ class MainActivity : Activity() {
             setPadding(0, dp(14), 0, 2)
             text = versionLine()
         }
-        val updateBtn = Button(this).apply { text = "检查更新（打开浏览器）" }
+        val updateBtn = Button(this).apply { text = "检查更新" }
         val homeBtn = Button(this).apply { text = "项目主页 / PC 端下载" }
         updateBtn.setOnClickListener {
-            try {
-                startActivity(android.content.Intent(
-                    android.content.Intent.ACTION_VIEW,
-                    android.net.Uri.parse("https://github.com/volcanochen/drawing-phone/releases/latest")))
-            } catch (e: Throwable) { Log.w("SpenTablet", "打开浏览器失败: $e") }
+            // 直接比对 GitHub Release 最新版本；有新版本则从 Release 下载并安装
+            checkForUpdate(silent = false)
         }
         homeBtn.setOnClickListener {
             try {
@@ -636,6 +665,52 @@ class MainActivity : Activity() {
         return "SpenTablet 手机端 v$verName｜PC 端 v$pcVersion（$pcName）"
     }
 
+    /**
+     * 检查 GitHub Release 是否有新版本（对比 latest 的 tag）。
+     * [silent]=true（开机静默）：仅发现更新时弹窗，已最新/出错不打扰。
+     * [silent]=false（手动点按钮）：无论有无更新都给反馈。
+     * 注：[UpdateChecker.check] 的回调已在主线程，这里直接操作 UI 即可。
+     */
+    private fun checkForUpdate(silent: Boolean) {
+        UpdateChecker.check(this) { info ->
+            if (info != null) {
+                offerUpdate(info)
+            } else if (!silent) {
+                android.widget.Toast.makeText(this, "已是最新版本", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    /** 发现新版本：弹窗询问是否下载安装（避免不经同意就下载大文件） */
+    private fun offerUpdate(info: UpdateChecker.UpdateInfo) {
+        val notes = if (info.notes.isBlank()) "" else "\n\n更新内容：\n${info.notes.take(600)}"
+        android.app.AlertDialog.Builder(this)
+            .setTitle("发现新版本 v${info.version}")
+            .setMessage("当前版本 ${UpdateChecker.currentVersion(this)}，可更新到 v${info.version}。$notes")
+            .setPositiveButton("下载并安装") { _, _ -> doUpdate(info) }
+            .setNegativeButton("稍后", null)
+            .show()
+    }
+
+    /** 从 GitHub Release 下载 APK 并安装，过程中用进度弹窗显示状态 */
+    private fun doUpdate(info: UpdateChecker.UpdateInfo) {
+        val msg = TextView(this).apply {
+            text = "准备中…"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setPadding(dp(20), dp(16), dp(20), dp(16))
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("更新到 v${info.version}")
+            .setView(msg)
+            .setCancelable(false)
+            .setNegativeButton("后台进行") { d, _ -> d.dismiss() }
+            .show()
+        UpdateChecker.downloadAndInstall(this, info) { status ->
+            runOnUiThread { msg.text = status }
+        }
+    }
+
     private fun openSettings() {
         if (::verText.isInitialized) verText.text = versionLine()
         // 重建一遍设置项：默认值迁移 / 手势切换后的最新值要反映到界面上
@@ -673,9 +748,15 @@ class MainActivity : Activity() {
         canvas.workMode = m
         prefs.edit().putInt("mode", m).apply()
         if (::net.isInitialized) {
-            // 切出数位板模式时关掉桌面备注
-            if (m == Protocol.MODE_MOUSE && noteOn) toggleNote(false)
             net.send(Protocol.buildMode(m))
+        }
+        // 备注跟随模式走：
+        //   数位板 → 默认**开启**桌面备注（笔直接画在桌面框内，不用再点一次「备注」）
+        //   触摸板 → 关掉备注（备注是桌面的笔迹层，和光标控制互斥）
+        if (m == Protocol.MODE_TABLET) {
+            if (!noteOn) toggleNote(true)
+        } else if (noteOn) {
+            toggleNote(false)
         }
         updateModeBtn()
         updateModeUI()
@@ -713,19 +794,24 @@ class MainActivity : Activity() {
             · 点左上角圆点可查看<b>网络拓扑</b>、切换桌面 PC<br><br>
             <b>【需要手动操作的场合（很少）】</b><br>
             · <b>切换到另一台 PC</b>：点绿点 → 「局域网里的桌面」点击切换<br>
+            · 局域网里有<b>多台电脑</b>时，首次会弹框让你选；之后默认连你选过的那台<br>
             · <b>自动发现失败</b>（路由器禁用组播等）：点齿轮 → 填 IP → 连接，<br>
               　或用「扫描网段找 PC」；USB 数据线 + adb 转发时填 127.0.0.1<br><br>
             <b>【触摸板模式（默认，手指=触摸板）】</b><br>
             · 单指滑动 = 移动光标；单击 = 左键；双击 = 右键<br>
             · 右侧滚轮条滑动 = 滚动，<b>双击滚轮条</b>切换普通滚动 / 无极滚动（动量可在设置里调）<br>
-            · 底部浮动圆钮 = 左 / 中 / 右键<br>
+            · 底部<b>可拖动浮动面板</b> = 荧光笔 + 左 / 中 / 右键（挡住画面就按住拖走，位置会记住）<br>
+            · 点「荧光笔」开/关：<b>桌面指针就变成荧光笔</b>，走过的地方留下半透明荧光痕迹；长按换颜色（黄/绿/粉/蓝）<br>
+            · 浮动键被手势/手指触发时都会在手机端闪一下，方便看清「打中了哪个键」<br>
             · 双指滑动 = 滚动；双指捏合 = 缩放（Ctrl+滚轮）<br>
             · 双指点击 = 右键；三指点击 = 中键；三指左右滑 = 前进/后退<br>
-            · 手势动作可在设置里自定义：还可设为音量加减 / 静音 / 任务切换<br><br>
+            · 手势动作可在设置里自定义：还可设为音量加减 / 静音 / 任务切换<br>
+            · 手指按住时 S Pen 会自动让位（笔放在平板上也不会把光标抢走）<br><br>
             <b>【数位板模式（S Pen 作画）】</b><br>
             · 笔在橙色框内 = 在 PC 上作画（压感 / 倾斜）<br>
+            · <b>默认就是「备注」模式</b>：笔迹直接画在桌面的框里，手机与桌面同步<br>
             · 单指滑动 = 移动范围框；双指捏合 = 缩放范围框<br>
-            · 框可以拖到任意显示器（含多屏）<br>
+            · 框可以拖到任意显示器（含多屏 / 多桌面）<br>
             · 底部浮动圆钮：<b>备注</b>（笔迹画在桌面固定位置，换色只影响之后的笔，手机与桌面同步）/ <b>撤销</b>（点击手机+桌面各撤一笔、长按两边一起清空）/ <b>$shotBtnLabel</b>（捕获：桌面框内容设为手机画布背景，可继续在上面画；再点完成恢复）<br>
             · 浮动面板 = <b>备注 / 撤销 / 完成</b> + 7 色板，<b>按住可整体拖动</b>（挡住画面就拖走，位置会记住）<br><br>
             <b>【屏幕方向】</b>循环按钮：陀螺仪全向 / 横屏双朝向 / 竖屏双朝向<br><br>
@@ -884,29 +970,134 @@ class MainActivity : Activity() {
             }
         }
         wheel.inertia = wheelInertia
-        // —— 底部三个浮动圆钮：左键 / 中键 / 右键 ——
-        val keysBar = LinearLayout(this).apply {
+
+        // —— 底部浮动操作面板：荧光笔 + 左 / 中 / 右 键合并在一起，整体可拖动 ——
+        // 挡住画面时按住面板任意位置拖走（位置按父容器比例记住，下次还原），
+        // 单指点击（不超 slop）则照常触发对应按钮。
+        trackpadDock = DraggablePanel(this, "tpDock").apply {
             orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.parseColor("#99222222"))
+                cornerRadius = dp(12).toFloat()
+                setStroke(1, Color.parseColor("#66FFFFFF"))
+            }
+            setPadding(dp(4), dp(4), dp(4), dp(4))
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(10) }
         }
-        fun keyBtn(label: String, kind: Int): Button = Button(this).apply {
-            text = label
-            layoutParams = LinearLayout.LayoutParams(dp(64), dp(64))
-                .apply { setMargins(dp(6), 0, dp(6), 0) }
+        // 荧光笔按钮：点一下开/关（桌面指针变成荧光笔）；长按换颜色（黄 → 绿 → 粉 → 蓝）
+        val hl = Button(this).apply {
+            text = "荧光笔"
+            layoutParams = LinearLayout.LayoutParams(dp(72), dp(48))
+                .apply { setMargins(dp(4), 0, dp(4), 0) }
             background = floatBtnBg()
             setTextColor(Color.WHITE)
-            setOnClickListener { canvas.sendClick(kind) }
+            setOnClickListener { toggleHighlighter(); flashButton(this) }
+            setOnLongClickListener { cycleHighlighterColor(); true }
         }
-        keysBar.addView(keyBtn("左", Protocol.MOUSE_LEFT_CLICK))
-        keysBar.addView(keyBtn("中", Protocol.MOUSE_MIDDLE_CLICK))
-        keysBar.addView(keyBtn("右", Protocol.MOUSE_RIGHT_CLICK))
+        // 「左」键：按下即「左键按下」，抬起才「左键抬起」——
+        // 按住不放再移动手指 = 拖拽（荧光笔模式下就是拉着一支荧光笔涂）。
+        // 拖动超 slop 时面板会拦截、整体移动；此时 ACTION_CANCEL 会抬起左键，不会卡住。
+        val leftBtn = Button(this).apply {
+            text = "左"
+            layoutParams = LinearLayout.LayoutParams(dp(64), dp(64))
+                .apply { setMargins(dp(4), 0, dp(4), 0) }
+            background = floatBtnBg()
+            setTextColor(Color.WHITE)
+            setOnTouchListener { _, ev ->
+                when (ev.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> { flashButton(this); canvas.sendLeftDown(); true }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { canvas.sendLeftUp(); true }
+                    else -> true
+                }
+            }
+        }
+        val midBtn = Button(this).apply {
+            text = "中"
+            layoutParams = LinearLayout.LayoutParams(dp(64), dp(64))
+                .apply { setMargins(dp(4), 0, dp(4), 0) }
+            background = floatBtnBg()
+            setTextColor(Color.WHITE)
+            setOnClickListener { flashButton(this); canvas.sendClick(Protocol.MOUSE_MIDDLE_CLICK) }
+        }
+        val rightBtn = Button(this).apply {
+            text = "右"
+            layoutParams = LinearLayout.LayoutParams(dp(64), dp(64))
+                .apply { setMargins(dp(4), 0, dp(4), 0) }
+            background = floatBtnBg()
+            setTextColor(Color.WHITE)
+            setOnClickListener { flashButton(this); canvas.sendClick(Protocol.MOUSE_RIGHT_CLICK) }
+        }
+        hlBtn = hl
+        tLeftBtn = leftBtn
+        tMidBtn = midBtn
+        tRightBtn = rightBtn
+        trackpadDock.addView(hl)
+        trackpadDock.addView(leftBtn)
+        trackpadDock.addView(midBtn)
+        trackpadDock.addView(rightBtn)
 
         trackpadOverlay.addView(wheel)
-        trackpadOverlay.addView(keysBar)
+        trackpadOverlay.addView(trackpadDock)
+
         root.addView(trackpadOverlay, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        restorePanelPos(trackpadDock, "tpDock")
+        updateHighlighterBtn()
+    }
+
+    // ================= 荧光笔（触摸板模式）=================
+    /** 荧光笔是否开启 */
+    private var highlighterOn = false
+    /** 荧光笔颜色索引（0 黄 / 1 绿 / 2 粉 / 3 蓝） */
+    private var highlighterColor = 0
+    /** 荧光笔颜色（与 PC 端 HighlighterOverlay.Presets 一致） */
+    private val hlColors = intArrayOf(
+        0xFFEBEB3C.toInt(),  // 黄
+        0xFF50F078.toInt(),  // 绿
+        0xFFFF6EBE.toInt(),  // 粉
+        0xFF5ABEFF.toInt()   // 蓝
+    )
+
+    /** 开关荧光笔（桌面指针变成荧光笔笔迹） */
+    private fun toggleHighlighter() {
+        highlighterOn = !highlighterOn
+        prefs.edit().putBoolean("hlOn", highlighterOn).apply()
+        sendHighlighter()
+        updateHighlighterBtn()
+    }
+
+    /** 长按：换荧光笔颜色 */
+    private fun cycleHighlighterColor() {
+        highlighterColor = (highlighterColor + 1) % hlColors.size
+        prefs.edit().putInt("hlColor", highlighterColor).apply()
+        sendHighlighter()
+        updateHighlighterBtn()
+    }
+
+    private fun sendHighlighter() {
+        if (::net.isInitialized) net.send(Protocol.buildHighlighter(highlighterOn, highlighterColor))
+        DebugLog.write("[hl] 荧光笔 ${if (highlighterOn) "开" else "关"}｜色 #$highlighterColor")
+    }
+
+    /** 按钮外观：开启时染成当前荧光笔颜色，一眼能看出开没开 */
+    private fun updateHighlighterBtn() {
+        if (!::hlBtn.isInitialized) return
+        if (highlighterOn) {
+            hlBtn.text = "荧光✓"
+            hlBtn.background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(hlColors[highlighterColor])
+                cornerRadius = dp(32).toFloat()
+                setStroke(2, Color.WHITE)
+            }
+            hlBtn.setTextColor(Color.BLACK)
+        } else {
+            hlBtn.text = "荧光笔"
+            hlBtn.background = floatBtnBg()
+            hlBtn.setTextColor(Color.WHITE)
+        }
     }
 
     // ---- 无极滚动（惯性）----
@@ -954,6 +1145,46 @@ class MainActivity : Activity() {
         setColor(Color.parseColor("#AA2A2A2A"))
         cornerRadius = dp(32).toFloat()
         setStroke(1, Color.parseColor("#66FFFFFF"))
+    }
+
+    /** 闪烁反馈用的高亮底（覆盖原背景一小会儿，让人看清「这个键被按了 / 打中了」） */
+    private fun flashBg() = android.graphics.drawable.GradientDrawable().apply {
+        setColor(Color.parseColor("#FFCC33"))
+        cornerRadius = dp(32).toFloat()
+        setStroke(2, Color.WHITE)
+    }
+
+    /**
+     * 在浮动按钮上做一下闪烁高亮（约 180ms），用于「点击 / 手势触发」的可见反馈。
+     * [flashBase] 记下按钮的「真实底色」：同一按钮在 180ms 内被连续触发时不会把闪烁底
+     * 当成底色，因此快速连点也不会卡在亮色；还原时始终回到真实底色。
+     */
+    private val flashBase = java.util.WeakHashMap<View, android.graphics.drawable.Drawable>()
+
+    private fun flashButton(v: View) {
+        val base = flashBase[v] ?: (v.background as android.graphics.drawable.Drawable).also { flashBase[v] = it }
+        val flash = flashBg()
+        v.background = flash
+        v.postDelayed({
+            if (v.background === flash) {
+                v.background = base
+                flashBase.remove(v)
+            }
+        }, 180)
+    }
+
+    /**
+     * 手势触发的鼠标动作 → 在手机端对应的浮动键上闪一下，让人看清「这次手势打中了哪个键」。
+     * 仅鼠标按钮类动作（左/中/右）有对应浮动键；音量/任务等无对应键则不打闪。
+     */
+    private fun flashActionVisual(code: Int) {
+        val btn = when (code) {
+            Protocol.MOUSE_LEFT_CLICK -> tLeftBtn
+            Protocol.MOUSE_MIDDLE_CLICK -> tMidBtn
+            Protocol.MOUSE_RIGHT_CLICK -> tRightBtn
+            else -> null
+        }
+        btn?.let { flashButton(it) }
     }
 
     /**
@@ -1030,11 +1261,13 @@ class MainActivity : Activity() {
             background = floatBtnBg()
             setTextColor(Color.WHITE)
         }
-        noteBtn = toolBtn("备注").apply {
-            setOnClickListener { toggleNote(!noteOn) }
+        val nb = toolBtn("备注").apply {
+            setOnClickListener { flashButton(this); toggleNote(!noteOn) }
         }
+        noteBtn = nb
         val undoBtn = toolBtn("撤销").apply {
             setOnClickListener {
+                flashButton(this)
                 canvas.undoStroke()                              // 手机屏同步撤一笔
                 net.send(Protocol.buildNote(Protocol.NOTE_UNDO)) // PC 端桌面撤一笔
             }
@@ -1044,9 +1277,10 @@ class MainActivity : Activity() {
                 true
             }
         }
-        shotBtn = toolBtn("捕获").apply {
-            setOnClickListener { onShotButton() }
+        val sb = toolBtn("捕获").apply {
+            setOnClickListener { flashButton(this); onShotButton() }
         }
+        shotBtn = sb
         btnRow.addView(noteBtn)
         btnRow.addView(undoBtn)
         btnRow.addView(shotBtn)
@@ -1065,14 +1299,14 @@ class MainActivity : Activity() {
                     setMargins(dp(3), dp(3), dp(3), dp(2))
                 }
                 background = swatchBg(i)
-                setOnClickListener { selectNoteColor(i) }
+                setOnClickListener { flashButton(this); selectNoteColor(i) }
             })
         }
         tabletToolbar.addView(btnRow)
         tabletToolbar.addView(colorRow)
         tabletToolbar.visibility = View.GONE
         root.addView(tabletToolbar)
-        restoreToolbarPos()
+        restorePanelPos(tabletToolbar, "toolbar")
     }
 
     /** 预设笔迹颜色（顺序必须与 PC 端 NoteOverlay.Presets 完全一致） */
@@ -1095,18 +1329,18 @@ class MainActivity : Activity() {
     }
 
     /** 恢复上次拖动到的面板位置（按父容器比例存，转屏后按新尺寸换算） */
-    private fun restoreToolbarPos() {
-        val xf = prefs.getFloat("toolbarXF", -1f)
-        val yf = prefs.getFloat("toolbarYF", -1f)
+    private fun restorePanelPos(view: View, prefKey: String) {
+        val xf = prefs.getFloat("${prefKey}XF", -1f)
+        val yf = prefs.getFloat("${prefKey}YF", -1f)
         if (xf < 0f || yf < 0f) return
-        tabletToolbar.post {
-            val p = tabletToolbar.parent as? ViewGroup ?: return@post
-            if (p.width <= 0 || p.height <= 0 || tabletToolbar.width <= 0) return@post
-            val lp = tabletToolbar.layoutParams as FrameLayout.LayoutParams
+        view.post {
+            val p = view.parent as? ViewGroup ?: return@post
+            if (p.width <= 0 || p.height <= 0 || view.width <= 0) return@post
+            val lp = view.layoutParams as FrameLayout.LayoutParams
             lp.gravity = Gravity.NO_GRAVITY
-            lp.leftMargin = (xf * p.width).toInt().coerceIn(0, (p.width - tabletToolbar.width).coerceAtLeast(0))
-            lp.topMargin = (yf * p.height).toInt().coerceIn(0, (p.height - tabletToolbar.height).coerceAtLeast(0))
-            tabletToolbar.layoutParams = lp
+            lp.leftMargin = (xf * p.width).toInt().coerceIn(0, (p.width - view.width).coerceAtLeast(0))
+            lp.topMargin = (yf * p.height).toInt().coerceIn(0, (p.height - view.height).coerceAtLeast(0))
+            view.layoutParams = lp
         }
     }
 
@@ -1126,8 +1360,12 @@ class MainActivity : Activity() {
     /**
      * 可拖动的浮动面板：整体按住拖走（超过触摸阈值才判定为拖动，否则按钮照常点击）。
      * 拖动结束后把位置按父容器比例存进 prefs，下次启动还原。
+     * [prefKey] 区分不同面板（数位板工具条 = "toolbar"，荧光笔按钮 = "hl"）。
      */
-    private inner class DraggablePanel(context: android.content.Context) : LinearLayout(context) {
+    private inner class DraggablePanel(
+        context: android.content.Context,
+        private val prefKey: String = "toolbar"
+    ) : LinearLayout(context) {
         private var downRawX = 0f
         private var downRawY = 0f
         private var startX = 0
@@ -1173,8 +1411,8 @@ class MainActivity : Activity() {
             val p = parent as? ViewGroup ?: return
             if (p.width <= 0 || p.height <= 0) return
             prefs.edit()
-                .putFloat("toolbarXF", left.toFloat() / p.width)
-                .putFloat("toolbarYF", top.toFloat() / p.height)
+                .putFloat("${prefKey}XF", left.toFloat() / p.width)
+                .putFloat("${prefKey}YF", top.toFloat() / p.height)
                 .apply()
         }
     }
@@ -1190,9 +1428,14 @@ class MainActivity : Activity() {
         noteOn = on
         net.send(Protocol.buildNote(if (on) Protocol.NOTE_ON else Protocol.NOTE_OFF))
         if (on) net.send(Protocol.buildNote(Protocol.NOTE_COLOR, noteColorIdx.toFloat()))
-        noteBtn.text = if (on) "备注✓" else "备注"
-        noteBtn.isEnabled = true
+        updateNoteBtn()
         DebugLog.write("[note] ${if (on) "开启" else "关闭"}")
+    }
+
+    /** 备注按钮上的状态字（✓ = 桌面备注已开） */
+    private fun updateNoteBtn() {
+        if (!::noteBtn.isInitialized) return
+        noteBtn.text = if (noteOn) "备注✓" else "备注"
     }
 
     /** 截图按钮状态机：捕获 → 完成 → 捕获…（捕获期间锁定范围框） */
@@ -1267,11 +1510,19 @@ class MainActivity : Activity() {
         canvas.g2Pinch = prefs.getInt("g2Pinch", 2)
         canvas.g2Tap = prefs.getInt("g2Tap", 4)
         canvas.g3Tap = prefs.getInt("g3Tap", 5)
-        canvas.g3Swipe = prefs.getInt("g3Swipe", 8)
+        canvas.g3L = prefs.getInt("g3L", 7)
+        canvas.g3R = prefs.getInt("g3R", 6)
+        canvas.g3U = prefs.getInt("g3U", 5)
+        canvas.g3D = prefs.getInt("g3D", 3)
         canvas.g4Tap = prefs.getInt("g4Tap", 9)
-        canvas.g4Swipe = prefs.getInt("g4Swipe", 0)
+        canvas.g4L = prefs.getInt("g4L", 9)
+        canvas.g4R = prefs.getInt("g4R", 0)
+        canvas.g4U = prefs.getInt("g4U", 10)
+        canvas.g4D = prefs.getInt("g4D", 11)
         wheelInertia = prefs.getBoolean("wheelInertia", false)
         wheelMomentum = prefs.getFloat("wheelMomentum", 1.0f)
+        highlighterOn = prefs.getBoolean("hlOn", false)
+        highlighterColor = prefs.getInt("hlColor", 0).coerceIn(0, hlColors.size - 1)
     }
 
     /** 循环切换一个手势槽的动作码（设置页按钮用） */
@@ -1320,7 +1571,18 @@ class MainActivity : Activity() {
                         }
                     } else if (!mdnsConnected && (!::net.isInitialized || !net.connected)) {
                         mdnsConnected = true
-                        connectToPc(list[0], "mDNS 自动发现")
+                        // 局域网里有**多台**电脑时，不能默默连第一台 ——
+                        // 连错了就表现为「控制不了」「笔落在看不见的框框外面」。
+                        // 优先连上次用过的那台；没有记录就弹框让用户选。
+                        val lastPc = prefs.getString("lastPc", null)
+                        val picked = list.firstOrNull { it.serviceName == lastPc }
+                            ?: if (list.size == 1) list[0] else null
+                        if (picked != null) {
+                            connectToPc(picked, "mDNS 自动发现")
+                        } else {
+                            DebugLog.write("[mdns] 发现 ${list.size} 台桌面，请用户选择")
+                            showPcChooser(list)
+                        }
                     }
                 }
             }
@@ -1348,6 +1610,8 @@ class MainActivity : Activity() {
 
     /** 连到发现到的 PC：候选地址逐个探测 → 填 IP/端口 → 记 prefs → 重连 */
     private fun connectToPc(f: MdnsDiscovery.Found, tag: String) {
+        // 记住这台：下次自动发现时优先连它（局域网里有多台时尤其重要）
+        prefs.edit().putString("lastPc", f.serviceName).apply()
         val candidates = f.candidates.ifEmpty { listOf(f.host) }
         Thread {
             var picked: String? = null

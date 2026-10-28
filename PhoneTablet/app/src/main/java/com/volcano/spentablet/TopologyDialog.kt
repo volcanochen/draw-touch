@@ -35,7 +35,7 @@ object TopologyDialog {
 
     fun show(ctx: Context, data: TopologyData, onSwitch: (MdnsDiscovery.Found) -> Unit) {
         val pad = (16 * ctx.resources.displayMetrics.density).toInt()
-        val root = LinearLayout(ctx).apply {
+        val content = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(pad, pad, pad, pad)
         }
@@ -46,19 +46,19 @@ object TopologyDialog {
             setTextColor(Color.WHITE)
             setPadding(0, 0, 0, pad / 2)
         }
-        root.addView(title)
+        content.addView(title)
 
         // ---- 拓扑示意图 ----
         val diagram = TopologyView(ctx, data)
-        root.addView(diagram, LinearLayout.LayoutParams(
+        content.addView(diagram, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, (160 * ctx.resources.displayMetrics.density).toInt()))
 
         // ---- 信息行 ----
-        root.addView(infoRow(ctx, "桌面 PC IP", data.pcIp))
-        root.addView(infoRow(ctx, "客户端版本号", data.pcVersion))
-        root.addView(infoRow(ctx, "网络连接方式", data.method))
-        root.addView(infoRow(ctx, "手机 IP", data.phoneIp))
-        root.addView(infoRow(ctx, "手机名", data.phoneName))
+        content.addView(infoRow(ctx, "桌面 PC IP", data.pcIp))
+        content.addView(infoRow(ctx, "客户端版本号", data.pcVersion))
+        content.addView(infoRow(ctx, "网络连接方式", data.method))
+        content.addView(infoRow(ctx, "手机 IP", data.phoneIp))
+        content.addView(infoRow(ctx, "手机名", data.phoneName))
 
         // ---- 局域网里发现的其它桌面 ----
         val otherTitle = TextView(ctx).apply {
@@ -67,7 +67,7 @@ object TopologyDialog {
             setTextColor(Color.parseColor("#FFBBBBBB"))
             setPadding(0, pad, 0, 4)
         }
-        root.addView(otherTitle)
+        content.addView(otherTitle)
 
         val list = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
         if (data.otherPcs.isEmpty()) {
@@ -86,15 +86,15 @@ object TopologyDialog {
                 list.addView(b)
             }
         }
+        content.addView(list)
+
+        // 整页包一层 ScrollView：屏幕小、发现的主机多时也能滚动看完，不再被截断
         val scroller = ScrollView(ctx).apply {
-            addView(list)
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, (220 * ctx.resources.displayMetrics.density).toInt())
+            addView(content)
         }
-        root.addView(scroller)
 
         AlertDialog.Builder(ctx)
-            .setView(root)
+            .setView(scroller)
             .setPositiveButton("关闭", null)
             .show()
     }
@@ -172,7 +172,7 @@ object TopologyDialog {
             paint.textAlign = Paint.Align.CENTER
             paint.textSize = 14f
             cv.drawText(title, x + nw / 2f, y + nh * 0.42f, paint)
-            paint.textSize = 11f
+            paint.textSize = 13f
             paint.color = Color.parseColor("#FFCCCCCC")
             val shown = if (sub.length > 18) sub.substring(0, 18) + "…" else sub
             cv.drawText(shown, x + nw / 2f, y + nh * 0.72f, paint)
