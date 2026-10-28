@@ -7,12 +7,12 @@ using System.Runtime.InteropServices;
 namespace SpenTabletHost;
 
 /// <summary>
-/// 荧光笔光标：把 Windows 的箭头指针换成**马克笔造型**。
+/// 激光笔光标：把 Windows 的箭头指针换成一个**醒目的激光光斑**。
 ///
-/// 做法：用 GDI+ 画一支荧光笔（笔身 + 笔帽 + 高光条 + 笔尖），
+/// 做法：用 GDI+ 画「白热核心 + 当前颜色光晕 + 颜色亮环」的圆斑，
 /// 再用 CreateIconIndirect（fIcon=false）做成 32 位**彩色**系统光标，
-/// 之后 SetCursor 就能把桌面指针换成它。热点（hotspot）落在笔尖上 ——
-/// 和真荧光笔一样，指哪涂哪。
+/// 之后 SetCursor 就能把桌面指针换成它。热点（hotspot）落在光斑中心 ——
+/// 和真激光笔一样，指哪打哪。
 ///
 /// 光标尺寸随系统 DPI 变（96DPI=32px，144DPI=48px，192DPI=64px）。
 /// </summary>
@@ -93,7 +93,8 @@ internal sealed class MarkerCursor : IDisposable
     }
 
     /// <summary>
-    /// 画一支荧光笔：笔身斜指左下，笔尖在左下角，热点就在笔尖。
+    /// 画一个激光光斑：外层淡光晕 → 中层光晕 → 颜色亮环 → 白热核心。
+    /// 中心就是热点（激光指哪打哪），不再需要探针扫描。
     /// </summary>
     private static Bitmap Draw(Color color, int size, out int hotX, out int hotY)
     {
@@ -102,75 +103,26 @@ internal sealed class MarkerCursor : IDisposable
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.Clear(Color.Transparent);
 
-        float bw = size * 0.34f;      // 笔身宽
-        float bl = size * 0.70f;      // 笔身长
-        float tipLen = size * 0.22f;  // 笔尖长度
+        float c = size / 2f;
+        // 外层大光晕（淡）——远看也知道这里有个激光点
+        using (var halo = new SolidBrush(Color.FromArgb(55, color)))
+            g.FillEllipse(halo, c - size * 0.46f, c - size * 0.46f, size * 0.92f, size * 0.92f);
+        // 中层光晕
+        using (var mid = new SolidBrush(Color.FromArgb(130, color)))
+            g.FillEllipse(mid, c - size * 0.28f, c - size * 0.28f, size * 0.56f, size * 0.56f);
+        // 颜色亮环：勾出光斑边界，任何背景下都醒目
+        using (var ring = new Pen(Color.FromArgb(235, color), Math.Max(1.5f, size * 0.055f)))
+            g.DrawEllipse(ring, c - size * 0.21f, c - size * 0.21f, size * 0.42f, size * 0.42f);
+        // 白热核心（激光中心过曝发白）
+        using (var core = new SolidBrush(Color.White))
+            g.FillEllipse(core, c - size * 0.11f, c - size * 0.11f, size * 0.22f, size * 0.22f);
+        // 核心上再罩一点颜色，避免纯白看不出当前是什么颜色
+        using (var tint = new SolidBrush(Color.FromArgb(80, color)))
+            g.FillEllipse(tint, c - size * 0.11f, c - size * 0.11f, size * 0.22f, size * 0.22f);
 
-        var body = new SolidBrush(color);
-        var bodyDark = new SolidBrush(Darken(color, 0.72f));
-        var cap = new SolidBrush(Color.FromArgb(235, 60, 60, 70));
-        var tip = new SolidBrush(Color.FromArgb(235, 45, 45, 55));
-        var sheen = new SolidBrush(Color.FromArgb(150, 255, 255, 255));
-        var outline = new Pen(Color.FromArgb(200, 20, 20, 25), Math.Max(1f, size * 0.035f));
-
-        var m = new Matrix();
-        m.Translate(size * 0.56f, size * 0.46f);
-        m.Rotate(45f);               // 笔尖朝左下（和常规笔/箭头光标一致）
-        float tipLocalY = bl / 2 + tipLen;   // 笔尖在局部坐标里的位置
-
-        var st = g.Save();
-        g.Transform = m;
-
-        // 笔身（圆头）
-        g.FillEllipse(body, -bw / 2, -bl / 2, bw, bl);
-        g.DrawEllipse(outline, -bw / 2, -bl / 2, bw, bl);
-        // 笔帽
-        g.FillRectangle(cap, -bw / 2, -bl / 2, bw, size * 0.16f);
-        // 高光条
-        g.FillRectangle(sheen, -bw * 0.20f, -bl / 2 + size * 0.10f, bw * 0.20f, bl * 0.62f);
-        // 笔尖（三角形，尖端在下方）
-        var tipPts = new[]
-        {
-            new PointF(-bw / 2, bl / 2 - 1),
-            new PointF(bw / 2, bl / 2 - 1),
-            new PointF(0, bl / 2 + tipLen)
-        };
-        g.FillPolygon(tip, tipPts);
-        g.DrawPolygon(outline, tipPts);
-        g.Restore(st);
-
-        // 热点 = 笔尖在画布上的位置。
-        // 不靠矩阵手算（平移/旋转的合成顺序容易搞反，取到对角就废了），
-        // 而是拿同一套变换画一个品红探针点，再扫描出它的位置 —— 准。
-        {
-            using var probe = new Bitmap(size, size, PixelFormat.Format32bppArgb);
-            using (var pg = Graphics.FromImage(probe))
-            {
-                pg.SmoothingMode = SmoothingMode.AntiAlias;
-                pg.Clear(Color.Transparent);
-                pg.Transform = m;
-                pg.FillEllipse(new SolidBrush(Color.Magenta), -1.2f, tipLocalY - 1.2f, 2.4f, 2.4f);
-            }
-            hotX = size / 2;
-            hotY = size / 2;
-            for (int y = 0; y < size; y++)
-            {
-                for (int x = 0; x < size; x++)
-                {
-                    var c = probe.GetPixel(x, y);
-                    if (c.R > 200 && c.B > 200 && c.G < 60) { hotX = x; hotY = y; break; }
-                }
-            }
-        }
-
-        body.Dispose(); bodyDark.Dispose(); cap.Dispose(); tip.Dispose(); sheen.Dispose(); outline.Dispose();
+        hotX = (int)c;
+        hotY = (int)c;
         return bmp;
-    }
-
-    private static Color Darken(Color c, float f)
-    {
-        return Color.FromArgb(c.A,
-            (int)(c.R * f), (int)(c.G * f), (int)(c.B * f));
     }
 
         /// <summary>存一份 PNG 预览（方便肉眼确认光标长什么样）</summary>

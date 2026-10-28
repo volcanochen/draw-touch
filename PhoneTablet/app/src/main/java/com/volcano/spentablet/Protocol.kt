@@ -46,7 +46,7 @@ object Protocol {
     const val TYPE_SHOT_REQ: Int = 0x0E
     /** 截图数据（下行，分片）：头部为 totalLen(4字节) + seq(2字节)，其后是数据，seq 从 0 起 */
     const val TYPE_SHOT: Int = 0x0F
-    /** 荧光笔帧：触摸板模式下把桌面指针变成荧光笔。payload[0]=开关(0/1)，payload[1]=颜色索引 */
+    /** 激光笔帧：触摸板模式下把桌面指针变成激光笔。payload[0]=开关(0/1)，payload[1]=颜色索引 */
     const val TYPE_HL: Int = 0x10
 
     // ---- 备注动作 ----
@@ -252,7 +252,7 @@ object Protocol {
     }
 
     /**
-     * 荧光笔帧：开关桌面上的荧光笔（把指针变成荧光笔）。
+     * 激光笔帧：开关桌面上的激光笔（把指针变成激光笔）。
      * payload[0] = on(0/1)，payload[1] = 颜色索引（0 黄 / 1 绿 / 2 粉 / 3 蓝）。
      */
     fun buildHighlighter(on: Boolean, colorIdx: Int = 0): ByteArray {

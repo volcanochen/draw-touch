@@ -32,3 +32,7 @@ v11_*.png
 release/**/SpenTabletHost-*.zip
 release/**/SpenTabletPhone-*.apk
 release/**/stage/
+
+# 探针构建产物
+tests/TouchProbe/bin/
+tests/TouchProbe/obj/

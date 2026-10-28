@@ -9,12 +9,12 @@ using System.Windows.Forms;
 namespace SpenTabletHost;
 
 /// <summary>
-/// 荧光笔叠加层：把桌面指针变成荧光笔。
+/// 激光笔叠加层：把桌面指针变成激光笔。
 ///
 /// 做法：一个覆盖整块虚拟屏幕的**分层窗口**（每像素 alpha），
 /// 定时（40Hz）读取系统光标位置，光标走到哪就在哪画一段半透明粗线 ——
-/// 就是荧光笔划过纸面的效果。系统箭头同时被隐藏（换成一枚几乎看不见的空白光标），
-/// 所以看起来就是「指针变成了荧光笔」。
+/// 就是激光笔划过纸面的效果。系统箭头同时被隐藏（换成一枚几乎看不见的空白光标），
+/// 所以看起来就是「指针变成了激光笔」。
 ///
 /// 与桌面备注（NoteOverlay）一样：鼠标穿透、不抢焦点、自己的 STA 线程跑消息循环。
 /// 画布用 Format32bppPArgb（**预乘 alpha**）：UpdateLayeredWindow 要求预乘格式，
@@ -27,19 +27,19 @@ public sealed class HighlighterOverlay : IDisposable
     private readonly ManualResetEventSlim _ready = new(false);
     private readonly object _gate = new();
 
-    /// <summary>开启/关闭荧光笔。</summary>
+    /// <summary>开启/关闭激光笔。</summary>
     public void SetEnabled(bool on) => Post(f => f.SetEnabled(on));
 
-    /// <summary>切换荧光笔颜色（索引见 HlForm.Presets）。</summary>
+    /// <summary>切换激光笔颜色（索引见 HlForm.Presets）。</summary>
     public void SetColorIndex(int idx) => Post(f => f.SetColorIndex(idx));
 
-    /// <summary>清掉已画的荧光笔痕迹。</summary>
+    /// <summary>清掉已画的激光笔痕迹。</summary>
     public void Clear() => Post(f => f.ClearTrail());
 
     /// <summary>虚拟屏幕尺寸变了（插拔显示器）→ 画布跟着重建。</summary>
     public void ResizeToVirtualScreen() => Post(f => f.SyncBounds());
 
-    /// <summary>启动时清理上次异常退出留下的荧光笔游标。</summary>
+    /// <summary>启动时清理上次异常退出留下的激光笔游标。</summary>
     public void CleanupLeftoverCursorScheme() => Post(f => f.CleanupLeftoverCursorScheme());
 
     public HighlighterOverlay()
@@ -162,7 +162,7 @@ public sealed class HighlighterOverlay : IDisposable
         private static extern bool GetCursorInfo(ref CURSORINFO pci);
 
         // ---- 低级鼠标钩子：系统每次鼠标移动都会把光标重置成窗口自己的，
-        // 所以要在鼠标事件里**重新贴上**荧光笔光标（这是替换系统光标的标准做法）----
+        // 所以要在鼠标事件里**重新贴上**激光笔光标（这是替换系统光标的标准做法）----
         private const int WH_MOUSE_LL = 14;
         private const int WM_MOUSEMOVE = 0x0200;
         private const int WM_LBUTTONDOWN = 0x0201;
@@ -190,7 +190,7 @@ public sealed class HighlighterOverlay : IDisposable
 
         // ---- 替换系统箭头光标 ----
         // 光标句柄一旦交给 SetSystemCursor，系统就会一直用它；
-        // 关掉荧光笔时用事先复制下来的原件还原，不留痕迹。
+        // 关掉激光笔时用事先复制下来的原件还原，不留痕迹。
         private const int IDC_ARROW = 32512;
         private const int OCR_CURS_FROM_TYPE = 2;
         private const int SPI_SETCURSORS = 0x0057;
@@ -215,8 +215,8 @@ public sealed class HighlighterOverlay : IDisposable
         private string? _curFilePath;
 
         /// <summary>
-        /// 启动时的清理：上次如果异常退出（被强杀/崩溃），注册表里可能还留着我们的荧光笔 .cur，
-        /// 那会让用户的箭头一直是荧光笔。这里发现残留就还原掉。
+        /// 启动时的清理：上次如果异常退出（被强杀/崩溃），注册表里可能还留着我们的激光笔 .cur，
+        /// 那会让用户的箭头一直是激光笔。这里发现残留就还原掉。
         /// </summary>
         public void CleanupLeftoverCursorScheme()
         {
@@ -237,14 +237,14 @@ public sealed class HighlighterOverlay : IDisposable
                     wkey.SetValue("Arrow", File.Exists(aero) ? aero : v,
                         Microsoft.Win32.RegistryValueKind.String);
                     SystemParametersInfo(SPI_SETCURSORS, 0, IntPtr.Zero, SPIF_SENDCHANGE);
-                    AppLog.Info("[Highlighter] 检测到上次遗留的荧光笔游标，已还原系统箭头");
+                    AppLog.Info("[Highlighter] 检测到上次遗留的激光笔游标，已还原系统箭头");
                 }
                 try { if (File.Exists(v)) File.Delete(v); } catch { }
             }
             catch { }
         }
 
-        /// <summary>把系统箭头换成荧光笔。
+        /// <summary>把系统箭头换成激光笔。
         ///
         /// 走**游标方案注册表**（HKCU\Control Panel\Cursors\Arrow + SPI_SETCURSORS）——
         /// 这是系统真正支持的换箭头机制。
@@ -270,7 +270,7 @@ public sealed class HighlighterOverlay : IDisposable
                 key.SetValue("Arrow", _curFilePath!, Microsoft.Win32.RegistryValueKind.String);
                 SystemParametersInfo(SPI_SETCURSORS, 0, IntPtr.Zero, SPIF_SENDCHANGE);
                 _sysCursorReplaced = true;
-                AppLog.Info("[Highlighter] 系统箭头 → 荧光笔（游标方案已生效）");
+                AppLog.Info("[Highlighter] 系统箭头 → 激光笔（游标方案已生效）");
             }
             catch (Exception ex)
             {
@@ -354,7 +354,7 @@ public sealed class HighlighterOverlay : IDisposable
         private IntPtr _memDc;
         private int _dibW, _dibH;
 
-        /// <summary>荧光笔颜色（索引由手机端选择）。</summary>
+        /// <summary>激光笔颜色（索引由手机端选择）。</summary>
         private static readonly Color[] Presets =
         {
             Color.FromArgb(255, 235, 60),   // 0 黄
@@ -363,7 +363,7 @@ public sealed class HighlighterOverlay : IDisposable
             Color.FromArgb(90, 190, 255),   // 3 蓝
         };
 
-        /// <summary>笔迹不透明度：真荧光笔大约 30%~40% 覆盖。</summary>
+        /// <summary>笔迹不透明度：真激光笔大约 30%~40% 覆盖。</summary>
         private const int TrailAlpha = 92;
         /// <summary>笔迹粗细（桌面像素）</summary>
         private const float TrailWidth = 26f;
@@ -378,11 +378,11 @@ public sealed class HighlighterOverlay : IDisposable
         private PointF _last;
         /// <summary>轮询光标位置的定时器（WinForms 定时器：跑在窗口自己的 UI 线程上）</summary>
         private System.Windows.Forms.Timer? _timer;
-        /// <summary>荧光笔光标（把系统箭头换成马克笔造型）</summary>
+        /// <summary>激光笔光标（把系统箭头换成马克笔造型）</summary>
         private MarkerCursor? _cursor;
         /// <summary>调试计数：每 10 段笔迹打一条日志</summary>
         private int _dbg;
-        /// <summary>是否已确认过系统光标已换成荧光笔</summary>
+        /// <summary>是否已确认过系统光标已换成激光笔</summary>
         private bool _cursorVerified;
 
         public HlForm()
@@ -505,7 +505,7 @@ public sealed class HighlighterOverlay : IDisposable
                 _timer.Tick -= OnTick;
                 _timer.Tick += OnTick;
                 _timer.Start();
-                AppLog.Info("[Highlighter] 荧光笔已开启");
+                AppLog.Info("[Highlighter] 激光笔已开启");
             }
             else
             {
@@ -513,11 +513,11 @@ public sealed class HighlighterOverlay : IDisposable
                 RemoveHook();
                 RestoreSystemCursor();
                 ClearTrail();
-                AppLog.Info("[Highlighter] 荧光笔已关闭");
+                AppLog.Info("[Highlighter] 激光笔已关闭");
             }
         }
 
-        /// <summary>装上低级鼠标钩子：鼠标一动就把光标贴回荧光笔。</summary>
+        /// <summary>装上低级鼠标钩子：鼠标一动就把光标贴回激光笔。</summary>
         private void InstallHook()
         {
             if (_hook != IntPtr.Zero) return;
@@ -528,7 +528,7 @@ public sealed class HighlighterOverlay : IDisposable
                 if (_hook == IntPtr.Zero)
                     AppLog.Warn($"[Highlighter] 安装鼠标钩子失败 err={Marshal.GetLastWin32Error()}");
                 else
-                    AppLog.Info("[Highlighter] 鼠标钩子已安装（光标将随鼠标实时替换为荧光笔）");
+                    AppLog.Info("[Highlighter] 鼠标钩子已安装（光标将随鼠标实时替换为激光笔）");
             }
             catch (Exception ex)
             {
@@ -582,11 +582,11 @@ public sealed class HighlighterOverlay : IDisposable
                 _cursor?.Dispose();
                 _cursor = new MarkerCursor(c);
                 SaveCursorPreview();
-                AppLog.Info($"[Highlighter] 荧光笔光标已创建（色 #{idx}）");
+                AppLog.Info($"[Highlighter] 激光笔光标已创建（色 #{idx}）");
             }
             catch (Exception ex)
             {
-                AppLog.Warn($"[Highlighter] 创建荧光笔光标失败：{ex.Message}");
+                AppLog.Warn($"[Highlighter] 创建激光笔光标失败：{ex.Message}");
             }
         }
 
@@ -601,7 +601,7 @@ public sealed class HighlighterOverlay : IDisposable
             catch { }
         }
 
-        /// <summary>确保荧光笔光标已创建（第一次开启时用）。</summary>
+        /// <summary>确保激光笔光标已创建（第一次开启时用）。</summary>
         private void EnsureCursor()
         {
             if (_cursor != null) return;
@@ -609,11 +609,11 @@ public sealed class HighlighterOverlay : IDisposable
             {
                 _cursor = new MarkerCursor(Presets[_colorIdx]);
                 SaveCursorPreview();
-                AppLog.Info("[Highlighter] 荧光笔光标已创建");
+                AppLog.Info("[Highlighter] 激光笔光标已创建");
             }
             catch (Exception ex)
             {
-                AppLog.Warn($"[Highlighter] 创建荧光笔光标失败：{ex.Message}");
+                AppLog.Warn($"[Highlighter] 创建激光笔光标失败：{ex.Message}");
             }
         }
 
@@ -634,11 +634,11 @@ public sealed class HighlighterOverlay : IDisposable
             try
             {
                 if (!_enabled) return;
-                // 把系统指针换成荧光笔（每帧重申一次：别的程序改光标后要抢回来）
+                // 把系统指针换成激光笔（每帧重申一次：别的程序改光标后要抢回来）
                 if (_cursor?.Handle != null && _cursor.Handle != IntPtr.Zero)
                 {
                     SetCursor(_cursor.Handle);
-                    // 自证：确认系统当前光标确实已经是我们的荧光笔
+                    // 自证：确认系统当前光标确实已经是我们的激光笔
                     if (!_cursorVerified)
                     {
                         _cursorVerified = true;
@@ -646,7 +646,7 @@ public sealed class HighlighterOverlay : IDisposable
                         if (GetCursorInfo(ref ci))
                         {
                             bool ok = ci.hCursor == _cursor.Handle;
-                            AppLog.Info($"[Highlighter] 系统光标 → 荧光笔 {(ok ? "已生效 ✓" : "尚未替换（当前句柄不同）")}");
+                            AppLog.Info($"[Highlighter] 系统光标 → 激光笔 {(ok ? "已生效 ✓" : "尚未替换（当前句柄不同）")}");
                         }
                     }
                 }
@@ -680,7 +680,7 @@ public sealed class HighlighterOverlay : IDisposable
                 _hasLast = false;
                 return;
             }
-            // **只有按住左键时才留下荧光痕迹**（就像真的荧光笔：笔尖按在纸上才出墨）
+            // **只有按住左键时才留下荧光痕迹**（就像真的激光笔：笔尖按在纸上才出墨）
             if (!MouseControl.LeftDown)
             {
                 _hasLast = false;
@@ -797,7 +797,7 @@ public sealed class HighlighterOverlay : IDisposable
             ReleaseDC(IntPtr.Zero, screenDc);
             if (_dibHandle == IntPtr.Zero)
             {
-                AppLog.Error("[Highlighter] CreateDIBSection 失败，荧光笔无法显示");
+                AppLog.Error("[Highlighter] CreateDIBSection 失败，激光笔无法显示");
                 return;
             }
             _memDc = CreateCompatibleDC(IntPtr.Zero);

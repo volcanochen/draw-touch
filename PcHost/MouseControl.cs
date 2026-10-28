@@ -218,11 +218,16 @@ internal static class MouseControl
     // 若系统不支持触摸注入（很老的系统 / 注入失败），调用方应回退到 Ctrl++/-。
 
     private const uint POINTER_TYPE_TOUCH = 0x00000002;
-    private const uint POINTER_FLAG_DOWN = 0x00000001;
-    private const uint POINTER_FLAG_UPDATE = 0x00000002;
-    private const uint POINTER_FLAG_UP = 0x00000004;
-    private const uint POINTER_FLAG_INRANGE = 0x00000008;
-    private const uint POINTER_FLAG_INCONTACT = 0x00000010;
+    // 官方 POINTER_FLAGS 值（winuser.h / POINTER_FLAGS 枚举）。
+    // 注意状态机（InjectTouchInput 文档）：
+    //   接触开始 = INRANGE|INCONTACT|DOWN；接触移动 = INRANGE|INCONTACT|UPDATE；
+    //   接触抬起转悬停 = INRANGE|UP；彻底结束 = UP。抬起必须发 UP，否则接触点永远挂着。
+    private const uint POINTER_FLAG_NEW = 0x00000001;
+    private const uint POINTER_FLAG_INRANGE = 0x00000002;
+    private const uint POINTER_FLAG_INCONTACT = 0x00000004;
+    private const uint POINTER_FLAG_DOWN = 0x00010000;
+    private const uint POINTER_FLAG_UPDATE = 0x00020000;
+    private const uint POINTER_FLAG_UP = 0x00040000;
     private const uint TOUCH_MASK_CONTACTAREA = 0x0001;
     private const uint TOUCH_FEEDBACK_NONE = 0x00000001;
 
@@ -274,6 +279,7 @@ internal static class MouseControl
     private static bool _touchInit;
     private static bool _touchReady;
     private static bool _tzActive;
+    private static int _tzFailCount;
     private static uint _tzFrameId;
     private static int _tzCx, _tzCy;     // 捏合中心（屏幕像素）
     private static int _tzSpan;          // 当前半跨度（像素）
@@ -296,7 +302,9 @@ internal static class MouseControl
         {
             // maxCount=2：同时两个接触点；dwMode=TOUCH_FEEDBACK_NONE 关掉系统的视觉反馈
             _touchReady = InitializeTouchInjection(2, TOUCH_FEEDBACK_NONE);
-            if (!_touchReady)
+            if (_touchReady)
+                AppLog.Info("[TouchZoom] 触摸注入初始化成功（首次捏合时验证可用性）");
+            else
                 AppLog.Warn($"[TouchZoom] 初始化触摸注入失败 err={Marshal.GetLastWin32Error()}（将回退 Ctrl++/-）");
         }
         catch (Exception ex)
@@ -317,9 +325,15 @@ internal static class MouseControl
     {
         if (!_tzActive) return;
         _tzActive = false;
-        InjectOneFrame(down: false, _tzCx, _tzCy, _tzSpan);
+        // 必须发真正的 UP 帧（INRANGE|UP）把两个接触点抬起来。
+        // 以前发的是 UPDATE|INRANGE|INCONTACT——接触点永远处于「接触中」，
+        // 系统等效认为两根手指一直按着 → 左键锁死 → 「鼠标控制不了」就是这个造成的。
+        InjectOneFrame(phase: TouchPhase.Up, _tzCx, _tzCy, _tzSpan);
         AppLog.Info("[TouchZoom] 捏合结束（抬起接触点）");
     }
+
+    /// <summary>触摸帧的三种阶段：落下 / 移动（保持接触）/ 抬起。</summary>
+    private enum TouchPhase { Down, Move, Up }
 
     /// <summary>
     /// 推进一次捏合缩放。
@@ -337,7 +351,7 @@ internal static class MouseControl
             // 开新一轮捏合：在当前光标处落下两个接触点（基准跨度）
             _tzCx = cx; _tzCy = cy;
             _tzSpan = TZ_BASE_SPAN;
-            if (!InjectOneFrame(down: true, cx, cy, _tzSpan)) return false;
+            if (!InjectOneFrame(TouchPhase.Down, cx, cy, _tzSpan)) return false;
             _tzActive = true;
             AppLog.Info($"[TouchZoom] 开始捏合 @({cx},{cy}) 跨度±{_tzSpan}");
         }
@@ -346,7 +360,7 @@ internal static class MouseControl
             // 按相对系数缩放当前跨度（前台应用据此算出缩放量）
             int ns = (int)Math.Clamp(_tzSpan * factor, TZ_MIN_SPAN, TZ_MAX_SPAN);
             _tzSpan = ns;
-            if (!InjectOneFrame(down: false, cx, cy, _tzSpan)) return false;
+            if (!InjectOneFrame(TouchPhase.Move, cx, cy, _tzSpan)) return false;
         }
         _tzLastMs = now;
         // 220ms 内没新帧就自动抬起（结束捏合）
@@ -354,17 +368,35 @@ internal static class MouseControl
         return true;
     }
 
-    /// <summary>构造并发出一帧（两个接触点）：down=true 落点，false 移动/抬起。</summary>
-    private static bool InjectOneFrame(bool down, int cx, int cy, int span)
+    /// <summary>构造并发出一帧（两个接触点）：Down 落点 / Move 保持接触移动 / Up 抬起结束。</summary>
+    private static bool InjectOneFrame(TouchPhase phase, int cx, int cy, int span)
     {
         try
         {
-            var a = MakeContact(0, cx - span, cy, down);
-            var b = MakeContact(1, cx + span, cy, down);
+            var a = MakeContact(0, cx - span, cy, phase);
+            var b = MakeContact(1, cx + span, cy, phase);
             var arr = new[] { a, b };
             _tzFrameId++;
             bool ok = InjectTouchInput(2, arr);
-            if (!ok) AppLog.Warn($"[TouchZoom] InjectTouchInput 失败 err={Marshal.GetLastWin32Error()}");
+            if (!ok)
+            {
+                var err = Marshal.GetLastWin32Error();
+                // 熔断：某些 Windows 版本（实测 Win11 26300）触摸注入全组合返回 err=87，
+                // 是系统级问题不是参数问题。连续失败 3 次就永久禁用，走 Ctrl+/- 回退，不再刷日志。
+                if (++_tzFailCount >= 3 && _touchReady)
+                {
+                    _touchReady = false;
+                    AppLog.Warn($"[TouchZoom] 触摸注入连续失败 err={err} ×{_tzFailCount}，本机不支持，已熔断并永久回退 Ctrl+/-");
+                }
+                else
+                {
+                    AppLog.Warn($"[TouchZoom] InjectTouchInput 失败 err={err}");
+                }
+            }
+            else
+            {
+                _tzFailCount = 0;
+            }
             return ok;
         }
         catch (Exception ex)
@@ -374,9 +406,19 @@ internal static class MouseControl
         }
     }
 
-    private static POINTER_TOUCH_INFO MakeContact(uint id, int x, int y, bool down)
+    private static POINTER_TOUCH_INFO MakeContact(uint id, int x, int y, TouchPhase phase)
     {
         const int r = 3; // 接触点包围盒半径（像素）
+        // 状态机严格按 InjectTouchInput 文档：
+        //   Down  = INRANGE|INCONTACT|DOWN   （接触开始）
+        //   Move  = INRANGE|INCONTACT|UPDATE （接触移动）
+        //   Up    = INRANGE|UP               （接触抬起转悬停，接触点终结）
+        uint flags = phase switch
+        {
+            TouchPhase.Down => POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_DOWN,
+            TouchPhase.Move => POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_UPDATE,
+            _ => POINTER_FLAG_INRANGE | POINTER_FLAG_UP,
+        };
         return new POINTER_TOUCH_INFO
         {
             pointerInfo = new POINTER_INFO
@@ -384,9 +426,7 @@ internal static class MouseControl
                 pointerType = POINTER_TYPE_TOUCH,
                 pointerId = id,
                 frameId = _tzFrameId,
-                pointerFlags = down
-                    ? (POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT)
-                    : (POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT),
+                pointerFlags = flags,
                 sourceDevice = IntPtr.Zero,
                 hwndTarget = IntPtr.Zero,
                 ptPixelLocation = new TZPoint { X = x, Y = y },
@@ -394,7 +434,7 @@ internal static class MouseControl
                 ptPixelLocationRaw = new TZPoint { X = x, Y = y },
                 ptHimetricLocationRaw = new TZPoint { X = 0, Y = 0 },
                 dwTime = 0,
-                historyCount = 0,
+                historyCount = 1,   // 文档：未合并时计数为 1；0 在部分系统上会被判为无效参数
                 inputData = 0,
                 dwKeyStates = 0,
                 performanceCount = 0,
@@ -407,6 +447,12 @@ internal static class MouseControl
             orientation = 0,
             pressure = 0,
         };
+    }
+
+    /// <summary>捏合注入还活着就立刻结束（模式切换 / 释放全部输入时调用，防接触点残留）。</summary>
+    public static void EndTouchZoomIfActive()
+    {
+        if (_tzActive) EndTouchZoom();
     }
 
     /// <summary>Ctrl + “+” （放大）。</summary>

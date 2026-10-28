@@ -138,8 +138,8 @@ object UpdateChecker {
         }.start()
     }
 
-    /** 语义化版本比较：a 是否比 b 新（逐段比较 major.minor.patch） */
-    private fun isNewer(a: String, b: String): Boolean {
+    /** 语义化版本比较：a 是否比 b 新（逐段比较 major.minor.patch）。internal 以便单元测试 */
+    internal fun isNewer(a: String, b: String): Boolean {
         if (b.isBlank()) return true
         val va = parseVer(a)
         val vb = parseVer(b)
@@ -149,7 +149,7 @@ object UpdateChecker {
         return false
     }
 
-    private fun parseVer(s: String): IntArray {
+    internal fun parseVer(s: String): IntArray {
         val parts = s.split('.', '-')
         val nums = IntArray(3)
         for (i in 0 until kotlin.math.min(3, parts.size)) {

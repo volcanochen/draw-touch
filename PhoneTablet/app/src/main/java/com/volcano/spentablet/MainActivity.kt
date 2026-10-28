@@ -58,7 +58,7 @@ class MainActivity : Activity() {
 
     // ---- 触摸板模式 UI（滚轮条 + 左/中/右键）----
     private lateinit var trackpadOverlay: android.widget.FrameLayout
-    /** 可拖动浮动面板：荧光笔 + 左 / 中 / 右 键合并在一起 */
+    /** 可拖动浮动面板：激光笔 + 左 / 中 / 右 键合并在一起 */
     private lateinit var trackpadDock: DraggablePanel
     private lateinit var hlBtn: Button
     /** 浮动面板里的左 / 中 / 右 键（手势触发时要在对应键上闪烁反馈） */
@@ -314,7 +314,7 @@ class MainActivity : Activity() {
                     net.send(Protocol.buildNote(Protocol.NOTE_ON))
                     updateNoteBtn()
                 }
-                // 荧光笔状态也要补回去（PC 端不记状态）
+                // 激光笔状态也要补回去（PC 端不记状态）
                 if (highlighterOn) net.send(Protocol.buildHighlighter(true, highlighterColor))
             }
             helloFrame()
@@ -746,6 +746,7 @@ class MainActivity : Activity() {
         if (m == workMode) return
         workMode = m
         canvas.workMode = m
+        canvas.resetGestures() // 清手势中间态 + 补发左键抬起/手指离开，防切换瞬间按键卡死
         prefs.edit().putInt("mode", m).apply()
         if (::net.isInitialized) {
             net.send(Protocol.buildMode(m))
@@ -800,8 +801,8 @@ class MainActivity : Activity() {
             <b>【触摸板模式（默认，手指=触摸板）】</b><br>
             · 单指滑动 = 移动光标；单击 = 左键；双击 = 右键<br>
             · 右侧滚轮条滑动 = 滚动，<b>双击滚轮条</b>切换普通滚动 / 无极滚动（动量可在设置里调）<br>
-            · 底部<b>可拖动浮动面板</b> = 荧光笔 + 左 / 中 / 右键（挡住画面就按住拖走，位置会记住）<br>
-            · 点「荧光笔」开/关：<b>桌面指针就变成荧光笔</b>，走过的地方留下半透明荧光痕迹；长按换颜色（黄/绿/粉/蓝）<br>
+            · 底部<b>可拖动浮动面板</b> = 激光笔 + 左 / 中 / 右键（挡住画面就按住拖走，位置会记住）<br>
+            · 点「激光笔」开/关：<b>桌面指针就变成激光笔</b>，走过的地方留下半透明荧光痕迹；长按换颜色（黄/绿/粉/蓝）<br>
             · 浮动键被手势/手指触发时都会在手机端闪一下，方便看清「打中了哪个键」<br>
             · 双指滑动 = 滚动；双指捏合 = 缩放（Ctrl+滚轮）<br>
             · 双指点击 = 右键；三指点击 = 中键；三指左右滑 = 前进/后退<br>
@@ -881,6 +882,10 @@ class MainActivity : Activity() {
             topBar.layoutParams = it
         }
         DebugLog.write("[orient] ${if (land) "横屏" else "竖屏"}｜书写区 ${surfaceW().toInt()}x${surfaceH().toInt()}｜${canvas.frameSummary()}")
+        // 转屏后父容器尺寸变了：把可拖动面板按记住的**比例**重新定位（restore 内部会钳制在可视范围内），
+        // 没拖过的面板（gravity 定位）自动适应，不受影响
+        if (::trackpadDock.isInitialized) restorePanelPos(trackpadDock, "tpDock")
+        if (::tabletToolbar.isInitialized) restorePanelPos(tabletToolbar, "toolbar")
     }
 
     /** 方向说明文字（设置页/提示用） */
@@ -971,7 +976,7 @@ class MainActivity : Activity() {
         }
         wheel.inertia = wheelInertia
 
-        // —— 底部浮动操作面板：荧光笔 + 左 / 中 / 右 键合并在一起，整体可拖动 ——
+        // —— 底部浮动操作面板：激光笔 + 左 / 中 / 右 键合并在一起，整体可拖动 ——
         // 挡住画面时按住面板任意位置拖走（位置按父容器比例记住，下次还原），
         // 单指点击（不超 slop）则照常触发对应按钮。
         trackpadDock = DraggablePanel(this, "tpDock").apply {
@@ -987,9 +992,9 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(10) }
         }
-        // 荧光笔按钮：点一下开/关（桌面指针变成荧光笔）；长按换颜色（黄 → 绿 → 粉 → 蓝）
+        // 激光笔按钮：点一下开/关（桌面指针变成激光笔）；长按换颜色（黄 → 绿 → 粉 → 蓝）
         val hl = Button(this).apply {
-            text = "荧光笔"
+            text = "激光笔"
             layoutParams = LinearLayout.LayoutParams(dp(72), dp(48))
                 .apply { setMargins(dp(4), 0, dp(4), 0) }
             background = floatBtnBg()
@@ -998,7 +1003,7 @@ class MainActivity : Activity() {
             setOnLongClickListener { cycleHighlighterColor(); true }
         }
         // 「左」键：按下即「左键按下」，抬起才「左键抬起」——
-        // 按住不放再移动手指 = 拖拽（荧光笔模式下就是拉着一支荧光笔涂）。
+        // 按住不放再移动手指 = 拖拽（激光笔模式下就是拉着一支激光笔涂）。
         // 拖动超 slop 时面板会拦截、整体移动；此时 ACTION_CANCEL 会抬起左键，不会卡住。
         val leftBtn = Button(this).apply {
             text = "左"
@@ -1048,12 +1053,12 @@ class MainActivity : Activity() {
         updateHighlighterBtn()
     }
 
-    // ================= 荧光笔（触摸板模式）=================
-    /** 荧光笔是否开启 */
+    // ================= 激光笔（触摸板模式）=================
+    /** 激光笔是否开启 */
     private var highlighterOn = false
-    /** 荧光笔颜色索引（0 黄 / 1 绿 / 2 粉 / 3 蓝） */
+    /** 激光笔颜色索引（0 黄 / 1 绿 / 2 粉 / 3 蓝） */
     private var highlighterColor = 0
-    /** 荧光笔颜色（与 PC 端 HighlighterOverlay.Presets 一致） */
+    /** 激光笔颜色（与 PC 端 HighlighterOverlay.Presets 一致） */
     private val hlColors = intArrayOf(
         0xFFEBEB3C.toInt(),  // 黄
         0xFF50F078.toInt(),  // 绿
@@ -1061,7 +1066,7 @@ class MainActivity : Activity() {
         0xFF5ABEFF.toInt()   // 蓝
     )
 
-    /** 开关荧光笔（桌面指针变成荧光笔笔迹） */
+    /** 开关激光笔（桌面指针变成激光笔笔迹） */
     private fun toggleHighlighter() {
         highlighterOn = !highlighterOn
         prefs.edit().putBoolean("hlOn", highlighterOn).apply()
@@ -1069,7 +1074,7 @@ class MainActivity : Activity() {
         updateHighlighterBtn()
     }
 
-    /** 长按：换荧光笔颜色 */
+    /** 长按：换激光笔颜色 */
     private fun cycleHighlighterColor() {
         highlighterColor = (highlighterColor + 1) % hlColors.size
         prefs.edit().putInt("hlColor", highlighterColor).apply()
@@ -1079,10 +1084,10 @@ class MainActivity : Activity() {
 
     private fun sendHighlighter() {
         if (::net.isInitialized) net.send(Protocol.buildHighlighter(highlighterOn, highlighterColor))
-        DebugLog.write("[hl] 荧光笔 ${if (highlighterOn) "开" else "关"}｜色 #$highlighterColor")
+        DebugLog.write("[hl] 激光笔 ${if (highlighterOn) "开" else "关"}｜色 #$highlighterColor")
     }
 
-    /** 按钮外观：开启时染成当前荧光笔颜色，一眼能看出开没开 */
+    /** 按钮外观：开启时染成当前激光笔颜色，一眼能看出开没开 */
     private fun updateHighlighterBtn() {
         if (!::hlBtn.isInitialized) return
         if (highlighterOn) {
@@ -1094,7 +1099,7 @@ class MainActivity : Activity() {
             }
             hlBtn.setTextColor(Color.BLACK)
         } else {
-            hlBtn.text = "荧光笔"
+            hlBtn.text = "激光笔"
             hlBtn.background = floatBtnBg()
             hlBtn.setTextColor(Color.WHITE)
         }
@@ -1360,7 +1365,7 @@ class MainActivity : Activity() {
     /**
      * 可拖动的浮动面板：整体按住拖走（超过触摸阈值才判定为拖动，否则按钮照常点击）。
      * 拖动结束后把位置按父容器比例存进 prefs，下次启动还原。
-     * [prefKey] 区分不同面板（数位板工具条 = "toolbar"，荧光笔按钮 = "hl"）。
+     * [prefKey] 区分不同面板（数位板工具条 = "toolbar"，激光笔按钮 = "hl"）。
      */
     private inner class DraggablePanel(
         context: android.content.Context,
@@ -1414,6 +1419,32 @@ class MainActivity : Activity() {
                 .putFloat("${prefKey}XF", left.toFloat() / p.width)
                 .putFloat("${prefKey}YF", top.toFloat() / p.height)
                 .apply()
+        }
+
+        /**
+         * 每次 layout 后把自己钳回父容器可视范围内。
+         * 转屏时 Activity 不重建（manifest 配了 configChanges），之前拖到旧屏幕边缘的
+         * left/top 像素值在新方向上可能完全出界 —— 在这里兜底钳制，保证面板永远可见。
+         * 只有确实超界才改布局，避免反复触发 layout。
+         */
+        override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
+            super.onLayout(changed, l, t, r, b)
+            clampToParent()
+        }
+
+        /** 钳回父容器可视范围（已拖动过 = gravity 为 NO_GRAVITY 的才需要；gravity 定位的自动适应） */
+        fun clampToParent() {
+            val p = parent as? ViewGroup ?: return
+            if (p.width <= 0 || p.height <= 0 || width <= 0 || height <= 0) return
+            val lp = layoutParams as? FrameLayout.LayoutParams ?: return
+            if (lp.gravity != Gravity.NO_GRAVITY) return
+            val nl = left.coerceIn(0, (p.width - width).coerceAtLeast(0))
+            val nt = top.coerceIn(0, (p.height - height).coerceAtLeast(0))
+            if (nl != left || nt != top) {
+                lp.leftMargin = nl
+                lp.topMargin = nt
+                layoutParams = lp
+            }
         }
     }
 

@@ -35,7 +35,7 @@ public sealed class TcpPenServer : IDisposable
     private const byte TYPE_SHOT_REQ = 0x0E;
     /// <summary>截图数据（下行分片）：payload = totalLen(u32) + seq(u16) + data</summary>
     private const byte TYPE_SHOT = 0x0F;
-    /// <summary>荧光笔帧：payload[0]=开关(0/1)，payload[1]=颜色索引</summary>
+    /// <summary>激光笔帧：payload[0]=开关(0/1)，payload[1]=颜色索引</summary>
     private const byte TYPE_HL = 0x10;
 
     // 鼠标帧 kind（与手机端 Protocol.MOUSE_* 一致）
@@ -76,7 +76,7 @@ public sealed class TcpPenServer : IDisposable
     private NetworkStream? _clientStream;
     /// <summary>桌面笔迹叠加层（屏幕备注）</summary>
     private readonly NoteOverlay _note = new();
-    /// <summary>荧光笔叠加层（触摸板模式：把桌面指针变成荧光笔）</summary>
+    /// <summary>激光笔叠加层（触摸板模式：把桌面指针变成激光笔）</summary>
     private readonly HighlighterOverlay _hl = new();
     /// <summary>备注开启中：S Pen 笔迹画到桌面固定位置，不注入系统笔</summary>
     private bool _noteOn;
@@ -141,7 +141,7 @@ public sealed class TcpPenServer : IDisposable
     /// <summary>
     /// 每秒检查两件事：
     ///   ① 虚拟屏幕尺寸有没有变（插拔显示器 / 改分辨率 / 远程桌面）——
-    ///      变了就重新解析映射区域，并把备注层、荧光笔层的画布一起重建；
+    ///      变了就重新解析映射区域，并把备注层、激光笔层的画布一起重建；
     ///   ② Windows 虚拟桌面有没有切换 —— 切换后光标的绝对坐标空间变了，
     ///      累积的残量必须作废，否则会出现「突然跳一大段」。
     /// </summary>
@@ -328,6 +328,7 @@ public sealed class TcpPenServer : IDisposable
         bool mouse = BitConverter.ToSingle(p, 0) >= 1f;
         if (mouse == _cfg.IsMouseMode) return;
         _cfg.SetWorkMode(mouse);
+        MouseControl.EndTouchZoomIfActive(); // 捏合注入还挂着就抬起，防触摸接触点残留锁死左键
         MouseControl.ReleaseAll();     // 避免左键卡在按下状态
         AppLog.Info(mouse
             ? "[Mode] 切换到【触摸板模式】：取消操作范围框，手指=触摸板，右侧滚轮条，底部左/中/右键，S Pen=绝对定位鼠标笔"
@@ -405,7 +406,6 @@ public sealed class TcpPenServer : IDisposable
         AppLog.Info($"[Reset] 操作框已复位 → 桌面范围 {r.x},{r.y} {r.w}×{r.h}");
     }
 
-    private int _noteLog;
 
     /// <summary>备注帧：开关桌面笔迹叠加层 / 撤销一笔 / 清空。</summary>
     private void HandleNote(byte[] p)
@@ -437,7 +437,9 @@ public sealed class TcpPenServer : IDisposable
                 _note.Clear();
                 break;
         }
-        if (_noteLog++ % 10 == 0 || (action >= 2 && action != 4))
+        // 开/关/撤销/清空都是低频用户操作，始终记日志（换色有自己的日志）；
+        // 高频帧（若有）才需要节流。
+        if (action != 4)
             AppLog.Info($"[Note] action={action}（{(action == 0 ? "关" : action == 1 ? "开" : action == 2 ? "撤销" : action == 3 ? "清空" : "换色")}）");
     }
 
@@ -529,7 +531,7 @@ public sealed class TcpPenServer : IDisposable
     /// <summary>残量上限：系统在虚拟桌面/异构多屏下截断位移时，残量不能无限堆积。</summary>
     private const double MoveRemainLimit = 600;
 
-    /// <summary>荧光笔帧：开关 + 颜色索引。</summary>
+    /// <summary>激光笔帧：开关 + 颜色索引。</summary>
     private void HandleHighlighter(byte[] p)
     {
         if (p.Length < 4) return;

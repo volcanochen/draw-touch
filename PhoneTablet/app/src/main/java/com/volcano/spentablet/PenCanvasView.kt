@@ -294,6 +294,28 @@ class PenCanvasView(context: Context) : View(context) {
     /** 手势开始时的双指跨度（捏合判定用**累计**跨度变化，而不是单帧） */
     private var tpStartSpan = 0f
 
+    /**
+     * 工作模式切换时调用：把触摸板 / 拖框手势的中间状态全部清零，
+     * 并补发「左键抬起 / 手指离开触摸板」，防止切换瞬间按键卡死、让位状态残留。
+     */
+    fun resetGestures() {
+        if (tpPenDown) {
+            onMouse?.invoke(Protocol.MOUSE_LEFT_UP, 0f, 0f)
+            tpPenDown = false
+        }
+        if (tpActiveFingers > 0) {
+            onMouse?.invoke(Protocol.MOUSE_FINGER, 0f, 0f) // 通知 PC：手指已全部离开触摸板
+        }
+        tpActiveFingers = 0
+        tpMaxPointers = 0
+        tpMoved = 0f
+        tpFingerId = -1
+        tpPinchMode = false
+        tpStartSpan = 0f
+        panning = false
+        hasLast = false
+    }
+
     // ---- 诊断计数：index = toolType(0..4)，第二维 = down/move/up/hover ----
     private val counters = Array(5) { IntArray(4) }
 
@@ -539,7 +561,11 @@ class PenCanvasView(context: Context) : View(context) {
                 }
             }
 
-            if (!contact && !sendHover) {
+            // 悬停帧发送条件：设置里开了「悬停转发」，且**不在触摸板模式**。
+            // 触摸板模式下 S Pen 的悬停流绝不能发——PC 端会把光标一帧一帧绝对定位回笔的位置，
+            // 手指一抬（让位结束）光标就被拽回去，表现为「切回触摸板后控制不了鼠标」。
+            // 触摸板模式下笔只在笔尖接触屏幕（点击/拖动光标）时才动光标。
+            if (!contact && (!sendHover || workMode == Protocol.MODE_MOUSE)) {
                 onDebug?.invoke("${EvtDump.actionName(e.action)} ${EvtDump.toolName(tt)} (悬停未发送)")
                 return
             }
