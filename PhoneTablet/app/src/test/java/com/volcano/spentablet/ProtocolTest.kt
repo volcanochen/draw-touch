@@ -164,6 +164,7 @@ class ProtocolTest {
         assertEquals(8, Protocol.MOUSE_BACK)
         assertEquals(9, Protocol.MOUSE_FORWARD)
         assertEquals(15, Protocol.MOUSE_FINGER)
+        assertEquals(16, Protocol.MOUSE_LEFT_DOUBLE)
         assertEquals(0x05, Protocol.TYPE_HELLO)
         assertEquals(0x07, Protocol.TYPE_MOUSE)
         assertEquals(0x10, Protocol.TYPE_HL)

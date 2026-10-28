@@ -94,6 +94,12 @@ object Protocol {
      * 手指一按上来，PC 端就让 S Pen 彻底让位（光标只跟手指）。
      */
     const val MOUSE_FINGER: Int = 15
+    /**
+     * 左键双击（点两下）。
+     * 单独占一个动作码，是为了让 PC 端用**一次 SendInput** 把 下-上-下-上 四个事件全发出去：
+     * 拆成两次 MOUSE_LEFT_CLICK 时，两次网络往返之间可能超过系统的双击时间，被当成两次单击。
+     */
+    const val MOUSE_LEFT_DOUBLE: Int = 16
 
     const val DEFAULT_PORT: Int = 6000
 

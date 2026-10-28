@@ -185,6 +185,25 @@ internal static class MouseControl
         Send(MOUSEEVENTF_LEFTUP);
     }
 
+    /// <summary>
+    /// 左键双击。
+    /// 四个事件放进**同一次** SendInput：拆成两次 LeftClick() 的话，两次之间要过一次网络/线程调度，
+    /// 一旦超过系统双击时间（默认 500ms）就会被判成两次独立单击 —— 双击打开文件就失效了。
+    /// </summary>
+    public static void DoubleClick()
+    {
+        var inputs = new INPUT[4];
+        for (int i = 0; i < 4; i++)
+        {
+            inputs[i] = new INPUT
+            {
+                type = INPUT_MOUSE,
+                mi = new MOUSEINPUT { dwFlags = (i % 2 == 0) ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP }
+            };
+        }
+        SendInputChecked(inputs, "双击");
+    }
+
     public static void RightClick()
     {
         Send(MOUSEEVENTF_RIGHTDOWN);
@@ -245,7 +264,7 @@ internal static class MouseControl
     // 这是 Windows 精密触摸板的捏合缩放在系统层的等价物：把两个触摸接触点喂给系统，
     // 系统再像真实触摸板那样把它翻译成前台应用的缩放手势。浏览器 / 地图 / Office /
     // 图片查看器 / PDF 等都原生支持，手感与真实触摸板一致。
-    // 若系统不支持触摸注入（很老的系统 / 注入失败），调用方应回退到 Ctrl++/-。
+    // 若系统不支持触摸注入（很老的系统 / 注入失败），调用方应回退到 Ctrl+滚轮。
 
     private const uint POINTER_TYPE_TOUCH = 0x00000002;
     // 官方 POINTER_FLAGS 值（winuser.h / POINTER_FLAGS 枚举）。
@@ -335,12 +354,12 @@ internal static class MouseControl
             if (_touchReady)
                 AppLog.Info("[TouchZoom] 触摸注入初始化成功（首次捏合时验证可用性）");
             else
-                AppLog.Warn($"[TouchZoom] 初始化触摸注入失败 err={Marshal.GetLastWin32Error()}（将回退 Ctrl++/-）");
+                AppLog.Warn($"[TouchZoom] 初始化触摸注入失败 err={Marshal.GetLastWin32Error()}（将回退 Ctrl+滚轮）");
         }
         catch (Exception ex)
         {
             _touchReady = false;
-            AppLog.Warn($"[TouchZoom] 不支持触摸注入：{ex.Message}（将回退 Ctrl++/-）");
+            AppLog.Warn($"[TouchZoom] 不支持触摸注入：{ex.Message}（将回退 Ctrl+滚轮）");
         }
     }
 
@@ -368,8 +387,8 @@ internal static class MouseControl
     /// <summary>
     /// 推进一次捏合缩放。
     /// factor&gt;1 张开（放大），&lt;1 捏拢（缩小）。以当前光标位置为捏合中心。
-    /// 返回 true 表示已成功用真实触摸注入发出（调用方无需再发 Ctrl++/-）；
-    /// false 表示系统不支持或注入失败（调用方应回退到 Ctrl++/-）。
+    /// 返回 true 表示已成功用真实触摸注入发出（调用方无需再发 Ctrl+滚轮）；
+    /// false 表示系统不支持或注入失败（调用方应回退到 Ctrl+滚轮）。
     /// </summary>
     public static bool UpdateTouchZoom(double factor, int cx, int cy)
     {

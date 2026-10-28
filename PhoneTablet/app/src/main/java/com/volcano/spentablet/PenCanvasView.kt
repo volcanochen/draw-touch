@@ -122,6 +122,14 @@ class PenCanvasView(context: Context) : View(context) {
     /** 触摸板区域背景色 */
     var trackpadColor: Int = 0xFF20242B.toInt()
 
+    // ---- 手指轨迹（跟手提示：手指划到哪一眼能看见，抬手后自动淡出）----
+    /** 是否显示手指动作轨迹 */
+    var showFingerTrail: Boolean = true
+    /** 轨迹从画出到完全消失的时长(ms)；<= 0 视为关闭 */
+    var trailLifeMs: Long = 800L
+    /** 轨迹颜色；0 = 按模式自动选（深色触摸板用亮色，白底数位板用深蓝） */
+    var trailColor: Int = 0
+
     // ---- 手势死区（可在设置页调整，0 = 关闭）----
     /**
      * 捏合死区（相对阈值，比例）：双指跨度相对变化超过它才可能判定为捏合。
@@ -277,12 +285,22 @@ class PenCanvasView(context: Context) : View(context) {
     private var fingerLastY = 0f
     private var fingerMoved = 0f        // 本次按下的累计位移(px)
     private var fingerDownAt = 0L
-    private var tapCandidate = false    // 当前按下有没有可能算“敲击”
-    private var secondTap = false       // 本次按下是否是双击的第二下
-    private var lastTapAt = 0L
-    private var lastTapX = 0f
-    private var lastTapY = 0f
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    /**
+     * 单指敲击判定：单击 / 双击 / 双击不松手拖拽。
+     *
+     * 判定逻辑全在 [TapDrag] 里（纯 JVM 可单测），这里只把结果翻译成协议帧。
+     * 阈值按屏幕密度换算，跟手手感才一致。
+     */
+    private val tapDrag = TapDrag(
+        doubleTapWindowMs = DOUBLE_TAP_WINDOW_MS,
+        tapTimeoutMs = TAP_TIMEOUT_MS.toLong(),
+        doubleTapSlopPx = 48f * resources.displayMetrics.density,
+        dragSlopPx = 12f * resources.displayMetrics.density,
+    )
+
+    /** 单击的延迟派发：等双击窗口过去、确认没有第二下，才发左键 */
     private val singleTapAction = Runnable {
         onMouse?.invoke(Protocol.MOUSE_LEFT_CLICK, 0f, 0f)
         onDebug?.invoke("单击 → 鼠标左键")
@@ -294,7 +312,31 @@ class PenCanvasView(context: Context) : View(context) {
 
     /** 敲击判定阈值（随屏幕密度换算成 px） */
     private val tapSlopPx: Float get() = 12f * resources.displayMetrics.density
-    private val doubleTapSlopPx: Float get() = 48f * resources.displayMetrics.density
+
+    // ---- 手指轨迹 ----
+    /** 一根手指的轨迹点。同屏可能同时有两三根手指，所以按 pointerId 分开存，避免连线串成折线 */
+    private class Trail {
+        val xs = ArrayList<Float>()
+        val ys = ArrayList<Float>()
+        val ts = ArrayList<Long>()
+        val size: Int get() = ts.size
+        fun clear() { xs.clear(); ys.clear(); ts.clear() }
+        /** 只保留最近 [TRAIL_MAX_POINTS] 个点：长时间划动也不会把内存吃掉 */
+        fun trim() {
+            while (ts.size > TRAIL_MAX_POINTS) {
+                ts.removeAt(0); xs.removeAt(0); ys.removeAt(0)
+            }
+        }
+    }
+
+    private val trails = HashMap<Int, Trail>()
+    /** 轨迹采样最小步长(dp)与最小间隔(ms)：太密没有观感收益，只是白费内存 */
+    private val trailMinStepPx: Float get() = dpPx(1.5f)
+    private val trailPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
 
     // ---- 鼠标模式：多点触控（模拟笔记本触摸板）----
     /** 本次手势中出现过的最多手指数：1=单指 2=双指 3=三指 */
@@ -343,10 +385,25 @@ class PenCanvasView(context: Context) : View(context) {
         tpStartSpan = 0f
         panning = false
         hasLast = false
+        // 双击拖拽可能正按着左键，切模式前必须松开
+        releaseTapDrag("切模式")
         // 死区闸门也要清干净，避免切换模式后残留上一模式的死区状态
         trackpadMoveGate.reset()
         trackpadScrollGate.reset()
         panGate.reset()
+        clearTrail()
+    }
+
+    /**
+     * 手势作废：左键若还按着（双击拖拽中）必须补发抬起，否则桌面鼠标会一直处于按住状态
+     * —— 表现是「点什么都在拖选」，只能重启 host 才能恢复。
+     */
+    private fun releaseTapDrag(why: String) {
+        if (tapDrag.reset() == TapDrag.Act.DRAG_UP) {
+            onMouse?.invoke(Protocol.MOUSE_LEFT_UP, 0f, 0f)
+            onDebug?.invoke("$why → 补发松开左键")
+        }
+        handler.removeCallbacks(singleTapAction)
     }
 
     /**
@@ -371,6 +428,8 @@ class PenCanvasView(context: Context) : View(context) {
         tpStartSpan = 0f
         trackpadMoveGate.reset()
         trackpadScrollGate.reset()
+        // 兜底复位时双击拖拽可能还按着左键，一并松开
+        releaseTapDrag("兜底复位")
         // onFingerState(false) 内部就会发 MOUSE_FINGER(0) 给 PC，不用再单独发一帧
         onFingerState?.invoke(false)
         onDebug?.invoke("手势状态兜底复位（手指已全部离开）")
@@ -440,6 +499,91 @@ class PenCanvasView(context: Context) : View(context) {
         // 两端只要求宽高比一致，所以笔迹落在桌面框里时形状不会变形。
         val h = borderPaint.strokeWidth / 2f
         c.drawRect(h, h, width - h, height - h, borderPaint)
+        // 手指轨迹画在最上层（跟手提示，抬手后自动淡出）
+        drawFingerTrail(c)
+    }
+
+    // ================= 手指轨迹 =================
+
+    /** 记录手指轨迹点（每根手指一条，按 pointerId 分开） */
+    private fun recordFingerTrail(e: MotionEvent) {
+        if (!showFingerTrail || trailLifeMs <= 0) return
+        val action = e.actionMasked
+        val now = android.os.SystemClock.uptimeMillis()
+        var added = false
+        for (i in 0 until e.pointerCount) {
+            val tt = e.getToolType(i)
+            if (tt != MotionEvent.TOOL_TYPE_FINGER && tt != MotionEvent.TOOL_TYPE_MOUSE) continue
+            // 抬起的那根已经离开触摸板了，别再画它
+            if (action == MotionEvent.ACTION_POINTER_UP && i == e.actionIndex) continue
+            val tr = trails.getOrPut(e.getPointerId(i)) { Trail() }
+            // 新手势落指：清掉这根手指上一次的残影，避免新旧两段被连成一条直线
+            if ((action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) &&
+                i == e.actionIndex
+            ) tr.clear()
+            val x = e.getX(i)
+            val y = e.getY(i)
+            if (tr.size > 0) {
+                val last = tr.size - 1
+                val dx = x - tr.xs[last]
+                val dy = y - tr.ys[last]
+                // 采样节流：位移和间隔都太小就不加点
+                if (dx * dx + dy * dy < trailMinStepPx * trailMinStepPx && now - tr.ts[last] < 12) continue
+            }
+            tr.xs.add(x); tr.ys.add(y); tr.ts.add(now)
+            tr.trim()
+            added = true
+        }
+        if (added) invalidate()
+    }
+
+    /**
+     * 画轨迹并按时间淡出。
+     * 只要还有没消失的点就 postInvalidateOnAnimation() 继续下一帧；点全部过期后自然停止，
+     * 静止时零刷新开销（不会常驻耗电）。
+     */
+    private fun drawFingerTrail(c: Canvas) {
+        if (trails.isEmpty()) return
+        val now = android.os.SystemClock.uptimeMillis()
+        val life = trailLifeMs.coerceAtLeast(1L).toFloat()
+        val base = if (trailColor != 0) trailColor
+        else if (workMode == Protocol.MODE_MOUSE) 0xFF7FE0FF.toInt()   // 深色触摸板 → 亮青
+        else 0xFF2E7DFF.toInt()                                        // 白底/截图 → 深蓝
+        val w0 = dpPx(3.5f)
+        var alive = false
+        val it = trails.entries.iterator()
+        while (it.hasNext()) {
+            val tr = it.next().value
+            // 淘汰过期点（ts 递增，从头删即可）
+            while (tr.size > 0 && now - tr.ts[0] > trailLifeMs) {
+                tr.ts.removeAt(0); tr.xs.removeAt(0); tr.ys.removeAt(0)
+            }
+            if (tr.size == 0) { it.remove(); continue }
+            alive = true
+            for (k in 1 until tr.size) {
+                val a = (1f - (now - tr.ts[k]) / life).coerceIn(0f, 1f)
+                trailPaint.color = base
+                trailPaint.alpha = (a * 205f).toInt()
+                trailPaint.strokeWidth = w0 * (0.3f + 0.7f * a)   // 越新越粗
+                c.drawLine(tr.xs[k - 1], tr.ys[k - 1], tr.xs[k], tr.ys[k], trailPaint)
+            }
+            // 指尖圆点：一眼看到"手指现在在哪"
+            val last = tr.size - 1
+            val a = (1f - (now - tr.ts[last]) / life).coerceIn(0f, 1f)
+            trailPaint.color = base
+            trailPaint.alpha = (a * 255f).toInt()
+            trailPaint.style = Paint.Style.FILL
+            c.drawCircle(tr.xs[last], tr.ys[last], w0 * 1.15f, trailPaint)
+            trailPaint.style = Paint.Style.STROKE
+        }
+        if (alive) postInvalidateOnAnimation()
+    }
+
+    /** 立刻清掉所有轨迹（切模式 / 复位时用） */
+    fun clearTrail() {
+        if (trails.isEmpty()) return
+        trails.clear()
+        invalidate()
     }
 
     /** 清空手机屏上全部笔迹，同时清掉笔画记录（撤销/清空与 PC 端同步用） */
@@ -504,6 +648,9 @@ class PenCanvasView(context: Context) : View(context) {
 
         // 每次手势落下的第一下：通知外部（用于打断无极滚动的惯性）
         if (contact && action == MotionEvent.ACTION_DOWN) onTouchDown?.invoke()
+
+        // 手指轨迹：两种模式都画（数位板拖框 / 触摸板移光标），只记手指不记笔
+        if (contact) recordFingerTrail(e)
 
         // 鼠标模式：手指要**整体**处理（多点触控必须拿到所有手指的坐标）
         if (contact && workMode == Protocol.MODE_MOUSE) {
@@ -734,10 +881,7 @@ class PenCanvasView(context: Context) : View(context) {
     private fun resetFinger() {
         panning = false
         fingerDown = false
-        tapCandidate = false
-        secondTap = false
-        lastTapAt = 0L
-        handler.removeCallbacks(singleTapAction)
+        releaseTapDrag("切模式")
     }
 
     /** 手势动作码 → 实际动作（配置分发） */
@@ -868,7 +1012,9 @@ class PenCanvasView(context: Context) : View(context) {
     /**
      * 触摸板手势（全部用手指，多点一起处理）：
      *   单指滑动   → 移动光标
-     *   单指点击   → 左键；单指双击 → 右键
+     *   单指点击   → 左键
+     *   单指双击   → 双击（左键 ×2，不是右键）
+     *   双击不松手 → 按住左键拖动 = 拖拽 / 框选文字（同 Windows 精密触摸板的 tap-drag）
      *   双指滑动   → 滚轮（上下=纵向滚动，左右=横向滚动）
      *   双指捏合   → 缩放（映射成 Ctrl+滚轮，绘图软件里就是缩放画布）
      *   双指点击   → 右键（同 Windows 精密触摸板）
@@ -929,6 +1075,11 @@ class PenCanvasView(context: Context) : View(context) {
                 // 手指一落上来，S Pen 就让位（PC 端收到这个信号后会松开笔的按键）
                 tpPenDown = false
                 onFingerState?.invoke(true)
+                // 这一下是「双击」的第二下吗？是就立刻撤掉挂起的单击 ——
+                // 否则会先点一下（取消选区 / 点进别的格子）再开始拖，用户会觉得位置偏了。
+                if (tapDrag.onDown(tpStartTime, cx, cy) == TapDrag.Act.CANCEL_PENDING) {
+                    handler.removeCallbacks(singleTapAction)
+                }
             }
 
             MotionEvent.ACTION_POINTER_DOWN -> {
@@ -944,6 +1095,8 @@ class PenCanvasView(context: Context) : View(context) {
                 tpLastSpan = span
                 tpStartSpan = span     // 进入多点手势：以当前跨度为捏合判定基准
                 tpPinchMode = false
+                // 多指介入 → 单指敲击 / 双击拖拽全部作废（左键若按着就松开）
+                releaseTapDrag("多指介入")
                 // 双指手势重新开始 → 滚动死区重新计算
                 trackpadScrollGate.reset()
             }
@@ -1035,6 +1188,13 @@ class PenCanvasView(context: Context) : View(context) {
                     tpLastCy = cy
                     tpLastSpan = span
                 } else {
+                    // 双击后按住并移动 → 先按下左键，后面的位移就成了「拖动 / 框选」。
+                    // 必须在发送位移**之前**按下：否则开头这一小段只是移动光标，选区起点会偏。
+                    if (tapDrag.onMove(cx, cy) == TapDrag.Act.DRAG_DOWN) {
+                        onMouse?.invoke(Protocol.MOUSE_LEFT_DOWN, 0f, 0f)
+                        onActionVisual?.invoke(Protocol.MOUSE_LEFT_CLICK)   // 左键按钮闪一下 = 已按住
+                        onDebug?.invoke("双击按住拖动 → 按下左键，开始选择")
+                    }
                     // 单指 → 移动光标（速度倍率可配置）
                     //
                     // 两个关键修正：
@@ -1094,37 +1254,46 @@ class PenCanvasView(context: Context) : View(context) {
                 tpFingerId = -1
                 tpPinchMode = false
                 onFingerState?.invoke(false)
-                val dur = android.os.SystemClock.uptimeMillis() - tpStartTime
+                val now = android.os.SystemClock.uptimeMillis()
+                val dur = now - tpStartTime
                 val isTap = tpMoved < tapSlopPx * 1.5f && dur < TAP_TIMEOUT_MS
-                when {
-                    isTap && tpMaxPointers >= 4 -> {
-                        if (g4Tap == 9) onSwitchMode?.invoke()
-                        onDebug?.invoke("四指点击 → ${actionName(g4Tap)}")
-                    }
-                    isTap && tpMaxPointers == 3 -> {
-                        dispatchAction(g3Tap, "三指点击")
-                    }
-                    isTap && tpMaxPointers == 2 -> {
-                        dispatchAction(g2Tap, "双指点击")
-                    }
-                    isTap && tpMaxPointers == 1 -> {
-                        // 单击=左键；快速双击=右键（与原有行为一致）
-                        val now = android.os.SystemClock.uptimeMillis()
-                        val nearInTime = now - lastTapAt <= DOUBLE_TAP_WINDOW_MS
-                        val nearInSpace = kotlin.math.hypot(
-                            (cx - lastTapX).toDouble(), (cy - lastTapY).toDouble()
-                        ) <= doubleTapSlopPx
-                        if (nearInTime && nearInSpace) {
-                            lastTapAt = 0L
-                            onMouse?.invoke(Protocol.MOUSE_RIGHT_CLICK, 0f, 0f)
-                            onDebug?.invoke("双击 → 鼠标右键")
-                        } else {
-                            lastTapAt = now
-                            lastTapX = cx
-                            lastTapY = cy
-                            handler.postDelayed(singleTapAction, DOUBLE_TAP_WINDOW_MS)
+                // 敲击判定要**无条件**走一遍：双击拖拽结束时左键还按着，
+                // 漏了这一句鼠标就永久处于"按住"状态（点什么都在框选），只能重启 host。
+                val act = tapDrag.onUp(now, cx, cy)
+
+                if (act == TapDrag.Act.DRAG_UP) {
+                    onMouse?.invoke(Protocol.MOUSE_LEFT_UP, 0f, 0f)
+                    onDebug?.invoke("拖拽结束 → 松开左键")
+                } else if (tpMaxPointers >= 2) {
+                    // 多指手势：单指敲击的判定结果一律作废，只按手指数分发配置好的动作
+                    releaseTapDrag("多指手势收尾")
+                    when {
+                        isTap && tpMaxPointers >= 4 -> {
+                            if (g4Tap == 9) onSwitchMode?.invoke()
+                            onDebug?.invoke("四指点击 → ${actionName(g4Tap)}")
                         }
+                        isTap && tpMaxPointers == 3 -> dispatchAction(g3Tap, "三指点击")
+                        isTap && tpMaxPointers == 2 -> dispatchAction(g2Tap, "双指点击")
                     }
+                } else if (isTap && tpMaxPointers == 1) {
+                    // 单指敲击：单击 → 左键；双击 → 左键双击（**不再映射成右键**）
+                    when (act) {
+                        TapDrag.Act.DOUBLE_CLICK -> {
+                            onMouse?.invoke(Protocol.MOUSE_LEFT_DOUBLE, 0f, 0f)
+                            onActionVisual?.invoke(Protocol.MOUSE_LEFT_DOUBLE)
+                            onDebug?.invoke("双击 → 鼠标双击（左键 ×2）")
+                        }
+                        TapDrag.Act.SINGLE_CLICK -> {
+                            onMouse?.invoke(Protocol.MOUSE_LEFT_CLICK, 0f, 0f)
+                            onDebug?.invoke("单击 → 鼠标左键（按住太久）")
+                        }
+                        TapDrag.Act.PENDING_SINGLE ->
+                            handler.postDelayed(singleTapAction, DOUBLE_TAP_WINDOW_MS)
+                        else -> {}
+                    }
+                } else {
+                    // 长按 / 划动：不是敲击，作废掉敲击判定，别让下一次点击被凑成双击
+                    tapDrag.reset()
                 }
                 tpMaxPointers = 0
             }
@@ -1147,7 +1316,9 @@ class PenCanvasView(context: Context) : View(context) {
     companion object {
         private const val TAG = "SpenTablet"
         private const val TAP_TIMEOUT_MS = 320        // 按太久就不算敲击
-        private const val DOUBLE_TAP_WINDOW_MS = 280L // 双击窗口；同时也是单击的延迟
+        private const val DOUBLE_TAP_WINDOW_MS = 300L // 双击窗口；同时也是单击的延迟（与 Android 的 doubleTapTimeout 一致）
+        /** 单根手指轨迹最多保留的点数（按 60Hz 算 ≈ 7 秒，够用且不涨内存） */
+        private const val TRAIL_MAX_POINTS = 400
         /** 操作框最小缩放（与 PC 端 MappingConfig.MIN_SCALE 保持一致） */
         private const val MIN_FRAME = 0.05f
         /** 三指左右滑的触发阈值(px) */

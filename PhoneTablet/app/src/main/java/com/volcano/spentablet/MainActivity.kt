@@ -577,6 +577,23 @@ class MainActivity : Activity() {
         }
         details.addView(colorRow)
 
+        // ---------- 手指轨迹（跟手提示）----------
+        details.addView(tpTitle("手指轨迹（抬手后自动淡出）"))
+        details.addView(Button(this).apply {
+            fun refresh() { text = if (canvas.showFingerTrail) "轨迹：显示" else "轨迹：隐藏" }
+            refresh()
+            setOnClickListener {
+                canvas.showFingerTrail = !canvas.showFingerTrail
+                prefs.edit().putBoolean("trailOn", canvas.showFingerTrail).apply()
+                if (!canvas.showFingerTrail) canvas.clearTrail()
+                refresh()
+            }
+        })
+        details.addView(minusPlus("轨迹停留 ms", { canvas.trailLifeMs.toFloat() }, {
+            canvas.trailLifeMs = it.toLong()
+            prefs.edit().putInt("trailLife", it.toInt()).apply()
+        }, 100f, 200f, 3000f, "%s  %.0f"))
+
         // ---------- 版本信息与更新 ----------
         verText = TextView(this).apply {
             textSize = 12f
@@ -820,7 +837,9 @@ class MainActivity : Activity() {
             · <b>自动发现失败</b>（路由器禁用组播等）：点齿轮 → 填 IP → 连接，<br>
               　或用「扫描网段找 PC」；USB 数据线 + adb 转发时填 127.0.0.1<br><br>
             <b>【触摸板模式（默认，手指=触摸板）】</b><br>
-            · 单指滑动 = 移动光标；单击 = 左键；双击 = 右键<br>
+            · 单指滑动 = 移动光标；<b>单击 = 左键；双击 = 双击</b>（<b>不再是右键</b>）<br>
+            · <b>双击后不松手再拖</b> = 按住左键拖动 → 拖文件、框选文字（和笔记本触摸板一样）<br>
+            · 右键请用<b>双指点击</b>或底部浮动面板的「右键」<br>
             · 右侧滚轮条滑动 = 滚动，<b>双击滚轮条</b>切换普通滚动 / 无极滚动（动量可在设置里调）<br>
             · 底部<b>可拖动浮动面板</b> = 激光笔 + 左 / 中 / 右键（挡住画面就按住拖走，位置会记住）<br>
             · 点「激光笔」开/关：<b>桌面指针就变成激光笔</b>，走过的地方留下半透明荧光痕迹；长按换颜色（黄/绿/粉/蓝）<br>
@@ -1217,7 +1236,7 @@ class MainActivity : Activity() {
      */
     private fun flashActionVisual(code: Int) {
         val btn = when (code) {
-            Protocol.MOUSE_LEFT_CLICK -> tLeftBtn
+            Protocol.MOUSE_LEFT_CLICK, Protocol.MOUSE_LEFT_DOUBLE -> tLeftBtn
             Protocol.MOUSE_MIDDLE_CLICK -> tMidBtn
             Protocol.MOUSE_RIGHT_CLICK -> tRightBtn
             else -> null
@@ -1599,6 +1618,9 @@ class MainActivity : Activity() {
         canvas.pinchDeadZoneRel = prefs.getFloat("tpPinchDzRel", 0.15f)
         canvas.pinchDeadZoneDp = prefs.getFloat("tpPinchDzDp", 10f)
         canvas.trackpadColor = prefs.getInt("tpColor", 0xFF20242B.toInt())
+        // 手指轨迹：跟手提示，抬手后自动淡出
+        canvas.showFingerTrail = prefs.getBoolean("trailOn", true)
+        canvas.trailLifeMs = prefs.getInt("trailLife", 800).toLong()
         canvas.g2Swipe = prefs.getInt("g2Swipe", 1)
         canvas.g2Pinch = prefs.getInt("g2Pinch", 2)
         canvas.g2Tap = prefs.getInt("g2Tap", 4)

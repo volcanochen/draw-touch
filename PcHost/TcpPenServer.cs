@@ -56,6 +56,8 @@ public sealed class TcpPenServer : IDisposable
     private const int MOUSE_TASK_PREV = 14;   // 任务反向切换 Alt+Shift+Tab
     /// <summary>手指是否正落在触摸板上（1=在，0=离开）。用来让笔在手指操作期间让位。</summary>
     private const int MOUSE_FINGER = 15;
+    /// <summary>左键双击：一次 SendInput 内发 下-上-下-上，避免被拆成两次单击。</summary>
+    private const int MOUSE_LEFT_DOUBLE = 16;
 
     /// <summary>
     /// 手指划过整个书写区高度 = 滚动多少**像素**。
@@ -707,6 +709,11 @@ public sealed class TcpPenServer : IDisposable
             case MOUSE_LEFT_CLICK:
                 MouseControl.LeftClick();
                 AppLog.Info("[Mouse] 单击 → 左键");
+                break;
+            case MOUSE_LEFT_DOUBLE:
+                // 单指双击 → 双击（手机上「双击」不再映射成右键，右键走双指点击）
+                MouseControl.DoubleClick();
+                AppLog.Info("[Mouse] 双击 → 左键 ×2");
                 break;
             case MOUSE_LEFT_DOWN:
                 // 按住不放（触摸板模式下：按住「左」键按钮 + 移动手指 = 拖拽 / 涂荧光）
