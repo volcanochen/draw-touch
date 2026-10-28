@@ -58,6 +58,28 @@ internal static class Program
             return;
         }
 
+        // --elev <进程名>：打印该进程所有实例的提权状态
+        if (args.Length >= 2 && args[0] == "--elev")
+        {
+            var procs = System.Diagnostics.Process.GetProcessesByName(args[1]);
+            if (procs.Length == 0) { Console.WriteLine($"{args[1]}: 没有运行"); return; }
+            foreach (var pr in procs)
+                Console.WriteLine($"{args[1]} pid={pr.Id} 提权={Elev((uint)pr.Id)}");
+            return;
+        }
+
+        // --focus <标题片段>：把匹配的窗口切到前台（验证「某个程序前台时能不能注入」）
+        if (args.Length >= 2 && args[0] == "--focus")
+        {
+            IntPtr h = FindByTitle(args[1]);
+            if (h == IntPtr.Zero) { Console.WriteLine($"没找到标题含「{args[1]}」的窗口"); return; }
+            ShowWindow(h, 9 /*SW_RESTORE*/);
+            bool ok = SetForegroundWindow(h);
+            Thread.Sleep(350);
+            Console.WriteLine($"置前台={ok} 当前前台=\"{TitleOf(GetForegroundWindow())}\"");
+            return;
+        }
+
         bool dpiOk = SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2);
         Out($"[DPI] 设为 per-monitor-v2 : {dpiOk}");
         Out();
@@ -157,6 +179,37 @@ internal static class Program
     // 注意：横纵必须用各自的 origin/size。第一版这里把 Y 也按宽度归一会算出假位移。
     private static int NormX(int v) => Norm(v, GetSystemMetrics(76), GetSystemMetrics(78));
     private static int NormY(int v) => Norm(v, GetSystemMetrics(77), GetSystemMetrics(79));
+
+    // ---- 找窗口 / 切前台 ----
+    private delegate bool EnumProc(IntPtr h, IntPtr l);
+
+    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc cb, IntPtr l);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr h);
+
+    private static string TitleOf(IntPtr h)
+    {
+        var sb = new StringBuilder(512);
+        GetWindowTextW(h, sb, sb.Capacity);
+        return sb.ToString();
+    }
+
+    private static IntPtr FindByTitle(string needle)
+    {
+        IntPtr found = IntPtr.Zero;
+        EnumWindows((h, _) =>
+        {
+            if (!IsWindowVisible(h)) return true;
+            if (TitleOf(h).Contains(needle, StringComparison.OrdinalIgnoreCase))
+            {
+                found = h;
+                return false;
+            }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
 
     private static int Norm(int v, int origin, int size)
     {

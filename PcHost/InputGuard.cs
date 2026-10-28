@@ -84,10 +84,14 @@ internal static class InputGuard
         {
             _lastLogAt = now;
             string fg = DescribeForeground(out bool fgElevated, out string fgName);
-            string advice = fgElevated
-                ? $"前台程序「{fgName}」以**管理员权限**运行，而本程序是普通权限 → " +
-                  "Windows 的 UIPI 会静默丢弃我们的鼠标注入。请右键托盘图标 →「以管理员身份重启」。"
-                : "未能确定原因（前台程序权限并不高于本进程），请把本段日志发给开发者。";
+            string advice =
+                fgElevated && !_elevated
+                    ? $"前台程序「{fgName}」以**管理员权限**运行，而本程序是普通权限 → " +
+                      "Windows 的 UIPI 会静默丢弃我们的鼠标注入。请右键托盘图标 →「以管理员身份重启」。"
+                    : _elevated
+                        ? $"本程序已是管理员权限，前台「{fgName}」权限并不高于本程序 → 不是 UIPI 拦截，" +
+                          "更可能是光标贴到了屏幕/多屏边界（这一帧本来就推不动）。请附本段日志反馈。"
+                        : "未能确定原因（前台程序权限并不高于本进程），请把本段日志发给开发者。";
             LastReason = $"{reason}；前台：{fg}；{advice}";
             AppLog.Warn($"[Guard] 指针注入失效：{LastReason}");
         }
@@ -98,7 +102,7 @@ internal static class InputGuard
             _lastNoticeAt = now;
             string fg2 = DescribeForeground(out bool fgElevated2, out string fgName2);
             System.Threading.Interlocked.Exchange(ref _notice,
-                fgElevated2
+                fgElevated2 && !_elevated
                     ? $"「{fgName2}」以管理员权限运行，普通权限的主机无法控制鼠标。\n" +
                       "右键托盘图标 →「以管理员身份重启」即可彻底解决。"
                     : "指针注入失效，详见日志。");

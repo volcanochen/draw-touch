@@ -128,6 +128,10 @@ internal static class MouseControl
         int tx = (int)Math.Clamp((long)p.X + dx, cfg.VirtualX, cfg.VirtualX + cfg.VirtualW - 1);
         int ty = (int)Math.Clamp((long)p.Y + dy, cfg.VirtualY, cfg.VirtualY + cfg.VirtualH - 1);
 
+        // 光标已经贴在屏幕边界、这一帧本来就推不动：**不能**据此判定注入失败。
+        // （以前没这一条，指针停在屏幕角上时会误报「注入被权限拦截」。）
+        if (tx == p.X && ty == p.Y) return (0, 0);
+
         Send(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESKTOP,
             Norm(tx, cfg.VirtualX, cfg.VirtualW), Norm(ty, cfg.VirtualY, cfg.VirtualH));
 
