@@ -247,9 +247,67 @@ class PenCanvasView(context: Context) : View(context) {
      * 平时画到 [bitmap] 上是增量（每事件 O(1)），记录点列只为了**撤销/清空**时能
      * 在手机屏上把对应笔迹一并去掉（与 PC 端叠加层行为一致）。
      */
-    private class Stroke(val color: Int) { val pts = mutableListOf<Float>() }
+    private class Stroke(val color: Int) {
+        /** 点序列（x,y 交替存放） */
+        val pts = mutableListOf<Float>()
+        /** 每个点的落笔时刻 —— 画笔模式按它淡出 */
+        val ts = mutableListOf<Long>()
+        val size: Int get() = ts.size
+    }
     private val strokes = ArrayList<Stroke>()
     private var curStroke: Stroke? = null
+
+    /**
+     * 画笔模式（笔迹只画在手机上、不进桌面）：开关由 MainActivity 设置。
+     * 这个模式下笔画**按时间淡出消失** —— 手机当草稿纸用，不留一堆残迹，
+     * 也正因如此「撤销 / 清空」就没意义了（笔画本来就会自己没），按钮会一并隐藏。
+     */
+    var localInk: Boolean = false
+    /** 画笔模式下笔迹从画出到完全消失的时长(ms)；0 = 不淡出（一直留着） */
+    var localInkFadeMs: Long = 6000L
+
+    /** 当前是否走「笔迹淡出」路径（画笔模式 + 淡出时长 > 0） */
+    private val fadingInk: Boolean get() = localInk && localInkFadeMs > 0
+
+    /**
+     * 画笔模式的笔迹：不写进位图层，直接按时间戳逐段画，**每一段按自己的年龄变淡**，
+     * 整笔过期就丢掉。手机当草稿纸用 —— 写完不用管，过一会儿自己干净。
+     *
+     * 只要还有笔画活着就 postInvalidateOnAnimation() 接着画下一帧，
+     * 全部消失后自然停止重绘（静止时零开销）。
+     */
+    private fun drawFadingInk(c: Canvas) {
+        val now = android.os.SystemClock.uptimeMillis()
+        val life = localInkFadeMs.coerceAtLeast(1L).toFloat()
+        var alive = false
+        var i = 0
+        while (i < strokes.size) {
+            val s = strokes[i]
+            val n = s.size
+            // 整笔都过期（连最后一个点都超龄）→ 丢掉，不用再画
+            if (n == 0 || now - s.ts[n - 1] > localInkFadeMs) {
+                strokes.removeAt(i)
+                continue
+            }
+            alive = true
+            paint.color = s.color
+            if (n == 1) {
+                val a = (1f - (now - s.ts[0]) / life).coerceIn(0f, 1f)
+                paint.alpha = (a * 255f).toInt()
+                c.drawPoint(s.pts[0], s.pts[1], paint)
+            } else {
+                for (k in 1 until n) {
+                    val a = (1f - (now - s.ts[k]) / life).coerceIn(0f, 1f)
+                    paint.alpha = (a * 255f).toInt()
+                    c.drawLine(s.pts[(k - 1) * 2], s.pts[(k - 1) * 2 + 1],
+                        s.pts[k * 2], s.pts[k * 2 + 1], paint)
+                }
+            }
+            i++
+        }
+        paint.alpha = 255
+        if (alive) postInvalidateOnAnimation()
+    }
 
     private val paint = Paint().apply {
         color = Color.BLACK
@@ -499,6 +557,8 @@ class PenCanvasView(context: Context) : View(context) {
         // 两端只要求宽高比一致，所以笔迹落在桌面框里时形状不会变形。
         val h = borderPaint.strokeWidth / 2f
         c.drawRect(h, h, width - h, height - h, borderPaint)
+        // 画笔模式：笔迹会自己淡掉，这里按时间逐段画（不写进位图层）
+        if (fadingInk) drawFadingInk(c)
         // 手指轨迹画在最上层（跟手提示，抬手后自动淡出）
         drawFingerTrail(c)
     }
@@ -753,15 +813,20 @@ class PenCanvasView(context: Context) : View(context) {
                             paint.color = strokeColor
                             lastX = x; lastY = y; hasLast = true
                             val s = Stroke(strokeColor)
-                            s.pts.add(x); s.pts.add(y)
+                            val now = android.os.SystemClock.uptimeMillis()
+                            s.pts.add(x); s.pts.add(y); s.ts.add(now)
                             strokes.add(s)
                             curStroke = s
-                            canvas?.drawPoint(x, y, paint)
+                            // 画笔模式（会淡出）不写进位图层：图层是"永久"的，写进去就没法淡了
+                            if (!fadingInk) canvas?.drawPoint(x, y, paint)
                         }
                         Protocol.TYPE_PEN_MOVE -> {
                             if (hasLast) {
-                                canvas?.drawLine(lastX, lastY, x, y, paint)
-                                curStroke?.let { it.pts.add(x); it.pts.add(y) }
+                                if (!fadingInk) canvas?.drawLine(lastX, lastY, x, y, paint)
+                                curStroke?.let {
+                                    it.pts.add(x); it.pts.add(y)
+                                    it.ts.add(android.os.SystemClock.uptimeMillis())
+                                }
                                 lastX = x; lastY = y
                             }
                         }

@@ -168,5 +168,7 @@ class ProtocolTest {
         assertEquals(0x05, Protocol.TYPE_HELLO)
         assertEquals(0x07, Protocol.TYPE_MOUSE)
         assertEquals(0x10, Protocol.TYPE_HL)
+        assertEquals(0x11, Protocol.TYPE_SAVE_REQ)
+        assertEquals(0x12, Protocol.TYPE_SAVE)
     }
 }

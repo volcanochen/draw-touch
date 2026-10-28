@@ -577,6 +577,36 @@ class MainActivity : Activity() {
         }
         details.addView(colorRow)
 
+        // ---------- 截屏（存到电脑 / 手机相册）----------
+        details.addView(tpTitle("截屏（范围框内容 + 桌面笔迹 → PNG）"))
+        details.addView(Button(this).apply {
+            fun refresh() { text = if (saveFull) "范围：整块屏幕" else "范围：桌面范围框" }
+            refresh()
+            setOnClickListener {
+                saveFull = !saveFull
+                prefs.edit().putBoolean("saveFull", saveFull).apply()
+                refresh()
+            }
+        })
+        details.addView(Button(this).apply {
+            fun refresh() { text = if (saveToPc) "存到电脑：开" else "存到电脑：关" }
+            refresh()
+            setOnClickListener {
+                saveToPc = !saveToPc
+                prefs.edit().putBoolean("saveToPc", saveToPc).apply()
+                refresh()
+            }
+        })
+        details.addView(Button(this).apply {
+            fun refresh() { text = if (saveToPhone) "存到手机相册：开" else "存到手机相册：关" }
+            refresh()
+            setOnClickListener {
+                saveToPhone = !saveToPhone
+                prefs.edit().putBoolean("saveToPhone", saveToPhone).apply()
+                refresh()
+            }
+        })
+
         // ---------- 手指轨迹（跟手提示）----------
         details.addView(tpTitle("手指轨迹（抬手后自动淡出）"))
         details.addView(Button(this).apply {
@@ -854,8 +884,8 @@ class MainActivity : Activity() {
             · 点底部<b>备注</b>按钮切到<b>「画笔」模式</b>：笔迹只画在手机上，桌面不受影响；再点一下切回「备注」<br>
             · 单指滑动 = 移动范围框；双指捏合 = 缩放范围框<br>
             · 框可以拖到任意显示器（含多屏 / 多桌面）<br>
-            · 底部浮动圆钮：<b>备注 / 画笔</b>（切模式）/ <b>撤销</b>（点击手机+桌面各撤一笔、长按两边一起清空）/ <b>$shotBtnLabel</b>（捕获：桌面框内容设为手机画布背景，可继续在上面画；再点完成恢复）<br>
-            · 浮动面板 = <b>备注 / 撤销 / 捕获</b> + 7 色板，<b>按住可整体拖动</b>（挡住画面就拖走，位置会记住）<br>
+            · 底部浮动圆钮：<b>备注 / 画笔</b>（切模式）/ <b>撤销</b>（点击手机+桌面各撤一笔、长按两边一起清空）/ <b>$shotBtnLabel</b>（预览：桌面框内容设为手机画布背景，可继续在上面画；再点「完成」恢复）<br>
+            · 浮动面板 = <b>备注 / 撤销 / 预览</b> + 7 色板，<b>按住可整体拖动</b>（挡住画面就拖走，位置会记住）<br>
             · 换色只影响之后画的笔；<b>笔悬停在按钮上会弹出该按钮的说明</b><br><br>
             <b>【屏幕方向】</b>循环按钮：陀螺仪全向 / 横屏双朝向 / 竖屏双朝向<br><br>
             <b>【PC 端下载】</b>（点击打开）：<br>
@@ -1309,7 +1339,7 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(10) }
         }
-        // —— 第一行：备注 / 撤销 / 捕获 ——
+        // —— 第一行：备注 / 撤销 / 预览 ——
         val btnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         fun toolBtn(label: String): Button = Button(this).apply {
             text = label
@@ -1322,7 +1352,7 @@ class MainActivity : Activity() {
             setOnClickListener { flashButton(this); toggleNote(!noteOn) }
         }
         noteBtn = nb
-        val undoBtn = toolBtn("撤销").apply {
+        undoBtn = toolBtn("撤销").apply {
             setOnClickListener {
                 flashButton(this)
                 canvas.undoStroke()                              // 手机屏同步撤一笔
@@ -1334,25 +1364,30 @@ class MainActivity : Activity() {
                 true
             }
         }
-        val sb = toolBtn("捕获").apply {
+        shotBtn = toolBtn("预览").apply {
             setOnClickListener { flashButton(this); onShotButton() }
         }
-        shotBtn = sb
+        saveBtn = toolBtn("截屏").apply {
+            setOnClickListener { flashButton(this); onSaveButton() }
+        }
         btnRow.addView(noteBtn)
         btnRow.addView(undoBtn)
         btnRow.addView(shotBtn)
-        // 悬浮说明（文案随当前状态现取：备注/画笔、捕获/完成）
+        btnRow.addView(saveBtn)
+        // 悬浮说明（文案随当前状态现取：备注/画笔、预览/完成）
         hoverTip.attach(noteBtn) {
             if (noteOn) "「备注」模式：笔迹直接画在 PC 桌面上。点击切到「画笔」"
             else "「画笔」模式：笔迹只画在手机上。点击切到「备注」"
         }
         hoverTip.attach(undoBtn) { "撤销一笔（长按 = 清空手机与桌面全部笔迹）" }
         hoverTip.attach(shotBtn) {
-            if (shotCaptured) "「完成」：退出捕获，清掉背景并解除范围框锁定"
-            else "「捕获」：把桌面范围框的内容设为手机画布背景"
+            if (shotCaptured) "「完成」：退出预览，清掉背景并解除范围框锁定"
+            else "「预览」：把桌面范围框的内容设为手机画布背景"
         }
+        hoverTip.attach(saveBtn) { saveBtnTip() }
         // 启动时按当前状态定文案（默认数位板会开备注，但可能是切的「画笔」）
         updateNoteBtn()
+        updateInkModeButtons()
         // —— 第二行：7 个笔迹颜色块 ——
         val colorRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1521,7 +1556,9 @@ class MainActivity : Activity() {
 
     private lateinit var noteBtn: Button
     private lateinit var shotBtn: Button
-    /** 截图当前处于「已捕获」状态（按钮变成清空） */
+    private lateinit var undoBtn: Button
+    private lateinit var saveBtn: Button
+    /** 截图当前处于「已预览」状态（按钮变成「完成」） */
     private var shotCaptured = false
 
     /** 桌面备注开关：开启后 S Pen 直接在 PC 桌面固定位置画笔迹（不随范围框移动） */
@@ -1529,6 +1566,11 @@ class MainActivity : Activity() {
         noteOn = on
         prefs.edit().putBoolean("noteOn", on).apply()   // 记住选择，切模式/重启后沿用
         updateNoteBtn()          // 未连接时也要让按钮文案跟上，否则界面和实际状态对不上
+        // 画笔模式 = 笔迹只画在手机上且会自己淡掉；两种模式用的图层不同，
+        // 切换时必须清干净，否则会同时出现"永久笔迹"和"淡出笔迹"两份。
+        canvas.localInk = !on
+        canvas.clear()
+        updateInkModeButtons()
         if (!::net.isInitialized) return
         net.send(Protocol.buildNote(if (on) Protocol.NOTE_ON else Protocol.NOTE_OFF))
         if (on) net.send(Protocol.buildNote(Protocol.NOTE_COLOR, noteColorIdx.toFloat()))
@@ -1546,7 +1588,7 @@ class MainActivity : Activity() {
         noteBtn.text = if (noteOn) "备注" else "画笔"
     }
 
-    /** 截图按钮状态机：捕获 → 完成 → 捕获…（捕获期间锁定范围框） */
+    /** 截图按钮状态机：预览 → 完成 → 预览…（预览期间锁定范围框） */
     private fun onShotButton() {
         if (!shotCaptured) {
             if (::net.isInitialized) net.send(Protocol.buildShotReq())
@@ -1572,18 +1614,93 @@ class MainActivity : Activity() {
         DebugLog.write("[shot] 已设为背景 ${bmp.width}x${bmp.height}")
     }
 
-    /** 清除截图背景（按钮变回「捕获」，同时解除范围框锁定） */
+    /** 清除截图背景（按钮变回「预览」，同时解除范围框锁定） */
     private fun closeShot() {
         canvas.shotBackground = null
         if (shotCaptured) {
             canvas.frameLocked = false
             shotCaptured = false
-            shotBtn.text = "捕获"
+            shotBtn.text = "预览"
         }
     }
 
-    /** 指南/其它文案里描述捕获按钮的当前名称 */
-    private val shotBtnLabel: String get() = if (shotCaptured) "完成" else "捕获"
+    /** 指南/其它文案里描述预览按钮的当前名称（「捕获」改叫「预览」，状态机照旧） */
+    private val shotBtnLabel: String get() = if (shotCaptured) "完成" else "预览"
+
+    private fun toast(msg: String) =
+        android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show()
+
+    // ================= 截屏（存到电脑 / 手机相册）=================
+    /** 截屏范围：false=桌面范围框那块，true=整块虚拟屏幕 */
+    private var saveFull = false
+    /** 截屏是否存到 PC（目录在 PC 端配置里） */
+    private var saveToPc = true
+    /** 截屏是否传回手机存进相册 */
+    private var saveToPhone = true
+
+    private fun saveBtnTip(): String {
+        val where = mutableListOf<String>()
+        if (saveToPc) where.add("电脑")
+        if (saveToPhone) where.add("手机相册")
+        val scope = if (saveFull) "整块屏幕" else "桌面范围框"
+        return if (where.isEmpty()) "「截屏」：当前没选任何保存位置（去设置里开一个）"
+        else "「截屏」：抓 $scope + 桌面笔迹 → 存到 ${where.joinToString(" 和 ")}"
+    }
+
+    private fun onSaveButton() {
+        if (!::net.isInitialized) { toast("还没连上电脑"); return }
+        if (!saveToPc && !saveToPhone) { toast("设置里至少要选一个保存位置"); return }
+        net.send(Protocol.buildSaveReq(saveFull, saveToPc, saveToPhone))
+        DebugLog.write("[save] 请求截屏 full=$saveFull pc=$saveToPc phone=$saveToPhone")
+        toast("已请求截屏…")
+    }
+
+    /** PC 合成好的 PNG → 写进系统相册（Pictures/SpenTablet），在图库里能直接看到 */
+    private fun saveShotToGallery(png: ByteArray) {
+        Thread {
+            try {
+                val name = "SpenTablet_" + java.text.SimpleDateFormat(
+                    "yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date()) + ".png"
+                val resolver = contentResolver
+                val values = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, name)
+                    put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/png")
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                        // Android 10+：分区存储，用 RELATIVE_PATH 指定相册目录
+                        put(android.provider.MediaStore.Images.Media.RELATIVE_PATH,
+                            android.os.Environment.DIRECTORY_PICTURES + "/SpenTablet")
+                        put(android.provider.MediaStore.Images.Media.IS_PENDING, 1)
+                    }
+                }
+                val uri = resolver.insert(
+                    android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                if (uri == null) { toast("保存到相册失败：无法创建文件"); return@Thread }
+                resolver.openOutputStream(uri)?.use { it.write(png) }
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                    values.clear()
+                    values.put(android.provider.MediaStore.Images.Media.IS_PENDING, 0)
+                    resolver.update(uri, values, null, null)
+                }
+                runOnUiThread { toast("已存到相册：$name") }
+                DebugLog.write("[save] 已存相册 $name ${png.size}B")
+            } catch (e: Exception) {
+                DebugLog.write("[save] 存相册失败 ${e.message}")
+                runOnUiThread { toast("保存到相册失败：${e.message}") }
+            }
+        }.start()
+    }
+
+    /**
+     * 画笔模式（笔迹只画在手机上、会自己淡掉）不需要「撤销」和「预览」：
+     * 笔画本来就会消失，撤销没意义；预览是为了对着桌面画，画笔模式不画到桌面。
+     */
+    private fun updateInkModeButtons() {
+        if (!::undoBtn.isInitialized || !::shotBtn.isInitialized) return
+        val v = if (noteOn) View.VISIBLE else View.GONE
+        undoBtn.visibility = v
+        shotBtn.visibility = v
+        if (!noteOn && shotCaptured) closeShot()   // 退出画笔模式时别留着锁定的范围框
+    }
 
     // ================= 触摸板配置（速度/滚动/手势/颜色）=================
     /** 无极滚动：抬手后按动量继续滚（双击右侧滚轮条切换） */
@@ -1615,8 +1732,11 @@ class MainActivity : Activity() {
         canvas.scrollScale = prefs.getFloat("tpScroll", 5.0f)
         // 手势死区：0 = 关闭
         canvas.moveDeadZoneDp = prefs.getFloat("tpMoveDz", 8f)
-        canvas.pinchDeadZoneRel = prefs.getFloat("tpPinchDzRel", 0.15f)
+        canvas.pinchDeadZoneRel = prefs.getFloat("tpPinchDzRel", 0.20f)
         canvas.pinchDeadZoneDp = prefs.getFloat("tpPinchDzDp", 10f)
+        // ---- 默认值来源：2026-10-29 从用户手机上读出的实际配置快照 ----
+        // 之前这些值是"估"的（三指滑=前进后退、四指=切模式），用户实际配置完全不是那套，
+        // 每次重装/换设备都要重新点一遍。现在默认值直接对齐他在用的配置。
         canvas.trackpadColor = prefs.getInt("tpColor", 0xFF20242B.toInt())
         // 手指轨迹：跟手提示，抬手后自动淡出
         canvas.showFingerTrail = prefs.getBoolean("trailOn", true)
@@ -1625,17 +1745,22 @@ class MainActivity : Activity() {
         canvas.g2Pinch = prefs.getInt("g2Pinch", 2)
         canvas.g2Tap = prefs.getInt("g2Tap", 4)
         canvas.g3Tap = prefs.getInt("g3Tap", 5)
-        canvas.g3L = prefs.getInt("g3L", 7)
-        canvas.g3R = prefs.getInt("g3R", 6)
-        canvas.g3U = prefs.getInt("g3U", 5)
-        canvas.g3D = prefs.getInt("g3D", 3)
-        canvas.g4Tap = prefs.getInt("g4Tap", 9)
+        // 三指：右滑=下一任务 / 左滑=上一任务 / 上滑=音量+ / 下滑=音量-
+        canvas.g3L = prefs.getInt("g3L", 13)
+        canvas.g3R = prefs.getInt("g3R", 14)
+        canvas.g3U = prefs.getInt("g3U", 10)
+        canvas.g3D = prefs.getInt("g3D", 11)
+        // 四指：全部默认为「无」（用户在用的一套里四指没绑任何动作）
+        canvas.g4Tap = prefs.getInt("g4Tap", 0)
         canvas.g4L = prefs.getInt("g4L", 9)
         canvas.g4R = prefs.getInt("g4R", 0)
-        canvas.g4U = prefs.getInt("g4U", 10)
-        canvas.g4D = prefs.getInt("g4D", 11)
+        canvas.g4U = prefs.getInt("g4U", 0)
+        canvas.g4D = prefs.getInt("g4D", 0)
         wheelInertia = prefs.getBoolean("wheelInertia", false)
-        wheelMomentum = prefs.getFloat("wheelMomentum", 1.0f)
+        wheelMomentum = prefs.getFloat("wheelMomentum", 3.0f)
+        saveFull = prefs.getBoolean("saveFull", false)
+        saveToPc = prefs.getBoolean("saveToPc", true)
+        saveToPhone = prefs.getBoolean("saveToPhone", true)
         highlighterOn = prefs.getBoolean("hlOn", false)
         highlighterColor = prefs.getInt("hlColor", 0).coerceIn(0, hlColors.size - 1)
     }
@@ -1794,6 +1919,7 @@ class MainActivity : Activity() {
         n.onInfo = { text -> parsePcInfo(text) }
         // 接收 PC 下发的截图（PNG）→ 设为书写区背景
         n.onShot = { png -> runOnUiThread { showShot(png) } }
+        n.onSave = { png -> runOnUiThread { saveShotToGallery(png) } }
     }
 
     private fun restartNet() {

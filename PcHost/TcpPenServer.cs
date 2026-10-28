@@ -37,6 +37,10 @@ public sealed class TcpPenServer : IDisposable
     private const byte TYPE_SHOT = 0x0F;
     /// <summary>激光笔帧：payload[0]=开关(0/1)，payload[1]=颜色索引</summary>
     private const byte TYPE_HL = 0x10;
+    /// <summary>截屏保存请求（上行）：payload[0]=范围(0=范围框 1=整块虚拟屏幕)，[1]=存 PC，[2]=传手机存相册</summary>
+    private const byte TYPE_SAVE_REQ = 0x11;
+    /// <summary>截屏数据（下行分片，格式同 TYPE_SHOT）</summary>
+    private const byte TYPE_SAVE = 0x12;
 
     // 鼠标帧 kind（与手机端 Protocol.MOUSE_* 一致）
     private const int MOUSE_MOVE = 0;
@@ -327,6 +331,9 @@ public sealed class TcpPenServer : IDisposable
                         case TYPE_SHOT_REQ:
                             HandleShotReq(ns);
                             break;
+                        case TYPE_SAVE_REQ:
+                            HandleSaveReq(payload, ns);
+                            break;
                         case TYPE_PEN_DOWN:
                         case TYPE_PEN_MOVE:
                         case TYPE_PEN_UP:
@@ -602,6 +609,104 @@ public sealed class TcpPenServer : IDisposable
                 if (n > 0) Array.Copy(png, off, payload, 6, n);
                 var frame = new byte[6 + payload.Length];
                 frame[0] = MAGIC1; frame[1] = MAGIC2; frame[2] = 0x01; frame[3] = TYPE_SHOT;
+                frame[4] = (byte)(payload.Length & 0xFF);
+                frame[5] = (byte)((payload.Length >> 8) & 0xFF);
+                Array.Copy(payload, 0, frame, 6, payload.Length);
+                ns.Write(frame, 0, frame.Length);
+                if (n == 0) break;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 截屏保存：抓「桌面范围框」或「整块虚拟屏幕」，PNG 存到 PC 和/或下发手机存相册。
+    ///
+    /// 为什么不再自己把笔迹合成一遍：CopyFromScreen 抓的是**已经合成好的屏幕图像**，
+    /// 桌面笔迹层本来就在屏幕上，抓下来就是"所见即所得"，再画一遍只会让笔画重叠变粗。
+    /// </summary>
+    private void HandleSaveReq(byte[] p, Stream ns)
+    {
+        bool full = p.Length >= 4 && BitConverter.ToSingle(p, 0) >= 1f;
+        bool toPc = p.Length >= 8 && BitConverter.ToSingle(p, 4) >= 1f;
+        bool toPhone = p.Length >= 12 && BitConverter.ToSingle(p, 8) >= 1f;
+        if (!toPc && !toPhone) { AppLog.Info("[Save] 两个保存位置都没选 → 忽略"); return; }
+
+        try
+        {
+            int x, y, w, h;
+            if (full)
+            {
+                var v = System.Windows.Forms.SystemInformation.VirtualScreen;
+                x = v.Left; y = v.Top; w = Math.Max(1, v.Width); h = Math.Max(1, v.Height);
+            }
+            else
+            {
+                var r = _cfg.GetActiveRect();
+                x = r.x; y = r.y; w = Math.Max(1, r.w); h = Math.Max(1, r.h);
+            }
+
+            byte[] png;
+            // 与 HandleShotReq 同理：GDI+ 必须和叠加层的绘制串行化
+            lock (NoteOverlay.GdiLock)
+            {
+                using var bmp = new System.Drawing.Bitmap(w, h);
+                using (var g = System.Drawing.Graphics.FromImage(bmp))
+                {
+                    g.CopyFromScreen(x, y, 0, 0, new System.Drawing.Size(w, h));
+                }
+                using var ms = new MemoryStream();
+                bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+                png = ms.ToArray();
+            }
+
+            string name = "SpenTablet_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".png";
+            if (toPc)
+            {
+                string dir = _cfg.ShotSaveDir;
+                if (string.IsNullOrWhiteSpace(dir))
+                    dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "SpenTablet");
+                try
+                {
+                    Directory.CreateDirectory(dir);
+                    string file = Path.Combine(dir, name);
+                    File.WriteAllBytes(file, png);
+                    AppLog.Info($"[Save] 已存到电脑：{file}（{png.Length}B）");
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Warn($"[Save] 存到电脑失败：{ex.Message}");
+                }
+            }
+            if (toPhone)
+            {
+                SendSave(ns, png);
+                AppLog.Info($"[Save] 已下发手机存相册：{name} ({w}×{h}, {png.Length}B)");
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"[Save] 截屏失败：{ex.Message}");
+        }
+    }
+
+    /// <summary>分片下发截屏（与 SendShot 同格式，只是帧类型不同，手机端据此存相册而不是当背景）。</summary>
+    private void SendSave(Stream ns, byte[] png)
+    {
+        const int CHUNK = 60000;
+        int total = png.Length;
+        int seq = 0;
+        lock (ns)
+        {
+            for (int off = 0; ; off += CHUNK, seq++)
+            {
+                int n = Math.Min(CHUNK, total - off);
+                if (n < 0) n = 0;
+                var payload = new byte[6 + n];
+                BitConverter.GetBytes(total).CopyTo(payload, 0);
+                BitConverter.GetBytes((ushort)seq).CopyTo(payload, 4);
+                if (n > 0) Array.Copy(png, off, payload, 6, n);
+                var frame = new byte[6 + payload.Length];
+                frame[0] = MAGIC1; frame[1] = MAGIC2; frame[2] = 0x01; frame[3] = TYPE_SAVE;
                 frame[4] = (byte)(payload.Length & 0xFF);
                 frame[5] = (byte)((payload.Length >> 8) & 0xFF);
                 Array.Copy(payload, 0, frame, 6, payload.Length);

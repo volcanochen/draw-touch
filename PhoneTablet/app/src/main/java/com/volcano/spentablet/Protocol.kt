@@ -48,6 +48,10 @@ object Protocol {
     const val TYPE_SHOT: Int = 0x0F
     /** 激光笔帧：触摸板模式下把桌面指针变成激光笔。payload[0]=开关(0/1)，payload[1]=颜色索引 */
     const val TYPE_HL: Int = 0x10
+    /** 截屏保存请求（上行）：payload[0]=范围(0=桌面范围框 1=整块虚拟屏幕)，[1]=存到 PC，[2]=存到手机相册 */
+    const val TYPE_SAVE_REQ: Int = 0x11
+    /** 截屏数据（下行分片，与 TYPE_SHOT 同格式）：totalLen(u32) + seq(u16) + data */
+    const val TYPE_SAVE: Int = 0x12
 
     // ---- 备注动作 ----
     const val NOTE_OFF: Int = 0
@@ -261,6 +265,26 @@ object Protocol {
         buf.put(TYPE_SHOT_REQ.toByte())
         buf.putShort(PAYLOAD_LEN.toShort())
         for (i in 0 until PAYLOAD_LEN) buf.put(0)
+        return buf.array()
+    }
+
+    /**
+     * 截屏保存请求：把「桌面范围框内容 + 桌面笔迹」合成一张 PNG 存起来。
+     * [full]      true = 抓整块虚拟屏幕（多显示器全包），false = 只抓桌面范围框
+     * [savePc]    存到 PC（目录在 PC 端配置里）
+     * [savePhone] 传回手机存进相册
+     */
+    fun buildSaveReq(full: Boolean, savePc: Boolean, savePhone: Boolean): ByteArray {
+        val buf = ByteBuffer.allocate(6 + PAYLOAD_LEN).order(ByteOrder.LITTLE_ENDIAN)
+        buf.put(MAGIC1)
+        buf.put(MAGIC2)
+        buf.put(VERSION)
+        buf.put(TYPE_SAVE_REQ.toByte())
+        buf.putShort(PAYLOAD_LEN.toShort())
+        buf.putFloat(if (full) 1f else 0f)
+        buf.putFloat(if (savePc) 1f else 0f)
+        buf.putFloat(if (savePhone) 1f else 0f)
+        for (i in 3 until PAYLOAD_LEN / 4) buf.putFloat(0f)
         return buf.array()
     }
 

@@ -54,7 +54,10 @@ class NetClient(
     var onInfo: ((String) -> Unit)? = null
     /** 收到 PC 下发的完整截图（PNG 字节） */
     var onShot: ((ByteArray) -> Unit)? = null
+    /** 截屏保存：PC 合成好的 PNG 分片（格式同 TYPE_SHOT），存进相册用 */
+    var onSave: ((ByteArray) -> Unit)? = null
     private val shotBuf = java.io.ByteArrayOutputStream()
+    private val saveBuf = java.io.ByteArrayOutputStream()
 
     /** 设置变更后主动重发握手帧，通知 PC 采用新的比例模式（无需断开重连）。 */
     fun sendHelloNow() {
@@ -250,6 +253,25 @@ class NetClient(
                                     shotBuf.reset()
                                     Log.i(TAG, "NET 收到截图 ${png.size} 字节")
                                     onShot?.invoke(png)
+                                }
+                            }
+                        }
+                    }
+                    Protocol.TYPE_SAVE -> {
+                        // 与 TYPE_SHOT 完全相同的分片格式，只是用途不同（存相册而不是当背景）
+                        if (payload.size >= 6) {
+                            val bb = java.nio.ByteBuffer.wrap(payload).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                            val total = bb.int
+                            val seq = bb.short.toInt() and 0xFFFF
+                            val data = payload.copyOfRange(6, payload.size)
+                            if (seq == 0) saveBuf.reset()
+                            if (total > 0 && saveBuf.size() + data.size <= total + 65536) {
+                                saveBuf.write(data)
+                                if (saveBuf.size() >= total) {
+                                    val png = saveBuf.toByteArray()
+                                    saveBuf.reset()
+                                    Log.i(TAG, "NET 收到截屏（待保存）${png.size} 字节")
+                                    onSave?.invoke(png)
                                 }
                             }
                         }

@@ -2,24 +2,30 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 
 namespace SpenTabletHost;
 
 /// <summary>
-/// 桌面笔迹叠加层（屏幕备注）：一个透明、置顶、鼠标穿透的窗口，
+/// 桌面笔迹叠加层（屏幕备注）：一个**真透明**、置顶、鼠标穿透的窗口，
 /// 把手机 S Pen 的笔迹画在桌面上。
 ///
 /// 坐标处理：笔坐标是相对操作框归一的，AddPoint 时按**当时的范围框**换算成
 /// 绝对屏幕坐标并固定存下来 —— 之后框再缩放/移动，已有笔迹都留在原处、不被拉伸。
 ///
 /// 颜色：**每一笔**各自记录落笔时的颜色（换色只影响之后的新笔画，已画的笔不变色）。
-/// 颜色索引由手机端左侧色板选择后下发。
 ///
-/// 覆盖整块虚拟屏幕（多屏也能画）。在自己的 STA 线程上跑消息循环，
-/// 外部通过 Post 异步调用（AddPoint 高频写入不阻塞 TCP 线程）。
-/// 笔迹层本身是鼠标穿透的（不接收点击，也不打扰当前应用）。
+/// ── 为什么改成分层窗口（WS_EX_LAYERED）──────────────────────────
+/// 以前是「黑色背景 + TransparencyKey=黑色」。问题：笔画用**抗锯齿**画，
+/// 边缘像素是「笔色和黑色」的混合（比如半透明红 = 暗红），只有纯黑才会被抠掉，
+/// 于是每一笔外面都糊着一圈**黑边** —— 在浅色桌面上非常扎眼。
+/// 现在改成 32bpp 预乘 alpha 的分层窗口：边缘是真正的半透明，没有黑边。
+///
+/// 性能：整块虚拟屏（3072×1920）每帧全量推送太慢，所以维护一张持久化画布，
+/// 只把**脏区那几行**拷进 DIB 再 UpdateLayeredWindow（与激光笔同一套做法）。
 /// </summary>
 public sealed class NoteOverlay : IDisposable
 {
@@ -48,6 +54,9 @@ public sealed class NoteOverlay : IDisposable
         Color.FromArgb(250, 250, 250),  // 6 白
     };
 
+    /// <summary>笔宽（与手机端 strokeWidth=4 观感对齐）</summary>
+    private const float PenWidth = 3.5f;
+
     /// <summary>一笔笔迹：落笔时的颜色 + 一串绝对屏幕坐标点</summary>
     private sealed class Stroke
     {
@@ -58,18 +67,103 @@ public sealed class NoteOverlay : IDisposable
 
     private sealed class OverlayForm : Form
     {
-        // 每一笔 = 一串**绝对屏幕坐标**（落笔时按当时的范围框换算并固定下来，
-        // 之后框缩放/移动都不再影响它 —— 笔迹留在桌面原处）
+        // ---- 分层窗口 API ----
+        private const int ULW_ALPHA = 0x00000002;
+        private const byte AC_SRC_OVER = 0x00;
+        private const byte AC_SRC_ALPHA = 0x01;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT { public int x; public int y; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SIZE { public int cx; public int cy; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BLENDFUNCTION
+        {
+            public byte BlendOp;
+            public byte BlendFlags;
+            public byte SourceConstantAlpha;
+            public byte AlphaFormat;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BITMAPINFOHEADER
+        {
+            public uint biSize;
+            public int biWidth;
+            public int biHeight;
+            public ushort biPlanes;
+            public ushort biBitCount;
+            public uint biCompression;
+            public uint biSizeImage;
+            public int biXPelsPerMeter;
+            public int biYPelsPerMeter;
+            public uint biClrUsed;
+            public uint biClrImportant;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BITMAPINFO
+        {
+            public BITMAPINFOHEADER bmiHeader;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 256)]
+            public uint[] bmiColors;
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, ref POINT pptDst,
+            ref SIZE psize, IntPtr hdcSrc, ref POINT pptSrc, int crKey, ref BLENDFUNCTION pblend, int dwFlags);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetDC(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+        [DllImport("gdi32.dll")]
+        private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+
+        [DllImport("gdi32.dll")]
+        private static extern bool DeleteDC(IntPtr hdc);
+
+        [DllImport("gdi32.dll")]
+        private static extern IntPtr CreateDIBSection(IntPtr hdc, ref BITMAPINFO pbmi, uint usage,
+            out IntPtr ppvBits, IntPtr hSection, uint offset);
+
+        [DllImport("gdi32.dll")]
+        private static extern IntPtr SelectObject(IntPtr hdc, IntPtr hObj);
+
+        [DllImport("gdi32.dll")]
+        private static extern bool DeleteObject(IntPtr hObj);
+
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr")]
+        private static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll", EntryPoint = "SetWindowLongPtr")]
+        private static extern IntPtr SetWindowLongPtr64(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+        private static IntPtr GetWindowLongPtr(IntPtr h, int i) =>
+            IntPtr.Size == 8 ? GetWindowLongPtr64(h, i) : GetWindowLongPtr64(h, i);
+
+        private static IntPtr SetWindowLongPtr(IntPtr h, int i, IntPtr v) =>
+            IntPtr.Size == 8 ? SetWindowLongPtr64(h, i, v) : SetWindowLongPtr64(h, i, v);
+
+        // ---- 笔迹数据 ----
         public readonly List<Stroke> Strokes = new();
-        public readonly Pen Pen = new(Presets[0], 3.5f)
+        public readonly Pen Pen = new(Presets[0], PenWidth)
         { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round };
-        /// <summary>单点笔迹的实心圆（不直接用 Pen.Brush：那个属性每次取都会新建 GDI 笔刷，画多了会句柄泄漏）</summary>
         private readonly SolidBrush DotBrush = new(Presets[0]);
-        /// <summary>当前笔迹颜色（新起一笔时采用；已有笔画的颜色不变）</summary>
         public Color CurrentColor = Presets[0];
 
         /// <summary>当前桌面范围框（虚拟屏幕坐标），仅用于把归一化笔坐标换算成绝对坐标。</summary>
         public int Rx, Ry, Rw = 1920, Rh = 1080;
+
+        // ---- 分层画布 ----
+        private Bitmap? _canvas;
+        private Graphics? _cg;
+        private IntPtr _dibHandle, _dibBits, _memDc;
+        private int _dibW, _dibH;
 
         public OverlayForm()
         {
@@ -78,14 +172,14 @@ public sealed class NoteOverlay : IDisposable
             // 覆盖整块虚拟屏幕：范围框可能被拖到第二块显示器上
             var v = SystemInformation.VirtualScreen;
             Bounds = new Rectangle(v.Left, v.Top, v.Width, v.Height);
-            BackColor = Color.Black;
-            TransparencyKey = Color.Black;      // 全透明，只显示笔迹
             ShowInTaskbar = false;
             TopMost = true;
-            DoubleBuffered = true;
+            // 分层窗口不靠 BackColor / TransparencyKey 抠图，内容全由 UpdateLayeredWindow 推送
+            BackColor = Color.Black;
+            EnsureCanvas();
         }
 
-        /// <summary>鼠标穿透 + 不抢焦点（点桌面时窗口本身无响应）</summary>
+        /// <summary>鼠标穿透 + 不抢焦点 + 分层（点桌面时窗口本身无响应）</summary>
         protected override CreateParams CreateParams
         {
             get
@@ -93,13 +187,45 @@ public sealed class NoteOverlay : IDisposable
                 const int WS_EX_TRANSPARENT = 0x20;
                 const int WS_EX_NOACTIVATE = 0x08000000;
                 const int WS_EX_TOOLWINDOW = 0x80;
+                const int WS_EX_LAYERED = 0x80000;
                 var cp = base.CreateParams;
-                cp.ExStyle |= WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+                cp.ExStyle |= WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED;
                 return cp;
             }
         }
 
-        public void VisibleOn() { TopMost = true; Show(); }
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            // WinForms 有时会重置扩展样式，这里再确认一次（激光笔踩过同一个坑）
+            const int GWL_EXSTYLE = -20;
+            const int WS_EX_LAYERED = 0x80000;
+            var ex = GetWindowLongPtr(Handle, GWL_EXSTYLE).ToInt64();
+            if ((ex & WS_EX_LAYERED) == 0)
+                SetWindowLongPtr(Handle, GWL_EXSTYLE, new IntPtr(ex | WS_EX_LAYERED));
+            // 可见后重新推一次：分层窗口隐藏期间推送的内容会被丢掉
+            PushAll();
+        }
+
+        /// <summary>什么都不画：分层窗口的内容全部来自 UpdateLayeredWindow。</summary>
+        protected override void OnPaint(PaintEventArgs e) { }
+
+        protected override void OnPaintBackground(PaintEventArgs e) { }
+
+        private void EnsureCanvas()
+        {
+            int w = Math.Max(1, Width), h = Math.Max(1, Height);
+            if (_canvas != null && _canvas.Width == w && _canvas.Height == h) return;
+            _cg?.Dispose();
+            _canvas?.Dispose();
+            _canvas = new Bitmap(w, h, PixelFormat.Format32bppPArgb);
+            _cg = Graphics.FromImage(_canvas);
+            _cg.SmoothingMode = SmoothingMode.AntiAlias;
+            _cg.CompositingMode = CompositingMode.SourceOver;
+            ReleaseDib();
+        }
+
+        public void VisibleOn() { TopMost = true; Show(); PushAll(); }
         public void VisibleOff() => Hide();
 
         public void SetRect(int x, int y, int w, int h)
@@ -108,103 +234,232 @@ public sealed class NoteOverlay : IDisposable
             // 已有笔迹存的是绝对坐标，框变化不需要重绘（笔迹留在原处）
         }
 
-        /// <summary>
-        /// 跟随虚拟屏幕尺寸（插拔显示器 / 改分辨率后调用）。
-        /// 笔迹存的是绝对坐标，窗口挪动或变大小都不影响已画的笔迹。
-        /// </summary>
+        /// <summary>跟随虚拟屏幕尺寸（插拔显示器 / 改分辨率后调用）。</summary>
         public void ResizeToVirtualScreen()
         {
             var v = SystemInformation.VirtualScreen;
             if (v.Width <= 0 || v.Height <= 0) return;
             if (Bounds == new Rectangle(v.Left, v.Top, v.Width, v.Height)) return;
             Bounds = new Rectangle(v.Left, v.Top, v.Width, v.Height);
+            EnsureCanvas();
+            RedrawAll();
         }
 
-        /// <summary>切换「之后新笔画」的颜色；已画好的笔画保持各自的颜色。</summary>
-        public void SetColor(Color c)
-        {
-            CurrentColor = c;
-            Pen.Color = c;
-        }
+        public void SetColor(Color c) { CurrentColor = c; Pen.Color = c; }
+
+        /// <summary>窗口原点可能是负数（虚拟屏幕左/上边界）：屏幕坐标 → 画布坐标要减掉原点。</summary>
+        private PointF ToCanvas(PointF scr) => new(scr.X - Left, scr.Y - Top);
 
         public void AddPoint(float nx, float ny, PenState st)
         {
-            // 归一化笔坐标 → 绝对屏幕坐标（按落笔时刻的范围框换算一次，之后固定不变）
+            if (_cg == null || _canvas == null) return;
             var pt = new PointF(Rx + nx * Rw, Ry + ny * Rh);
-            switch (st)
+            var cp = ToCanvas(pt);
+            try
             {
-                case PenState.Down:
-                    Strokes.Add(new Stroke(CurrentColor) { Points = { pt } });
-                    break;
-                case PenState.Move:
-                    if (Strokes.Count > 0) Strokes[^1].Points.Add(pt);
-                    break;
-                case PenState.Up:
-                    if (Strokes.Count > 0 && Strokes[^1].Points.Count == 1) Strokes[^1].Points.Add(pt); // 单点笔迹也可见
-                    Invalidate();
-                    return;
-                default:
-                    return; // Hover 忽略
+                switch (st)
+                {
+                    case PenState.Down:
+                        Strokes.Add(new Stroke(CurrentColor) { Points = { pt } });
+                        DotBrush.Color = CurrentColor;
+                        _cg.FillEllipse(DotBrush, cp.X - PenWidth / 2 - 1, cp.Y - PenWidth / 2 - 1,
+                            PenWidth + 2, PenWidth + 2);
+                        Push(DirtyAround(cp, cp));
+                        break;
+                    case PenState.Move:
+                        if (Strokes.Count > 0)
+                        {
+                            var last = Strokes[^1];
+                            var prev = last.Points.Count > 0 ? ToCanvas(last.Points[^1]) : cp;
+                            last.Points.Add(pt);
+                            Pen.Color = last.Color;
+                            _cg.DrawLine(Pen, prev, cp);
+                            Push(DirtyAround(prev, cp));
+                        }
+                        break;
+                    case PenState.Up:
+                        if (Strokes.Count > 0 && Strokes[^1].Points.Count == 1)
+                        {
+                            // 单点笔迹也要看得见
+                            var s = Strokes[^1];
+                            var p = ToCanvas(s.Points[0]);
+                            DotBrush.Color = s.Color;
+                            _cg.FillEllipse(DotBrush, p.X - PenWidth / 2 - 1, p.Y - PenWidth / 2 - 1,
+                                PenWidth + 2, PenWidth + 2);
+                            Push(DirtyAround(p, p));
+                        }
+                        break;
+                }
             }
-            Invalidate();
+            catch (Exception ex)
+            {
+                AppLog.Error($"[NoteOverlay] 画笔迹异常：{ex.GetType().Name} {ex.Message}");
+            }
         }
 
         public void UndoLast()
         {
-            if (Strokes.Count > 0) { Strokes.RemoveAt(Strokes.Count - 1); Invalidate(); }
+            if (Strokes.Count > 0) { Strokes.RemoveAt(Strokes.Count - 1); RedrawAll(); }
         }
 
         public void ClearAll()
         {
             Strokes.Clear();
-            Invalidate();
+            RedrawAll();
         }
 
-        protected override void OnPaint(PaintEventArgs e)
+        /// <summary>脏区 = 两点包围盒 + 笔宽留白（笔帽是圆的，端点要往外让一点）</summary>
+        private Rectangle DirtyAround(PointF a, PointF b)
         {
-            base.OnPaint(e);
-            // 绘制异常绝不能抛出去：这里是消息循环线程，抛出去就是整个进程消失
+            int pad = (int)Math.Ceiling(PenWidth) + 3;
+            int x0 = (int)Math.Floor(Math.Min(a.X, b.X)) - pad;
+            int y0 = (int)Math.Floor(Math.Min(a.Y, b.Y)) - pad;
+            int x1 = (int)Math.Ceiling(Math.Max(a.X, b.X)) + pad;
+            int y1 = (int)Math.Ceiling(Math.Max(a.Y, b.Y)) + pad;
+            return new Rectangle(x0, y0, x1 - x0, y1 - y0);
+        }
+
+        /// <summary>清空画布并按当前笔画重画一遍（撤销 / 清空 / 换屏后调用）。</summary>
+        private void RedrawAll()
+        {
+            if (_cg == null || _canvas == null) { PushAll(); return; }
+            _cg.Clear(Color.Transparent);
+            foreach (var s in Strokes)
+            {
+                if (s.Points.Count == 0) continue;
+                if (s.Points.Count == 1)
+                {
+                    var p = ToCanvas(s.Points[0]);
+                    DotBrush.Color = s.Color;
+                    _cg.FillEllipse(DotBrush, p.X - PenWidth / 2 - 1, p.Y - PenWidth / 2 - 1,
+                        PenWidth + 2, PenWidth + 2);
+                }
+                else
+                {
+                    var pts = new PointF[s.Points.Count];
+                    for (int i = 0; i < pts.Length; i++) pts[i] = ToCanvas(s.Points[i]);
+                    Pen.Color = s.Color;
+                    _cg.DrawLines(Pen, pts);
+                }
+            }
+            Pen.Color = CurrentColor;
+            PushAll();
+        }
+
+        private void PushAll() => Push(new Rectangle(0, 0, Math.Max(1, Width), Math.Max(1, Height)));
+
+        /// <summary>把脏区那几行拷进 DIB，再 UpdateLayeredWindow 推上屏幕。</summary>
+        private void Push(Rectangle dirty)
+        {
+            var canvas = _canvas;
+            if (canvas == null || !IsHandleCreated || !Visible) return;
+            dirty = Rectangle.Intersect(dirty, new Rectangle(0, 0, canvas.Width, canvas.Height));
+            if (dirty.Width <= 0 || dirty.Height <= 0) return;
             try
             {
-                lock (GdiLock)
+                EnsureDib(canvas.Width, canvas.Height);
+                if (_dibHandle == IntPtr.Zero || _memDc == IntPtr.Zero) return;
+
+                // 只拷脏区这几行，整屏全拷太费带宽
+                var data = canvas.LockBits(new Rectangle(0, 0, canvas.Width, canvas.Height),
+                    ImageLockMode.ReadOnly, PixelFormat.Format32bppPArgb);
+                int rowBytes = dirty.Width * 4;
+                var row = new byte[rowBytes];
+                for (int y = dirty.Y; y < dirty.Y + dirty.Height; y++)
                 {
-                    e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-                    // 窗口原点可能是负数（虚拟屏幕左/上边界），绘制前换算到客户区坐标
-                    float ox = -Left;
-                    float oy = -Top;
-                    // 每笔用**自己的颜色**画（换色不会把已画的笔一起改掉）
-                    foreach (var s in Strokes)
-                    {
-                        if (s.Points.Count == 0) continue;
-                        Pen.Color = s.Color;
-                        if (s.Points.Count == 1)
-                        {
-                            var p = s.Points[0];
-                            DotBrush.Color = s.Color;
-                            e.Graphics.FillEllipse(DotBrush, ox + p.X - 2.5f, oy + p.Y - 2.5f, 5, 5);
-                        }
-                        else
-                        {
-                            var pts = new PointF[s.Points.Count];
-                            for (int i = 0; i < s.Points.Count; i++)
-                                pts[i] = new PointF(ox + s.Points[i].X, oy + s.Points[i].Y);
-                            e.Graphics.DrawLines(Pen, pts);
-                        }
-                    }
-                    Pen.Color = CurrentColor;
+                    IntPtr src = (IntPtr)((long)data.Scan0 + (long)y * data.Stride + (long)dirty.X * 4);
+                    IntPtr dst = (IntPtr)((long)_dibBits + (long)y * canvas.Width * 4 + (long)dirty.X * 4);
+                    Marshal.Copy(src, row, 0, rowBytes);
+                    Marshal.Copy(row, 0, dst, rowBytes);
                 }
+                canvas.UnlockBits(data);
+
+                IntPtr screenDc = GetDC(IntPtr.Zero);
+                var vs = SystemInformation.VirtualScreen;
+                var ptSrc = new POINT { x = dirty.X, y = dirty.Y };
+                var ptDst = new POINT { x = vs.Left + dirty.X, y = vs.Top + dirty.Y };
+                var sz = new SIZE { cx = dirty.Width, cy = dirty.Height };
+                var blend = new BLENDFUNCTION
+                {
+                    BlendOp = AC_SRC_OVER,
+                    BlendFlags = 0,
+                    SourceConstantAlpha = 255,
+                    AlphaFormat = AC_SRC_ALPHA
+                };
+                if (!UpdateLayeredWindow(Handle, screenDc, ref ptDst, ref sz, _memDc, ref ptSrc, 0, ref blend, ULW_ALPHA))
+                {
+                    int err = Marshal.GetLastWin32Error();
+                    // 第一次失败很常见（窗口刚建），只在反复失败时记日志，避免刷屏
+                    if (err != 0 && ++_pushErr % 20 == 1)
+                        AppLog.Warn($"[NoteOverlay] UpdateLayeredWindow 失败 err={err} 区域={dirty}");
+                }
+                ReleaseDC(IntPtr.Zero, screenDc);
             }
             catch (Exception ex)
             {
-                // 偶发一次就记一次，但不让它炸进程
-                AppLog.Error($"[NoteOverlay] 绘制异常：{ex.GetType().Name} {ex.Message}\n{ex.StackTrace}");
+                AppLog.Error($"[NoteOverlay] 推送画面失败：{ex.GetType().Name} {ex.Message}");
             }
+        }
+
+        private int _pushErr;
+
+        /// <summary>建立（并复用）一块与画布同尺寸的 32bpp DIB，作为分层窗口的源位图。</summary>
+        private void EnsureDib(int w, int h)
+        {
+            if (_dibHandle != IntPtr.Zero && _dibW == w && _dibH == h) return;
+            ReleaseDib();
+            IntPtr screenDc = GetDC(IntPtr.Zero);
+            var bi = new BITMAPINFO
+            {
+                bmiHeader = new BITMAPINFOHEADER
+                {
+                    biSize = (uint)Marshal.SizeOf<BITMAPINFOHEADER>(),
+                    biWidth = w,
+                    biHeight = -h,          // 负数 = 自上而下，和画布一致
+                    biPlanes = 1,
+                    biBitCount = 32,
+                    biCompression = 0      // BI_RGB
+                },
+                bmiColors = new uint[256]
+            };
+            _dibHandle = CreateDIBSection(screenDc, ref bi, 0, out _dibBits, IntPtr.Zero, 0);
+            ReleaseDC(IntPtr.Zero, screenDc);
+            if (_dibHandle == IntPtr.Zero)
+            {
+                AppLog.Error("[NoteOverlay] CreateDIBSection 失败，桌面笔迹无法显示");
+                return;
+            }
+            _memDc = CreateCompatibleDC(IntPtr.Zero);
+            SelectObject(_memDc, _dibHandle);
+            _dibW = w;
+            _dibH = h;
+            if (_dibBits != IntPtr.Zero)
+            {
+                var zero = new byte[Math.Min(w * 4 * 64, 1 << 20)];
+                for (int off = 0; off < w * h * 4; off += zero.Length)
+                {
+                    int n = Math.Min(zero.Length, w * h * 4 - off);
+                    Marshal.Copy(zero, 0, (IntPtr)((long)_dibBits + off), n);
+                }
+            }
+            AppLog.Info($"[NoteOverlay] 分层画布就绪 {w}×{h}（真透明，无黑边）");
+        }
+
+        private void ReleaseDib()
+        {
+            if (_memDc != IntPtr.Zero) { DeleteDC(_memDc); _memDc = IntPtr.Zero; }
+            if (_dibHandle != IntPtr.Zero) { DeleteObject(_dibHandle); _dibHandle = IntPtr.Zero; }
+            _dibBits = IntPtr.Zero;
+            _dibW = _dibH = 0;
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             Pen.Dispose();
             DotBrush.Dispose();
+            _cg?.Dispose();
+            _canvas?.Dispose();
+            ReleaseDib();
             base.OnFormClosed(e);
         }
     }
@@ -250,9 +505,7 @@ public sealed class NoteOverlay : IDisposable
     }
 
     public void Show() => Post(f => f.VisibleOn());
-
     public void Hide() => Post(f => f.VisibleOff());
-
     public void Undo() => Post(f => f.UndoLast());
     public void Clear() => Post(f => f.ClearAll());
     public void AddPoint(float nx, float ny, PenState st) => Post(f => f.AddPoint(nx, ny, st));

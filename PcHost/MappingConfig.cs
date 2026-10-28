@@ -56,6 +56,12 @@ public sealed class MappingConfig
     /// </summary>
     public string PinchMode { get; set; } = "Touch";
 
+    /// <summary>
+    /// 截屏保存目录（手机点「截屏」时 PNG 存到哪）。
+    /// 留空 = 默认「图片库\SpenTablet」；目录不存在会自动创建。
+    /// </summary>
+    public string ShotSaveDir { get; set; } = "";
+
     /// <summary>当前是否为鼠标模式。</summary>
     public bool IsMouseMode => WorkMode.Equals("Mouse", StringComparison.OrdinalIgnoreCase);
 
