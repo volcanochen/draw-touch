@@ -23,6 +23,9 @@ import time
 import argparse
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from desk_notify import notify  # noqa: E402  测试期间的桌面横幅（开始 / 结束）
+
 MAGIC = b"SP"
 VER = 1
 
@@ -30,7 +33,7 @@ T_HELLO, T_PAN, T_MOUSE, T_MODE, T_ZOOM, T_RESET = 0x05, 0x06, 0x07, 0x08, 0x09,
 T_INFO, T_NOTE, T_SHOT_REQ, T_SHOT, T_HL = 0x0C, 0x0D, 0x0E, 0x0F, 0x10
 
 M_MOVE, M_LEFT_DOWN, M_LEFT_UP, M_LEFT_CLICK, M_RIGHT_CLICK = 0, 1, 2, 3, 4
-M_SCROLL, M_ZOOM, M_MIDDLE, M_FINGER = 5, 6, 7, 15
+M_SCROLL, M_ZOOM, M_MIDDLE, M_FINGER, M_LEFT_DOUBLE = 5, 6, 7, 15, 16
 
 passed, failed = [], []
 
@@ -180,9 +183,21 @@ def main():
         s.sendall(frame(T_MOUSE, f32(M_MOVE, 0.05, 0.03)))
         time.sleep(0.01)
     check("MOUSE 移动 → 日志确认", log_contains(log, "[Mouse] 移动", mark))
+
+    # 光标连推 25 帧会贴到屏幕**右下角**，而右下角正好是任务栏的「显示桌面」热点 ——
+    # 在那儿点一下会把用户所有窗口最小化。所以点之前先往上挪一截，离开底边再点。
+    for _ in range(8):
+        s.sendall(frame(T_MOUSE, f32(M_MOVE, 0.0, -0.05)))
+        time.sleep(0.01)
+
     mark = log_size(log)
     s.sendall(frame(T_MOUSE, f32(M_LEFT_CLICK, 0, 0)))
     check("MOUSE 左键点击 → 日志确认", log_contains(log, "单击 → 左键", mark))
+
+    # ---- 4b. 左键双击（码 16）：必须走「一次 SendInput 发 下-上-下-上」的专门实现 ----
+    mark = log_size(log)
+    s.sendall(frame(T_MOUSE, f32(M_LEFT_DOUBLE, 0, 0)))
+    check("MOUSE_LEFT_DOUBLE → 双击帧被处理", log_contains(log, "双击 → 左键 ×2", mark))
 
     # ---- 5. 捏合缩放：触摸板缩放 API 或 Ctrl+滚轮 二选一，必须有一条生效 ----
     # （部分 Windows 版本触摸注入被系统禁用/损坏 → 熔断后走 Ctrl+滚轮，同样算通过）
@@ -285,8 +300,10 @@ def main():
     print(f"\n== 结果：{len(passed)} 通过, {len(failed)} 失败 ==")
     if failed:
         print("失败项: " + ", ".join(failed))
+        notify(f"协议冒烟结束：{len(failed)} 项失败，桌面已交还", 8, "fail")
         sys.exit(1)
     print("ALL GREEN")
+    notify(f"协议冒烟结束：{len(passed)} 项全通过，桌面已交还", 8, "ok")
 
 
 if __name__ == "__main__":

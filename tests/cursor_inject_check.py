@@ -25,6 +25,9 @@ T_HELLO, T_MOUSE, T_MODE = 0x05, 0x07, 0x08
 M_MOVE = 0
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+from desk_notify import notify  # noqa: E402  测试期间的桌面横幅（开始 / 结束）
+
 PROBE = ROOT / "CursorProbe" / "bin" / "Release" / "net8.0-windows" / "CursorProbe.dll"
 DOTNET = Path(r"C:\Users\adminlocal\.dotnet\dotnet.exe")
 
@@ -70,6 +73,9 @@ def main():
         print(f"缺探针：{PROBE}\n先执行 (cd tests/CursorProbe && dotnet build -c Release)")
         return 2
 
+    # 这个测试会真的把系统光标推走 —— 按用户的规矩：不先问他，但让他看得见
+    notify(f"光标注入测试开始：会把鼠标移动 ({a.dx},{a.dy})", 12, "busy")
+
     s = socket.create_connection((a.host, a.port), timeout=5)
     # 握手：否则 host 不会走完整初始化（映射/范围框都依赖 HELLO）
     s.sendall(frame(T_HELLO, f32(1494, 614, 2.433, 1.0)))
@@ -99,12 +105,15 @@ def main():
     # 精确位移请看 host 日志里 SPEN_DEBUG_MOVE=1 时的 [MoveBy] p→目标→实际。
     if abs(dx_got) <= 2 and abs(dy_got) <= 2:
         print("FAIL 光标完全没动 → 注入被拦截（前台程序的权限高于 host）")
+        notify("光标注入测试：失败（光标没动）", 8, "fail")
         return 1
     same_dir = (a.dx == 0 or dx_got * a.dx > 0) and (a.dy == 0 or dy_got * a.dy > 0)
     if not same_dir:
         print("FAIL 光标动了，但方向相反 → 坐标映射有问题")
+        notify("光标注入测试：失败（方向相反）", 8, "fail")
         return 1
     print(f"PASS 光标确实被 host 移动了（探针坐标系缩放比 ≈ {dx_got / max(1, abs(a.dx)):.2f}）")
+    notify(f"光标注入测试完成，桌面已交还（光标现在在 {x1},{y1}）", 8, "ok")
     return 0
 
 

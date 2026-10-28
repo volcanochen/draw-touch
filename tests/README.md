@@ -147,6 +147,25 @@ cd ../.. && python tests/cursor_inject_check.py            # 默认 +240,+120
 
 ---
 
+## 2.5 桌面测试的提示纪律（硬性）
+
+跑任何**会动真实光标 / 抢焦点 / 全屏截图**的测试（`protocol_smoke.py`、`cursor_inject_check.py`）时：
+
+- **不要先停下来问用户"能不能开始"**，直接跑；
+- 但**必须**在开测时和收官时各弹一次横幅告诉用户，让他知道电脑不是卡了、以及什么时候桌面交还了；
+- 统一走 `tests/desk_notify.py`（内部调用 `SpenTabletHost.exe --notify`，右下角置顶、
+  `WS_EX_NOACTIVATE` 不抢焦点、到点自动消失，不需要任何人点按钮）：
+
+```python
+from desk_notify import notify
+notify("冒烟测试开始：会真实移动鼠标", 25, "busy")   # 橙：正在测试
+...
+notify("冒烟测试结束，桌面已交还", 8, "ok")          # 绿：完成 / 红(fail)：失败
+```
+
+- 门禁已经接好（冒烟阶段前后各一次），子脚本通过 `SPEN_NO_NOTIFY=1` 避免重复弹；
+- 找不到 host 可执行文件或没有桌面会话时**静默降级**，提示失败绝不影响测试结果。
+
 ## 3. 目录结构说明
 
 ```
@@ -155,6 +174,7 @@ SpenTablet/
 │   ├── protocol_smoke.py                    # 协议级冒烟测试（20 项断言，唯一“真断言”脚本）
 │   ├── release_gate.py                      # 发布门禁（串起单测 + PC 编译 + 冒烟）
 │   ├── cursor_inject_check.py               # 光标注入实测：位置→发移动帧→再读位置，验证注入是否真的生效
+│   ├── desk_notify.py                       # 桌面横幅：开测/收官各弹一次提示（不抢焦点、自动消失）
 │   ├── CursorProbe/                         # 光标/权限诊断探针（前台进程提权、ClipCursor、注入 API 实测）
 │   ├── TouchProbe/                          # Windows 触摸注入参数诊断探针
 │       ├── Program.cs                       #   探针主程序（11 组参数实验 + 环境信息打印）
@@ -166,7 +186,8 @@ SpenTablet/
     ├── UpdateCheckerVersionTest.kt          # 语义化版本比较（7 项）
     ├── GestureDeadZoneTest.kt               # 移动死区闸门 + 捏合判定死区（13 项）
     ├── TwoFingerGestureTest.kt              # 双指手势状态机集成验证（5 项）
-    └── TrackpadStateTest.kt                 # 触摸板状态防卡死（复位判定/手指数，10 项）
+    ├── TrackpadStateTest.kt                 # 触摸板状态防卡死（复位判定/手指数，10 项）
+    └── TapDragTest.kt                       # 单击/双击/双击拖拽时序（左键不能卡住，9 项）
 ```
 
 ### 各文件职责
@@ -242,7 +263,7 @@ SpenTablet/
 | `FrameL` / `FrameT` | double | 0.0 | 操作框左上角相对位置（0..1） |
 | `MappingX` / `MappingY` | double → int | 0 | 映射区域起点，0 表示整块虚拟屏幕 |
 | `MappingW` / `MappingH` | int | 0 | 映射区域尺寸，0 表示整块虚拟屏幕 |
-| `PinchMode` | string | `"Touch"` | 捏合缩放方式：`Touch` 优先真实触摸注入 / `Keys` 直接 Ctrl+±。**当前仓库内的 appsettings.json 尚未包含该键**（首次在设置界面保存后写入）；缺失时按默认值 `Touch` 生效 |
+| `PinchMode` | string | `"Touch"` | 捏合缩放方式：`Touch` 优先真实触摸注入、失败自动降级 Ctrl+滚轮 / `Wheel` 直接用 Ctrl+滚轮。旧值 `Keys`（Ctrl+±）已废弃，读到时按 `Wheel` 处理 —— 那个在 OneNote/Word 里是下标/删除线快捷键 |
 
 > 模板文件 `PcHost/appsettings.json` **已入库**（随源码分发）；运行时实际读取的是**各 EXE 同目录**下的副本
 > （`PcHost/bin/.../SpenTabletHost.exe` 或 `publish/SpenTabletHost.exe` 同级目录），`bin/`、`publish/` 已被 `.gitignore` 忽略。

@@ -18,6 +18,8 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from desk_notify import notify  # noqa: E402  测试期间的桌面横幅（开始 / 结束）
 GRADLE = Path(r"C:\VOLCANO\myws\myEnv\tools\gradle-8.9\bin\gradle.bat")
 JDK = Path(r"C:\VOLCANO\myws\myEnv\tools\jdk-17.0.13")
 SDK = Path(r"C:\VOLCANO\myws\myEnv\tools\android-sdk")
@@ -70,11 +72,19 @@ def gate_smoke():
     if not HOST_EXE.exists():
         step("host 可执行文件存在", False, str(HOST_EXE))
         return
+    # 冒烟会真的移动系统光标、发一次真实点击 —— 按用户的规矩：
+    # 不先问他，但**必须让他看得见**正在测 / 测完了（右下角横幅，自动消失）。
+    notify("冒烟测试开始：会真实移动鼠标、发一次点击（约 20 秒）", 25, "busy")
     # 杀掉残留 host，门禁自己拉起一个干净实例
     kill_host()
-    env = dict(os.environ, DOTNET_ROOT=str(DOTNET))
-    host = subprocess.Popen([str(HOST_EXE)], env=env,
+    env = dict(os.environ, DOTNET_ROOT=str(DOTNET),
+               # 上层已经弹过横幅了，子脚本不要再弹一遍
+               SPEN_NO_NOTIFY="1")
+    # --no-elevate：门禁**不能**弹 UAC。默认启动会自提权重启，测试机上会跳一个
+    # 需要人点的权限框，把跑门禁的人打断。冒烟只校验日志链路，不需要真的注入成功。
+    host = subprocess.Popen([str(HOST_EXE), "--no-elevate"], env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    smoke_ok = False
     try:
         # 等端口就绪
         import socket
@@ -93,13 +103,17 @@ def gate_smoke():
             return
         r = run([sys.executable, ROOT / "tests" / "protocol_smoke.py", "--port", str(PORT)])
         # 不写死断言条数：用例会随回归项增加，写死容易与脚本实际不符
-        step("protocol_smoke.py 全部断言", r.returncode == 0)
+        smoke_ok = r.returncode == 0
+        step("protocol_smoke.py 全部断言", smoke_ok)
     finally:
         host.terminate()
         try:
             host.wait(timeout=5)
         except subprocess.TimeoutExpired:
             host.kill()
+        # 收工横幅：告诉用户"测试结束、桌面已交还"，并给结果颜色
+        notify("冒烟测试结束，桌面已交还" if smoke_ok else "冒烟测试失败（详见终端输出），桌面已交还",
+               8, "ok" if smoke_ok else "fail")
 
 
 def main():

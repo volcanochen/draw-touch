@@ -45,6 +45,16 @@ internal static class Program
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
 
+        // ---- 测试提示横幅 ----
+        // 自动化测试（协议冒烟 / 光标注入验证）会真的动鼠标。用户要求：不用先问他，
+        // 但必须让他看见"正在测"和"测完了" —— 由测试脚本调这个入口弹一个
+        // 不抢焦点、自动消失的横幅，弹完直接退出，不进主程序逻辑。
+        if (args != null && args.Any(a => a.Equals("--notify", StringComparison.OrdinalIgnoreCase)))
+        {
+            Notify.Run(args);
+            return;
+        }
+
         // ---- WinForms UI 线程异常：必须接住，否则就是「进程悄悄消失」----
         // 托盘程序没有控制台，NoteOverlay / RegionFrame / TrayApp 这些 UI 线程上的异常
         // 默认会弹一个「未处理的异常」对话框（后台线程上甚至直接退出），
@@ -146,7 +156,7 @@ internal static class Program
 
         AppLog.Info("提示：USB 连接时在 PC 上执行  adb reverse tcp:6000 tcp:6000");
         AppLog.Info("数位板模式：手指在手机屏上滑动平移操作范围框，S Pen 才用于绘制。");
-        AppLog.Info("鼠标模式：取消范围框，手指=触摸板，单击=左键，双击=右键。");
+        AppLog.Info("鼠标模式：取消范围框，手指=触摸板，单击=左键，双击=双击，双击后不松手拖动=框选。");
 
         Application.Run(new TrayApp(cfg, server, SetDebug, openConfig));
     }
