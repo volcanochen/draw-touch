@@ -214,6 +214,7 @@ SpenTablet/
 │   ├── v1.3.0/RELEASE_NOTES.md
 │   └── v1.3.1/RELEASE_NOTES.md   # 当前版本
 ├── tests/                  # 自动化回归（发布门禁：python tests/release_gate.py）
+│   ├── README.md           # 测试套件说明：覆盖范围/运行方式/用例清单/FAQ
 │   ├── protocol_smoke.py   # 协议级冒烟测试：模拟手机连 host，16 项端到端断言
 │   └── release_gate.py     # 发布门禁：单测 + PC 编译 + 冒烟全绿才允许发布
 ├── PhoneTablet/            # Android 端（Android Studio 打开此目录）
