@@ -29,13 +29,17 @@ shot_*.png
 v11_*.png
 
 # release 目录只跟踪发布说明，二进制走 GitHub Releases
+release/**/assets/
 release/**/SpenTabletHost-*.zip
 release/**/SpenTabletPhone-*.apk
 release/**/stage/
+release/**/release_url.txt
 
 # 探针构建产物
 tests/TouchProbe/bin/
 tests/TouchProbe/obj/
+tools/*/bin/
+tools/*/obj/
 
 # 排障临时副本
 PcHost/testcopy/
@@ -44,3 +48,13 @@ PcHost/zipstage/
 # 测试探针构建产物
 tests/*/bin/
 tests/*/obj/
+
+# 根目录的一次性调试产物（排障截图 / 光标文件 / 临时脚本）
+cursor_*.cur
+cursor_*.png
+hl_btn*.png
+p_*.png
+phone_hl*.png
+t_note_*.png
+png_stat.py
+test_fixes.py
