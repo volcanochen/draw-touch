@@ -25,6 +25,7 @@ JDK = Path(r"C:\VOLCANO\myws\myEnv\tools\jdk-17.0.13")
 SDK = Path(r"C:\VOLCANO\myws\myEnv\tools\android-sdk")
 DOTNET = Path(r"C:\Users\adminlocal\.dotnet\dotnet.exe")
 HOST_EXE = ROOT / "PcHost" / "bin" / "Release" / "net8.0-windows" / "win-x64" / "SpenTabletHost.exe"
+HOST_STDOUT = HOST_EXE.parent / "host_smoke_stdout.log"
 PORT = 6000
 
 results = []
@@ -80,10 +81,17 @@ def gate_smoke():
     env = dict(os.environ, DOTNET_ROOT=str(DOTNET),
                # 上层已经弹过横幅了，子脚本不要再弹一遍
                SPEN_NO_NOTIFY="1")
+    # host 的 stdout/stderr 落盘（.NET 未处理异常的栈只写 stderr，丢了就查不到崩溃点）
+    try:
+        if HOST_STDOUT.exists():
+            HOST_STDOUT.unlink()
+    except OSError:
+        pass
+    host_out = open(HOST_STDOUT, "wb")
     # --no-elevate：门禁**不能**弹 UAC。默认启动会自提权重启，测试机上会跳一个
     # 需要人点的权限框，把跑门禁的人打断。冒烟只校验日志链路，不需要真的注入成功。
     host = subprocess.Popen([str(HOST_EXE), "--no-elevate"], env=env,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            stdout=host_out, stderr=subprocess.STDOUT)
     smoke_ok = False
     try:
         # 等端口就绪
@@ -111,6 +119,24 @@ def gate_smoke():
             host.wait(timeout=5)
         except subprocess.TimeoutExpired:
             host.kill()
+        # **host 的 stdout/stderr 必须落盘**：.NET 未处理异常的栈只写 stderr，
+        # 以前这里用 DEVNULL 扔掉 → host 崩溃时现场全没了，只剩「连接被中止」，
+        # 根本看不出是哪一行崩的。现在写进文件，失败时把尾部打出来。
+        try:
+            host_out.flush()
+            host_out.close()
+        except Exception:
+            pass
+        tail = ""
+        try:
+            data = HOST_STDOUT.read_bytes()[-4000:].decode("utf-8", "ignore")
+            tail = "\n".join(data.splitlines()[-25:])
+        except OSError:
+            pass
+        if tail.strip():
+            print("  -- host stdout/stderr 尾部 --")
+            for ln in tail.splitlines():
+                print("     " + ln)
         # 收工横幅：告诉用户"测试结束、桌面已交还"，并给结果颜色
         notify("冒烟测试结束，桌面已交还" if smoke_ok else "冒烟测试失败（详见终端输出），桌面已交还",
                8, "ok" if smoke_ok else "fail")

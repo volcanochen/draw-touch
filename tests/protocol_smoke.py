@@ -231,18 +231,33 @@ def main():
 
     # ---- 5. 捏合缩放：触摸板缩放 API 或 Ctrl+滚轮 二选一，必须有一条生效 ----
     # （部分 Windows 版本触摸注入被系统禁用/损坏 → 熔断后走 Ctrl+滚轮，同样算通过）
+    #
+    # 注意：PC 端的缩放实现重构过，日志文案也换过：
+    #   - 触摸注入路径 → "[Mouse] 捏合 ×N"（有 %20 节流）
+    #   - Ctrl 回退路径 → "[TouchZoom] Ctrl↓ 缩放会话开始" + "[TouchZoom] 匀速滚轮 …"
+    # 这里必须把**新旧文案都认**，否则实现改了而断言没跟上 → 假失败。
     mark = log_size(log)
     for f in (1.1, 1.1, 1.1, 1.1, 1.1):
         s.sendall(frame(T_MOUSE, f32(M_ZOOM, f, 0)))
         time.sleep(0.05)
-    ok_any = log_contains(log, "[Mouse] 捏合 ×", mark)
     used_touch = log_contains(log, "[TouchZoom] 开始捏合", mark)
-    used_fallback = log_contains(log, "Ctrl+滚轮", mark)
+    used_fallback = (log_contains(log, "[TouchZoom] Ctrl↓ 缩放会话开始", mark)
+                      or log_contains(log, "[TouchZoom] 匀速滚轮", mark)
+                      or log_contains(log, "Ctrl+滚轮", mark))
+    # 「缩放帧被处理」的判据：任何一条缩放路径的日志出现即算处理了
+    ok_any = (log_contains(log, "[Mouse] 捏合 ×", mark)      # 触摸注入路径
+              or used_touch
+              or used_fallback)
     check("MOUSE_ZOOM → 缩放帧被处理", ok_any)
     check("缩放路径生效（触摸板缩放 API 或 Ctrl+滚轮）", used_touch or used_fallback,
           "触摸板缩放API" if used_touch else ("Ctrl+滚轮" if used_fallback else "两者皆无"))
     if used_touch:
-        ok_end = log_contains(log, "[TouchZoom] 捏合结束（抬起接触点）", mark, timeout=5)
+        # 捏合结束的日志文案改过好几轮：
+        #   旧："[TouchZoom] 捏合结束（抬起接触点）"
+        #   新："[TouchZoom] 捏合结束（抬起接触点，应用定稿刷新）最终跨度±12.0"
+        # 断言必须**认新旧两种文案**，否则实现改了而断言没跟上 → 假失败。
+        # （这里不写后面的右括号：两种文案都能命中同一段前缀。）
+        ok_end = log_contains(log, "[TouchZoom] 捏合结束（抬起接触点", mark, timeout=5)
         check("捏合结束后接触点自动抬起（UP 帧修复回归）", ok_end)
     else:
         # 回退路径成立的条件（二选一）：
