@@ -28,6 +28,7 @@ import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 
 /**
  * 手机端主界面：全屏画布 + 主界面顶部一排图标按钮（方向切换 / 连接状态 / 设置）。
@@ -146,6 +147,7 @@ class MainActivity : Activity() {
         hoverTip = HoverTip(root)
 
         canvas = PenCanvasView(this)
+        Haptics.init(this)          // 触觉反馈：拿 Vibrator 实例（失败也不影响手势）
         canvas.pressureGain = prefs.getFloat("gain", 3.0f)
         canvas.sendHover = prefs.getBoolean("hover", true)
         canvas.workMode = workMode
@@ -255,14 +257,25 @@ class MainActivity : Activity() {
             setPadding(16, 14, 16, 10)
             setBackgroundColor(Color.parseColor("#CC111111"))
         }
+        // 标题栏：左列 = 「设置」+ 版本/构建时间小字（一眼确认装的包对不对），右侧完成按钮
+        val titleCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
         val setTitle = TextView(this).apply {
             text = "设置"
             textSize = 18f
             setTextColor(Color.WHITE)
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
+        val setVer = TextView(this).apply {
+            text = "v${BuildConfig.VERSION_NAME} (code ${BuildConfig.VERSION_CODE}) · 构建于 ${BuildConfig.BUILD_TIME}"
+            textSize = 11f
+            setTextColor(Color.LTGRAY)
+        }
+        titleCol.addView(setTitle)
+        titleCol.addView(setVer)
         val doneBtn = Button(this).apply { text = "完成" }
-        setHeader.addView(setTitle)
+        setHeader.addView(titleCol)
         setHeader.addView(doneBtn)
         settingsPage.addView(setHeader)
 
@@ -485,6 +498,9 @@ class MainActivity : Activity() {
             textSize = 13f; setTextColor(Color.WHITE)
             text = t; setPadding(0, dp(14), 0, 2)
         }
+
+        // （手机端版本/构建时间已移到设置页标题栏小字，正文不再单列「版本信息」块）
+
         fun minusPlus(label: String, get: () -> Float, set: (Float) -> Unit, step: Float, min: Float, max: Float,
                       fmt: String = "%s  %.1f"): LinearLayout {
             val tv = TextView(this).apply {
@@ -514,16 +530,35 @@ class MainActivity : Activity() {
         }, 0.5f, 0.2f, 30.0f))
 
         // ---------- 手势死区（防误触 / 防抖动）----------
+        // （捏合死区已删除：2026-10-29 捏合判定放宽为「两指反向运动」，
+        //   不再看跨度死区，这两个设置项没有作用了）
         details.addView(tpTitle("手势死区（0 = 关闭）"))
-        details.addView(minusPlus("移动死区 dp", { canvas.moveDeadZoneDp }, {
+        details.addView(minusPlus("滚动/拖框死区 dp", { canvas.moveDeadZoneDp }, {
             canvas.moveDeadZoneDp = it; prefs.edit().putFloat("tpMoveDz", it).apply()
         }, 1f, 0f, 30f))
-        details.addView(minusPlus("捏合死区 %", { canvas.pinchDeadZoneRel * 100f }, {
-            canvas.pinchDeadZoneRel = it / 100f; prefs.edit().putFloat("tpPinchDzRel", canvas.pinchDeadZoneRel).apply()
-        }, 1f, 0f, 60f, "%s  %.0f%%"))
-        details.addView(minusPlus("捏合死区 dp", { canvas.pinchDeadZoneDp }, {
-            canvas.pinchDeadZoneDp = it; prefs.edit().putFloat("tpPinchDzDp", it).apply()
-        }, 1f, 0f, 40f))
+
+        // 指针平滑：噪声闸门档位（慢速精确操作稳不稳，全靠它）
+        details.addView(tpTitle("指针平滑（慢速精确操作的稳度）"))
+        details.addView(Button(this).apply {
+            fun refresh() {
+                text = when (canvas.pointerSmoothProfile) {
+                    "STABLE" -> "指针平滑：稳（默认）"
+                    "NORMAL" -> "指针平滑：标准"
+                    else -> "指针平滑：关闭（1:1）"
+                }
+            }
+            refresh()
+            setOnClickListener {
+                val next = when (canvas.pointerSmoothProfile) {
+                    "STABLE" -> "NORMAL"
+                    "NORMAL" -> "OFF"
+                    else -> "STABLE"
+                }
+                canvas.pointerSmoothProfile = next
+                prefs.edit().putString("ptrSmooth", next).apply()
+                refresh()
+            }
+        })
 
         details.addView(tpTitle("触摸板手势（点击切换动作）"))
         fun gestureRow(name: String, key: String, def: Int, allowed: IntArray): Button =
@@ -636,6 +671,93 @@ class MainActivity : Activity() {
             canvas.trailLifeMs = it.toLong()
             prefs.edit().putInt("trailLife", it.toInt()).apply()
         }, 100f, 200f, 3000f, "%s  %.0f"))
+
+        // ---------- 按压识别（重按 = 按下左键）----------
+        // v1.4.8：从「触觉反馈」里独立出来，做成自己的专区 ——
+        // 用户要的是「一个按压识别的开关 + 一组能自己调的参数」，
+        // 之前这三项混在震动设置里，翻两下才找得到。
+        details.addView(tpTitle("按压识别（重按 = 按下左键）"))
+        details.addView(TextView(this).apply {
+            textSize = 12f; setTextColor(Color.parseColor("#FF999999")); setPadding(0, 0, 0, 4)
+            text = "手指压得越重，接触面积越大。触发阈值 = 比平时的力度高多少算「按下去」；" +
+                "确认帧数 = 连续超几帧才认（越小越灵敏、越容易误触）；" +
+                "松开余量 = 力度要比触发线低这么多才算松手（越大越不容易松，但松得迟）。"
+        })
+        val pressDiagView = TextView(this).apply {
+            textSize = 12f; setTextColor(Color.parseColor("#FF999999"))
+            setPadding(0, dp(6), 0, 2)
+            text = "点下面按钮看实时状态"
+        }
+        details.addView(Button(this).apply {
+            fun refresh() { text = if (canvas.pressToDragEnabled) "按压识别：开" else "按压识别：关" }
+            refresh()
+            setOnClickListener {
+                canvas.pressToDragEnabled = !canvas.pressToDragEnabled
+                prefs.edit().putBoolean("pressDragOn", canvas.pressToDragEnabled).apply()
+                if (!canvas.pressToDragEnabled) canvas.releasePressDrag("按压识别已关闭")
+                refresh()
+                pressDiagView.text = canvas.pressDiagText()
+            }
+        })
+        details.addView(minusPlus("触发阈值(面积涨幅)", { canvas.pressAreaRisePct }, {
+            canvas.pressAreaRisePct = it
+            prefs.edit().putFloat("pressAreaRisePct", canvas.pressAreaRisePct).apply()
+        }, 5f, 10f, 120f, "%s  %.0f%%"))
+        details.addView(minusPlus("确认帧数", { canvas.pressConfirmFrames.toFloat() }, {
+            canvas.pressConfirmFrames = it.toInt()
+            prefs.edit().putInt("pressConfirmFrames", canvas.pressConfirmFrames).apply()
+        }, 1f, 1f, 8f, "%s  %.0f 帧"))
+        details.addView(minusPlus("松开余量", { canvas.pressReleaseSlackPct }, {
+            canvas.pressReleaseSlackPct = it
+            prefs.edit().putFloat("pressReleaseSlackPct", canvas.pressReleaseSlackPct).apply()
+        }, 5f, 0f, 15f, "%s  %.0f%%"))
+        details.addView(minusPlus("压力通道阈值", { canvas.pressDownThreshold }, {
+            canvas.pressDownThreshold = it
+            // 松开阈值跟随（比按下低一档，形成滞回，避免在阈值附近抖动）
+            canvas.pressUpThreshold = (it * 0.76f).coerceIn(0.05f, 0.9f)
+            prefs.edit().putFloat("pressDownTh", canvas.pressDownThreshold)
+                .putFloat("pressUpTh", canvas.pressUpThreshold).apply()
+        }, 0.05f, 0.05f, 0.95f, "%s  %.2f"))
+        details.addView(pressDiagView)
+        details.addView(Button(this).apply {
+            text = "查看当前识别状态"
+            setOnClickListener {
+                val d = canvas.pressDiagText()
+                pressDiagView.text = d
+                Toast.makeText(this@MainActivity, d, Toast.LENGTH_LONG).show()
+            }
+        })
+
+        // ---------- 触觉反馈（马达震动）----------
+        details.addView(tpTitle("触觉反馈"))
+        details.addView(Button(this).apply {
+            fun refresh() { text = if (canvas.hapticsEnabled) "震动反馈：开" else "震动反馈：关" }
+            refresh()
+            setOnClickListener {
+                canvas.hapticsEnabled = !canvas.hapticsEnabled
+                prefs.edit().putBoolean("hapticsOn", canvas.hapticsEnabled).apply()
+                if (canvas.hapticsEnabled) Haptics.click()   // 打开时震一下，立刻知道生效了
+                refresh()
+            }
+        })
+        details.addView(minusPlus("震动强度 %", { hapticStrengthPct }, {
+            hapticStrengthPct = it
+            Haptics.strengthScale = it / 100f
+            prefs.edit().putInt("hapticStrength", it.toInt()).apply()
+            Haptics.click()      // 立刻震一下让你听到/感到新强度
+        }, 10f, 0f, 200f, "%s  %.0f%%"))
+        details.addView(Button(this).apply {
+            fun refresh() {
+                text = if (Haptics.ignoreSystemLimit) "覆盖系统震动强度限制：开" else "覆盖系统震动强度限制：关"
+            }
+            refresh()
+            setOnClickListener {
+                Haptics.ignoreSystemLimit = !Haptics.ignoreSystemLimit
+                prefs.edit().putBoolean("hapticForce", Haptics.ignoreSystemLimit).apply()
+                Haptics.click()
+                refresh()
+            }
+        })
 
         // ---------- 版本信息与更新 ----------
         verText = TextView(this).apply {
@@ -784,6 +906,7 @@ class MainActivity : Activity() {
     private fun openSettings() {
         if (::verText.isInitialized) verText.text = versionLine()
         // 重建一遍设置项：默认值迁移 / 手势切换后的最新值要反映到界面上
+        applyTrackpadPrefs()   // 从 prefs 重新同步（含震动强度倍率 / 覆盖系统限制开关）
         details.removeAllViews()
         buildSettingsControls()
         settingsPage.visibility = View.VISIBLE
@@ -1073,6 +1196,7 @@ class MainActivity : Activity() {
                         wheelInertia = !wheelInertia
                         prefs.edit().putBoolean("wheelInertia", wheelInertia).apply()
                         strip.inertia = wheelInertia
+                        Haptics.action()   // 模式切换确认震动
                         DebugLog.write("[wheel] ${if (wheelInertia) "无极滚动" else "普通滚动"}")
                     }
                     wheelLastDownAt = now
@@ -1092,6 +1216,7 @@ class MainActivity : Activity() {
                     if (canvas.height > 0) {
                         canvas.sendWheel(dy / canvas.height)
                         strip.scrollBy(dy)      // 横纹跟着手指走，像真的滚轮
+                        Haptics.scrollTick()     // 与双指滚动同一套细震，手感一致
                     }
                     true
                 }
@@ -1275,6 +1400,7 @@ class MainActivity : Activity() {
             // 缓出曲线 (1-t/T)^2：先快后慢，T 时刻速度正好为 0 —— 抬手后 3 秒稳稳停下
             val remain = 1f - t.toFloat() / inertiaDurationMs
             canvas.sendWheel(inertiaBaseVel * remain * remain)
+            Haptics.scrollTick()      // 惯性滚动期间同样有细震（跟手到停）
             inertiaHandler.postDelayed(this, inertiaTickMs)
         }
     }
@@ -1775,6 +1901,8 @@ class MainActivity : Activity() {
     private var wheelInertia = false
     /** 无极滚动的动量倍率（越大惯性滑得越远） */
     private var wheelMomentum = 1.0f
+    /** 震动强度百分比（0~200），设置页可调 */
+    private var hapticStrengthPct = 100f
 
     /** 无极滚动的基础时长(ms)：动量倍率 1.0 时抬手后滚 3 秒停下 */
     private val inertiaBaseMs = 3000L
@@ -1798,10 +1926,11 @@ class MainActivity : Activity() {
         }
         canvas.cursorSpeed = prefs.getFloat("tpSpeed", 1.5f)
         canvas.scrollScale = prefs.getFloat("tpScroll", 5.0f)
-        // 手势死区：0 = 关闭
-        canvas.moveDeadZoneDp = prefs.getFloat("tpMoveDz", 8f)
-        canvas.pinchDeadZoneRel = prefs.getFloat("tpPinchDzRel", 0.20f)
-        canvas.pinchDeadZoneDp = prefs.getFloat("tpPinchDzDp", 10f)
+        // 手势死区：0 = 关闭（v1.4.3 默认 8dp → 3dp，慢速拖动不再「划很久不动」）
+        canvas.moveDeadZoneDp = prefs.getFloat("tpMoveDz", 3f)
+        // 指针平滑档位（噪声闸门灵敏度）：默认「稳」
+        canvas.pointerSmoothProfile = prefs.getString("ptrSmooth", "STABLE") ?: "STABLE"
+        // （捏合死区已废弃：2026-10-29 捏合判定改为「两指反向运动」，不再读这两个 prefs）
         // ---- 默认值来源：2026-10-29 从用户手机上读出的实际配置快照 ----
         // 之前这些值是"估"的（三指滑=前进后退、四指=切模式），用户实际配置完全不是那套，
         // 每次重装/换设备都要重新点一遍。现在默认值直接对齐他在用的配置。
@@ -1809,6 +1938,21 @@ class MainActivity : Activity() {
         // 手指轨迹：跟手提示，抬手后自动淡出
         canvas.showFingerTrail = prefs.getBoolean("trailOn", true)
         canvas.trailLifeMs = prefs.getInt("trailLife", 800).toLong()
+        // 触觉反馈 / 重按（2026-10-30）
+        canvas.hapticsEnabled = prefs.getBoolean("hapticsOn", true)
+        canvas.pressToDragEnabled = prefs.getBoolean("pressDragOn", true)
+        canvas.pressDownThreshold = prefs.getFloat("pressDownTh", 0.55f)
+        canvas.pressUpThreshold = prefs.getFloat("pressUpTh", 0.42f)
+        // 重按的接触面积阈值（%）：相对**近期静息水平**高出这么多算「重按」
+        // （v1.4.6：判「按压过程中的涨幅」，不再是「相对固定历史基线的倍数」）
+        canvas.pressAreaRisePct = prefs.getFloat("pressAreaRisePct", 30f)
+        // v1.4.8：确认帧数 + 松开滞回（设置页可调，让用户自己定灵敏度/是否粘键）
+        canvas.pressConfirmFrames = prefs.getInt("pressConfirmFrames", 3)
+        canvas.pressReleaseSlackPct = prefs.getFloat("pressReleaseSlackPct", 5f)
+        // 震动强度倍率 + 是否绕过系统触觉强度限制
+        hapticStrengthPct = prefs.getInt("hapticStrength", 100).toFloat()
+        Haptics.strengthScale = hapticStrengthPct / 100f
+        Haptics.ignoreSystemLimit = prefs.getBoolean("hapticForce", false)
         canvas.g2Swipe = prefs.getInt("g2Swipe", 1)
         canvas.g2Pinch = prefs.getInt("g2Pinch", 2)
         canvas.g2Tap = prefs.getInt("g2Tap", 4)

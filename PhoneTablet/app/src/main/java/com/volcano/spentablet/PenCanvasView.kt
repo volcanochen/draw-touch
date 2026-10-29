@@ -122,6 +122,55 @@ class PenCanvasView(context: Context) : View(context) {
     /** 触摸板区域背景色 */
     var trackpadColor: Int = 0xFF20242B.toInt()
 
+    // ---- 触觉反馈 / 重按（2026-10-30）----
+    /** 震动反馈总开关（设置页可关；关掉后所有马达反馈都是空操作） */
+    var hapticsEnabled: Boolean = true
+        set(v) { field = v; Haptics.enabled = v }
+    /** 重按 = 按下左键：手指用力按屏幕即按下左键拖动，回落即松开 */
+    var pressToDragEnabled: Boolean = true
+    /** 重按判定阈值（0~1 的压力）：按下 / 松开用滞回，避免在阈值附近抖动 */
+    var pressDownThreshold: Float = 0.55f
+    var pressUpThreshold: Float = 0.42f
+    /**
+     * 重按判定阈值（接触面积）：相对**近期静息水平**高出多少 % 算重按。
+     *
+     * v1.4.6 语义变更：以前是「比手势开头的固定基线大多少 %」（默认 200 = ×2.0），
+     * 在「手指压着滑」的触摸板用法下永远够不到（落下时本就带着力）。
+     * 现在判「按压过程中相对静息水平**涨了多少**」—— 这才是真正在变的量。
+     *
+     * v1.4.7：静息水平改为「只吃非上冲帧的 P20」，落指瞬态不再污染它；
+     * 释放条件改为「回落到本次加力的触发线以下」，松手就能松开（不再粘键）。
+     * 默认 30%：实测静息段涨幅全在 ±10%（偶发 +27%），加力段是连续的 +39%~+68%。
+     */
+    var pressAreaRisePct: Float = 30f
+    /**
+     * 确认帧数：连续多少帧超过阈值才判「重按」（v1.4.8 起可在设置页调）。
+     *
+     * - 1 帧 = 最快最灵敏，但任何单帧抖动都会触发；
+     * - 3 帧 = 默认（实测最短的一次真实加力只有 3 帧，再大就会漏掉「快速按一下」）；
+     * - 6 帧 ≈ 0.15s = 最迟钝，几乎不会被误触发但明显感觉延迟。
+     */
+    var pressConfirmFrames: Int = 3
+    /**
+     * 松开余量（%）：力度要比**触发线**低这么多才算松手（v1.4.8 起可在设置页调）。
+     *
+     * - 0% = 力度一低于触发线就松（最灵敏）；
+     * - 5% = 默认，形成 25% 的滞回带，既不抖也不粘；
+     * - 15% = 要落回触发线下方 15% 才松（最不容易粘键，但松得迟）。
+     *
+     * 安全兜底（见 [PressSignal.RELEASE_LINE_FLOOR]）：释放线永远不低于
+     * 「静息水平 × 1.05」，所以无论怎么调都不会把功能调成「松不掉」。
+     */
+    var pressReleaseSlackPct: Float = 5f
+    /**
+     * 重按信号源：压力通道 + 接触面积通道自动仲裁（见 [PressSignal]）。
+     * 本机压力恒为 1.00（无压感），实际靠**接触面积**判定：
+     * 手指压得越重，接触椭圆越大。
+     */
+    private val pressSignal = PressSignal()
+    /** 当前是否处于「重按拖动」中（左键按着） */
+    private var pressDragging = false
+
     // ---- 手指轨迹（跟手提示：手指划到哪一眼能看见，抬手后自动淡出）----
     /** 是否显示手指动作轨迹 */
     var showFingerTrail: Boolean = true
@@ -131,27 +180,47 @@ class PenCanvasView(context: Context) : View(context) {
     var trailColor: Int = 0
 
     // ---- 手势死区（可在设置页调整，0 = 关闭）----
+    // （捏合死区字段已删除：2026-10-29 捏合判定放宽为「两指沿同一直线反向运动」，
+    //   判定时不再看跨度变化，跨度死区彻底退场）
     /**
-     * 捏合死区（相对阈值，比例）：双指跨度相对变化超过它才可能判定为捏合。
-     * 默认 0.15（15%）。太小会让「双指滑动」被误判成捏合。
+     * 移动死区（dp）：手指按下后，累计位移超过它才开始驱动**双指滚动 / 范围框拖动**。
+     * 手抖时不会误触，移动手势起步更稳。
+     *
+     * v1.4.3：从 8dp 降到 3dp，并且**不再作用于指针移动**——
+     * 指针的「稳」改由[PointerSmoother]的自标定噪声闸门负责（它只判「抖动 vs 真在动」，
+     * 不掐速度，所以慢速移动照样跟得上）；死区再叠一层只会让慢速拖动又慢半拍。
      */
-    var pinchDeadZoneRel: Float = 0.15f
-    /**
-     * 捏合死区（绝对阈值，dp）：双指跨度至少要变化这么多像素才算捏合。
-     * 两指靠得近时相对阈值会变得很敏感，绝对阈值用来兜底。
-     */
-    var pinchDeadZoneDp: Float = 10f
-    /**
-     * 移动死区（dp）：手指按下后，累计位移超过它才开始驱动光标/滚动/拖框。
-     * 手抖时不会误触，移动手势起步更稳。默认 8dp（与 Android 的 touch slop 一致）。
-     */
-    var moveDeadZoneDp: Float = 8f
+    var moveDeadZoneDp: Float = 3f
 
     /** dp → px（按当前屏幕密度换算） */
     private fun dpPx(dp: Float): Float = dp * resources.displayMetrics.density
 
-    /** 触摸板：单指移动光标的死区闸门（相对移动，不补回死区量） */
-    private val trackpadMoveGate = MoveDeadZone { dpPx(moveDeadZoneDp) }
+    /**
+     * 指针平滑器（自标定噪声闸门，v1.4.3）：
+     * 只判断「这一下是抖动还是真在动」，**不判断有多慢** ——
+     * 所以慢速移动照样跟得上（位移一分不丢），而抖动不会让指针飘。
+     */
+    private val pointerSmoother = PointerSmoother(PointerSmoother.Profile.STABLE)
+
+    /**
+     * 指针平滑档位：STABLE（稳，默认）/ NORMAL（标准）/ OFF（关闭，完全 1:1）。
+     * 设置页切换后立即生效。
+     */
+    var pointerSmoothProfile: String = "STABLE"
+        set(v) {
+            field = v
+            runCatching { pointerSmoother.setProfile(PointerSmoother.Profile.valueOf(v)) }
+        }
+
+    /** 指针闸门诊断（节流 1 秒）：底噪估计 / 闸门状态 / 窗口净位移 —— 调手感时看这行 */
+    private var ptrGateLogAt = 0L
+
+    private fun logPointerGate() {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - ptrGateLogAt < 1000L) return
+        ptrGateLogAt = now
+        onDebug?.invoke(pointerSmoother.debugInfo() + "｜接触面 " + pressSignal.sizeDiag())
+    }
 
     /** 触摸板：双指滑动的死区闸门（相对移动，不补回） */
     private val trackpadScrollGate = MoveDeadZone { dpPx(moveDeadZoneDp) }
@@ -358,9 +427,98 @@ class PenCanvasView(context: Context) : View(context) {
         dragSlopPx = 12f * resources.displayMetrics.density,
     )
 
+    /**
+     * 重按（力度）→ 左键按下 / 松开。
+     *
+     * Android 的 MotionEvent 有两条可能表达「用力」的通道：
+     *  ① `getPressure()` —— 真实压感（0~1）。大量机型恒为 1.0（本机实测就是）。
+     *  ② `getTouchMajor()/getTouchMinor()` —— **接触椭圆的尺寸**：
+     *     手指压得越重，接触面越大。驱动上报 ABS_MT_TOUCH_MAJOR/MINOR 就有这条通道
+     *     （本机的 sec_touchscreen 明确声明了这两个轴）。
+     *
+     * [PressSignal] 自动仲裁：压力可用就用压力，否则退化到接触面积。
+     *
+     * v1.4.6：面积判据改成「**相对近期静息水平涨了多少**」（相对值），
+     * 不再是「相对一个冻结的历史基线涨了几倍」——
+     * 触摸板就是「手指压着滑」，落下时本就带着力，固定基线偏高会导致永远触发不了。
+     *
+     * v1.4.7：释放条件不再由外部传（改成「回落到本次加力的触发线以下」，
+     * 见 [PressSignal.releaseSlack]），所以这里不再设置 areaRiseUp。
+     */
+    private fun updatePressDrag(e: android.view.MotionEvent, idx: Int) {
+        if (!pressToDragEnabled || idx < 0) return
+        pressSignal.pressureDown = pressDownThreshold
+        pressSignal.pressureUp = pressUpThreshold
+        // 触发阈值：相对近期静息水平高出多少 % 算重按（设置项直接是百分比）
+        pressSignal.areaRiseDown = (pressAreaRisePct / 100f).coerceAtLeast(0.02f)
+        // 确认帧数 + 松开滞回（v1.4.8 设置项可调）
+        pressSignal.confirmFrames = pressConfirmFrames.coerceIn(1, 12)
+        pressSignal.releaseSlack = (pressReleaseSlackPct / 100f).coerceIn(0f, 0.5f)
+        val action = pressSignal.update(
+            e.getPressure(idx),
+            e.getTouchMajor(idx),
+            e.getTouchMinor(idx),
+        )
+        when (action) {
+            PressSignal.Action.DOWN -> {
+                pressDragging = true
+                onMouse?.invoke(Protocol.MOUSE_LEFT_DOWN, 0f, 0f)
+                onActionVisual?.invoke(Protocol.MOUSE_LEFT_CLICK)
+                Haptics.pressDown()          // 重一点的一下
+                onDebug?.invoke("重按 → 按下左键：" + pressSignal.diag())
+            }
+            PressSignal.Action.UP -> {
+                pressDragging = false
+                onMouse?.invoke(Protocol.MOUSE_LEFT_UP, 0f, 0f)
+                Haptics.pressUp()                // 更轻更短的一下
+                onDebug?.invoke("力度回落 → 松开左键：" + pressSignal.diag())
+            }
+            PressSignal.Action.NONE -> Unit
+        }
+    }
+
+    /**
+     * 重按识别的**实时状态**（供设置页「查看当前识别状态」按钮使用）。
+     *
+     * 用户自己调参数时需要立刻看到「现在走的是哪条通道 / 静息水平多少 /
+     * 当前涨幅多少 / 门槛在哪」，否则只能靠体感猜。
+     */
+    fun pressDiagText(): String {
+        val state = if (pressToDragEnabled) "识别已开启" else "识别已关闭"
+        return "$state｜${pressSignal.diag()}｜${pressSignal.sizeDiag()}"
+    }
+
+    /**
+     * 重按自检结论只报一次（每次 App 启动一次），免得刷屏：
+     * 让用户一眼知道「这台机器到底能不能识别重按、走的哪条通道」，
+     * 两条通道都不可用时重按功能会自己停用。
+     */
+    private var pressDiagLogged = false
+    private fun logPressureDiag() {
+        if (pressDiagLogged || !pressToDragEnabled) return
+        pressDiagLogged = true
+        onDebug?.invoke(pressSignal.diag())
+    }
+
+    /**
+     * 手指离开 / 手势重置：重按拖着的状态必须收尾（补发左键抬起 + 轻震动）。
+     *
+     * v1.4.8：改成 public —— 设置页关闭「按压识别」时必须立刻松开左键，
+     * 否则用户关掉开关后左键还一直按着（要等下一次抬手才恢复）。
+     */
+    fun releasePressDrag(reason: String) {
+        if (!pressDragging) return
+        pressDragging = false
+        pressSignal.releaseDrag()
+        onMouse?.invoke(Protocol.MOUSE_LEFT_UP, 0f, 0f)
+        Haptics.pressUp()
+        onDebug?.invoke("$reason → 松开左键（重按收尾）")
+    }
+
     /** 单击的延迟派发：等双击窗口过去、确认没有第二下，才发左键 */
     private val singleTapAction = Runnable {
         onMouse?.invoke(Protocol.MOUSE_LEFT_CLICK, 0f, 0f)
+        Haptics.click()          // 模拟鼠标微动开关的那一下「哒」
         onDebug?.invoke("单击 → 鼠标左键")
     }
 
@@ -418,12 +576,81 @@ class PenCanvasView(context: Context) : View(context) {
     private var lastPinchActionAt = 0L
     /** 滑动型一次性动作（三指/四指左右滑）的上次触发时间，用于节流 */
     private var lastSwipeActionAt = 0L
-    /** 本手势是否已判定为「捏合」：一旦判定，后续都走捏合而不是滚动（直到手势结束） */
-    private var tpPinchMode = false
 
-    /** 双指滚动的轴锁：0 未锁 / 1 只横滚 / 2 只竖滚（新手势重新判定） */
+    /**
+     * 双指手势态（触摸板模式）：
+     *  0 = 未定 —— 不输出，每帧尝试判定；
+     *  1 = 缩放（两指都动 + 沿同一直线**反向**运动即进入，幅度不必对称；之后只看两指间距）；
+     *  2 = 滚动（轴锁三态：竖锁 / 横锁 / 斜向双轴）；
+     *  3 = 单指跟随（一指静止 → 忽略静止指，按单指滑动移动光标）。
+     * 判成 1/2/3 后本手势固定；**进入移动识别（2/3）后不再处理缩放**（用户规格）。
+     */
+    private var tp2State = 0
+    /**
+     * 捏合锁存（2026-10-29 用户规格）：本次触摸序列一旦进入过捏合态，
+     * **直到全部手指离开前不再发任何移动指令**——两指都还在时不退出缩放态、
+     * 抬掉一指后剩下的手指只更新基准不驱动光标。
+     * 全部手指抬起（ACTION_UP）/ 新手势按下 / 切模式时解锁。
+     */
+    private var tpPinchLatched = false
+    /** 第二根手指落下的时刻：给捏合判定留启动窗口，窗口内不锁单指跟随（防止抢跑） */
+    private var tpTwoFingerAt = 0L
+    /** 双指跟踪：两指的 pointerId、上帧坐标与累计位移（缩放前提 / 单指跟随判定用） */
+    private var tpIdA = -1
+    private var tpIdB = -1
+    private var tpAccumA = 0f
+    private var tpAccumB = 0f
+    /** 两指自手势开始的累计位移**向量**（捏合判定「反向运动」用，2026-10-29 规格） */
+    private var tpVecAX = 0f
+    private var tpVecAY = 0f
+    private var tpVecBX = 0f
+    private var tpVecBY = 0f
+    private var tpPrevAX = 0f
+    private var tpPrevAY = 0f
+    private var tpPrevBX = 0f
+    private var tpPrevBY = 0f
+
+    /**
+     * 双指滚动的轴锁：0 未锁（含「还没判」和「判成斜向」）/ 1 只横滚 / 2 只竖滚。
+     * 与 [tpScrollAxisDecided] 配合使用：判定一旦做出就**不再改判**（含斜向）——
+     * 否则斜着滑时手指轻微偏一点竖/横就会被锁成单轴，
+     * 表现为「起手能斜着走，滑一小段就被锁死」（2026-10-30 用户反馈修正）。
+     */
     private var tpScrollAxis = 0
-    /** 手势开始时的双指跨度（捏合判定用**累计**跨度变化，而不是单帧） */
+    /** 轴锁是否已经判定过（true = 本次手势固定，不再重新判定） */
+    private var tpScrollAxisDecided = false
+    /**
+     * 判定轴锁用的**滑动窗口**：最近 RECENT_FRAMES 帧的质心净位移（px）。
+     * 为什么不用「从手势开始的累计位移」：起手那一下的抖动会被永久记住，
+     * 方向噪声就能把手势锁死到错误的轴（2026-10-30 用户反馈「横向、斜向都用不了」）。
+     * 用最近几帧的净位移，判的是**当前真正在往哪滑**。
+     */
+    private val recentX = FloatArray(RECENT_FRAMES)
+    private val recentY = FloatArray(RECENT_FRAMES)
+    private var recentIdx = 0
+    private var recentCount = 0
+    private var recentSumX = 0f
+    private var recentSumY = 0f
+
+    private fun resetRecentWindow() {
+        recentX.fill(0f)
+        recentY.fill(0f)
+        recentIdx = 0
+        recentCount = 0
+        recentSumX = 0f
+        recentSumY = 0f
+    }
+
+    /** 喂入一帧质心位移，滚动窗口前移（保持最近 RECENT_FRAMES 帧的和）。 */
+    private fun pushRecent(dx: Float, dy: Float) {
+        recentSumX += dx - recentX[recentIdx]
+        recentSumY += dy - recentY[recentIdx]
+        recentX[recentIdx] = dx
+        recentY[recentIdx] = dy
+        recentIdx = (recentIdx + 1) % RECENT_FRAMES
+        if (recentCount < RECENT_FRAMES) recentCount++
+    }
+    /** 手势开始时的双指跨度（保留观测；捏合判定已于 2026-10-29 改为「两指反向运动」，不再用它） */
     private var tpStartSpan = 0f
 
     /**
@@ -442,14 +669,20 @@ class PenCanvasView(context: Context) : View(context) {
         tpMaxPointers = 0
         tpMoved = 0f
         tpFingerId = -1
-        tpPinchMode = false
+        tp2State = 0
+        tpPinchLatched = false   // 手指全清：捏合锁存解除
+        tpIdA = -1
+        tpIdB = -1
+        tpAccumA = 0f
+        tpAccumB = 0f
+        tpVecAX = 0f; tpVecAY = 0f; tpVecBX = 0f; tpVecBY = 0f
         tpStartSpan = 0f
         panning = false
         hasLast = false
         // 双击拖拽可能正按着左键，切模式前必须松开
         releaseTapDrag("切模式")
         // 死区闸门也要清干净，避免切换模式后残留上一模式的死区状态
-        trackpadMoveGate.reset()
+        pointerSmoother.reset()
         trackpadScrollGate.reset()
         panGate.reset()
         clearTrail()
@@ -485,9 +718,15 @@ class PenCanvasView(context: Context) : View(context) {
         tpMaxPointers = 0
         tpMoved = 0f
         tpFingerId = -1
-        tpPinchMode = false
+        tp2State = 0
+        tpPinchLatched = false   // 手指全清：捏合锁存解除
+        tpIdA = -1
+        tpIdB = -1
+        tpAccumA = 0f
+        tpAccumB = 0f
+        tpVecAX = 0f; tpVecAY = 0f; tpVecBX = 0f; tpVecBY = 0f
         tpStartSpan = 0f
-        trackpadMoveGate.reset()
+        pointerSmoother.reset()
         trackpadScrollGate.reset()
         // 兜底复位时双击拖拽可能还按着左键，一并松开
         releaseTapDrag("兜底复位")
@@ -1152,10 +1391,21 @@ class PenCanvasView(context: Context) : View(context) {
                 tpLastCy = cy
                 tpLastSpan = span
                 tpStartSpan = span
-                tpPinchMode = false
+                tp2State = 0
+                tpPinchLatched = false   // 全新手势：捏合锁存解除
+                tpIdA = -1
+                tpIdB = -1
+                tpAccumA = 0f
+                tpAccumB = 0f
+                tpVecAX = 0f; tpVecAY = 0f; tpVecBX = 0f; tpVecBY = 0f
                 tpScrollAxis = 0
+                tpScrollAxisDecided = false   // 新手势：轴锁重新判定
+                resetRecentWindow()
+                // 新手势 → 重按自检重新开始（重新学压力范围 / 接触面积基线）
+                pressSignal.reset()
+                Haptics.resetScrollTick()
                 // 新手势开始 → 移动死区重新生效（手抖不再让光标乱飘）
-                trackpadMoveGate.reset()
+                pointerSmoother.reset()
                 trackpadScrollGate.reset()
                 // 手指一落上来，S Pen 就让位（PC 端收到这个信号后会松开笔的按键）
                 tpPenDown = false
@@ -1179,8 +1429,36 @@ class PenCanvasView(context: Context) : View(context) {
                 tpLastCy = cy
                 tpLastSpan = span
                 tpStartSpan = span     // 进入多点手势：以当前跨度为捏合判定基准
-                tpPinchMode = false
                 tpScrollAxis = 0       // 新的多点手势：滚动轴锁重新判定
+                tpScrollAxisDecided = false
+                resetRecentWindow()
+                // 轴锁/滑动的基准点 = **双指手势开始时**的质心。
+                // 以前沿用第一根手指 ACTION_DOWN 的位置：两指摆好后质心天然偏移半指间距
+                // （30~60px，远大于 10dp 锁轴阈值），第一帧 MOVE 就把轴锁锁死到由
+                // 「手指摆放几何」决定的方向 —— 横着摆的两指想竖滚会被锁成横轴（上下没反应），
+                // 竖着摆则左右没反应；竖滑带一点横漂就成了「上下变左右」。
+                // 现在以当前质心重置基准，轴锁衡量的就只有**真正的滚动位移**。
+                tpStartX = cx
+                tpStartY = cy
+                // 双指跟踪初始化：按 pointerId 分别累计两指的位移
+                // （「捏合必须两指都有位移」「一指静止 → 单指跟随」都靠它判定）
+                if (cnt == 2) {
+                    tpIdA = e.getPointerId(0)
+                    tpIdB = e.getPointerId(1)
+                    tpAccumA = 0f
+                    tpAccumB = 0f
+                    tpVecAX = 0f; tpVecAY = 0f; tpVecBX = 0f; tpVecBY = 0f
+                    tpPrevAX = e.getX(0)
+                    tpPrevAY = e.getY(0)
+                    tpPrevBX = e.getX(1)
+                    tpPrevBY = e.getY(1)
+                    // 捏合启动窗口起点：窗口内不锁单指跟随（捏合起手常常一指先动，
+                    // 若立刻锁成单指跟随，用户就会看到「缩放和移动混在一起」）
+                    tpTwoFingerAt = android.os.SystemClock.uptimeMillis()
+                }
+                // 捏合锁存中：不重置状态机（保持缩放态），新落的手指并进来后
+                // 仍按「只看间距」输出缩放，绝不退回滚动/单指发移动。
+                if (!tpPinchLatched) tp2State = 0
                 // 多指介入 → 单指敲击 / 双击拖拽全部作废（左键若按着就松开）
                 releaseTapDrag("多指介入")
                 // 双指手势重新开始 → 滚动死区重新计算
@@ -1193,6 +1471,7 @@ class PenCanvasView(context: Context) : View(context) {
                     val dCx = cx - tpLastCx
                     val dCy = cy - tpLastCy
                     val dSpan = span - tpLastSpan
+                    pushRecent(dCx, dCy)   // 轴锁判定用：最近几帧的净位移
                     tpMoved += kotlin.math.abs(dCx) + kotlin.math.abs(dCy) + kotlin.math.abs(dSpan)
                     if (cnt >= 3) {
                         // 三指 / 四指滑动：左右、上下各拆成独立槽位，按主方向分发配置好的动作
@@ -1226,6 +1505,7 @@ class PenCanvasView(context: Context) : View(context) {
                                 val now = android.os.SystemClock.uptimeMillis()
                                 if (now - lastSwipeActionAt > SWIPE_ACTION_COOLDOWN_MS) {
                                     lastSwipeActionAt = now
+                                    Haptics.action()   // 多指滑动动作被识别
                                     dispatchDirSwipe(code, if (cnt == 3) "三指" else "四指", right, up)
                                 }
                             }
@@ -1234,60 +1514,147 @@ class PenCanvasView(context: Context) : View(context) {
                             tpStartY = cy
                         }
                     } else {
-                        // 捏合判定：用**手势开始到现在的累计跨度变化**。
-                        // 以前用单帧 dSpan/tpLastSpan > 12% —— 真实捏合每帧只变化 1~2%，
-                        // 单帧永远到不了阈值，结果触摸板模式的捏合从来没触发过。
-                        //
-                        // 死区（双重条件）：
-                        //  · 相对阈值：跨度变化 > 起始跨度的 pinchDeadZoneRel（默认 15%）
-                        //  · 绝对阈值：跨度变化 > pinchDeadZoneDp 换算的像素（默认 6dp）
-                        // 两者都满足才算捏合。否则两指靠得近时，15% 也只有几像素，
-                        // 手指轻微抖动就把「双指滑动」抢走。
-                        if (!tpPinchMode && PinchDeadZone.engaged(
-                                tpStartSpan, span, pinchDeadZoneRel, dpPx(pinchDeadZoneDp))) {
-                            tpPinchMode = true
-                        }
-                        // 迟滞退出：捏合过程中如果跨度回到起点附近，放弃捏合、交还给双指滑动
-                        if (tpPinchMode && PinchDeadZone.released(tpStartSpan, span, dpPx(pinchDeadZoneDp))) {
-                            tpPinchMode = false
-                            tpStartSpan = span
-                            trackpadScrollGate.reset()
-                        }
-                        if (tpPinchMode && g2Pinch != 0) {
-                            // 捏合 → 按「双指捏合」槽位配置的动作分发（默认缩放）
-                            // 音量/任务切换这类一次性动作要节流，否则一次捏合会连发几十次
-                            val factor = if (tpLastSpan > 1f) span / tpLastSpan else 1f
-                            val now = android.os.SystemClock.uptimeMillis()
-                            if (g2Pinch == 2) {
-                                dispatchPinch(g2Pinch, factor)      // 缩放：连续量，每帧都发
-                            } else if (now - lastPinchActionAt > PINCH_ACTION_COOLDOWN_MS) {
-                                lastPinchActionAt = now
-                                dispatchPinch(g2Pinch, if (factor > 1f) 1.06f else 0.94f)
-                            }
-                        } else if (g2Swipe != 0 && (kotlin.math.abs(dCx) > 0.5f || kotlin.math.abs(dCy) > 0.5f)) {
-                            // 双指滑动 → 滚轮（滚动比例可配置）
-                            // 与光标移动同理：横纵都用 h 归一化，横向/纵向滚动速度才一致
-                            // 移动死区：累计位移超过阈值才开始滚，避免手抖造成误滚
-                            //
-                            // 轴锁（用户反馈：横着滑经常被误判成上下）：主方向一明确就锁定该轴，
-                            // 另一轴不再送出。纵向要明显占优（> SWIPE_VERT_BIAS 倍横向）才算上下，
-                            // 横滑时手带一点上下漂移不会让页面跟着竖滚。
-                            if (tpScrollAxis == 0) {
-                                val adx = kotlin.math.abs(cx - tpStartX)
-                                val ady = kotlin.math.abs(cy - tpStartY)
-                                if (adx > dpPx(10f) || ady > dpPx(10f)) {
-                                    tpScrollAxis = if (ady > adx * SWIPE_VERT_BIAS) 2 else 1
+                        // ---- 双指分支：三态状态机（缩放 / 滚动 / 单指跟随）----
+                        // 用户规格（2026-10-29 下午修订）：
+                        //  · 捏合判定放宽：两指**沿同一直线反向运动**即判捏合——幅度不必对称，
+                        //    只要不是一指静止；判成捏合后**过程只看两指间距**（输出缩放），
+                        //    不要求维持运动，也不回退到滚动；
+                        //  · 只有一指动 → 忽略静止指，按单指滑动移动光标；
+                        //  · 进入移动识别（滚动 / 单指跟随）后，本手势不再处理缩放；
+                        //  · 滚动方向三态：近似竖 → 锁竖轴只出 dy；近似横 → 锁横轴只出 dx；
+                        //    斜向（允许一点偏角）→ 不锁轴，横纵同时输出。
+                        val iA = if (tpIdA >= 0) e.findPointerIndex(tpIdA) else -1
+                        val iB = if (tpIdB >= 0) e.findPointerIndex(tpIdB) else -1
+                        if (iA >= 0 && iB >= 0) {
+                            val dax = e.getX(iA) - tpPrevAX
+                            val day = e.getY(iA) - tpPrevAY
+                            val dbx = e.getX(iB) - tpPrevBX
+                            val dby = e.getY(iB) - tpPrevBY
+                            tpAccumA += kotlin.math.hypot(dax.toDouble(), day.toDouble()).toFloat()
+                            tpAccumB += kotlin.math.hypot(dbx.toDouble(), dby.toDouble()).toFloat()
+                            tpVecAX += dax; tpVecAY += day
+                            tpVecBX += dbx; tpVecBY += dby
+                            tpPrevAX = e.getX(iA); tpPrevAY = e.getY(iA)
+                            tpPrevBX = e.getX(iB); tpPrevBY = e.getY(iB)
+
+                            // 未定态 → 尝试判定一次；判成 1/2/3 后本手势固定。
+                            // 判定优先级（2026-10-29 修订）：
+                            //  · **捏合（反向运动）随时可判、最优先**——起手一指先动也不会被污染；
+                            //  · 滚动 / 单指跟随都以「质心位移」为依据，会被捏合起手的单指先动污染，
+                            //    所以要等**启动窗口**（150ms）过后才允许锁定：窗口内只认捏合，
+                            //    窗口过了再按质心位移判滚动 / 单指跟随（正常滚动手感只晚 2~3 帧）。
+                            if (tp2State == 0) {
+                                val both = TwoFingerLogic.bothMoving(
+                                    tpAccumA, tpAccumB, dpPx(TP2_BOTH_MIN_DP))
+                                val windowOver =
+                                    android.os.SystemClock.uptimeMillis() - tpTwoFingerAt > TP2_FOLLOW_DELAY_MS
+                                when {
+                                    both && TwoFingerLogic.opposing(
+                                        tpVecAX, tpVecAY, tpVecBX, tpVecBY, dpPx(TP2_BOTH_MIN_DP)) -> {
+                                        tp2State = 1
+                                        tpPinchLatched = true   // 锁存：本序列不再发移动指令
+                                        Haptics.gestureStart()  // 捏合被识别 → 震一下确认
+                                        onDebug?.invoke("双指 → 捏合（两指反向运动）")
+                                    }
+                                    windowOver && TwoFingerLogic.singleFingerFollow(
+                                        tpAccumA, tpAccumB, dpPx(TP2_BOTH_MIN_DP), dpPx(10f)) -> {
+                                        tp2State = 3
+                                        Haptics.gestureStart()
+                                        onDebug?.invoke("双指 → 单指跟随（忽略静止指）")
+                                    }
+                                    windowOver && (
+                                        maxOf(kotlin.math.abs(cx - tpStartX), kotlin.math.abs(cy - tpStartY)) > dpPx(10f)) -> {
+                                        tp2State = 2
+                                        // 轴锁**只判一次**：判成横/竖就锁该轴，判成斜向就一直双轴输出。
+                                        // 这里只是「进入滚动态」，真正的轴锁判定在下面按累计位移达标时进行
+                                        // （进入时位移往往还不够，判了会把噪声方向锁死）。
+                                        val ax = TwoFingerLogic.decideAxisOrNull(
+                                            recentSumX, recentSumY, dpPx(SCROLL_WINDOW_MIN_DP), SCROLL_AXIS_BIAS)
+                                        tpScrollAxis = ax ?: 0
+                                        tpScrollAxisDecided = ax != null
+                                        Haptics.gestureStart()   // 滚动被识别 → 震一下
+                                        Haptics.resetScrollTick()
+                                        onDebug?.invoke("双指 → 滚动 axis=$tpScrollAxis")
+                                    }
                                 }
                             }
-                            val f = when (tpScrollAxis) {
-                                1 -> dCx to 0f
-                                2 -> 0f to dCy
-                                else -> dCx to dCy
-                            }
-                            val gate = trackpadScrollGate.feed(f.first, f.second)
-                            if (!gate.isZero) {
-                                onMouse?.invoke(Protocol.MOUSE_SCROLL, gate.dx / h * scrollScale, gate.dy / h * scrollScale)
-                                onDebug?.invoke("双指滑动 dx=${String.format("%.3f", gate.dx / h)} dy=${String.format("%.3f", gate.dy / h)} → 滚动")
+
+                            when (tp2State) {
+                                1 -> if (g2Pinch != 0) {
+                                    // 捏合 → 按「双指捏合」槽位配置的动作分发（默认缩放）
+                                    // 音量/任务切换这类一次性动作要节流，否则一次捏合会连发几十次
+                                    val now = android.os.SystemClock.uptimeMillis()
+                                    if (g2Pinch == 2) {
+                                        // 缩放状态内**没有死区**（用户规格 2026-10-30）：
+                                        // 死区只在「激活捏合」的判定里起作用（两指都要有累计位移、
+                                        // 且必须是反向运动），一旦进入缩放状态就不再过滤 ——
+                                        // 跨度只要变了就按 1:1 发一帧，再小的移动也会响应。
+                                        // 基准取「上一帧跨度」：逐帧相对量相乘即总变化，
+                                        // 既不丢位移也不会累积漂移（只有跨度真的没变才不发）。
+                                        val factor = if (tpLastSpan > 1f) span / tpLastSpan else 1f
+                                        if (factor != 1f) dispatchPinch(g2Pinch, factor)
+                                    } else if (now - lastPinchActionAt > PINCH_ACTION_COOLDOWN_MS) {
+                                        lastPinchActionAt = now
+                                        val f = if (tpLastSpan > 1f) span / tpLastSpan else 1f
+                                        dispatchPinch(g2Pinch, if (f > 1f) 1.06f else 0.94f)
+                                    }
+                                }
+                                3 -> {
+                                    // 单指跟随：跟累计位移大的那根手指移动光标（忽略静止指）
+                                    val pdx: Float
+                                    val pdy: Float
+                                    if (tpAccumA >= tpAccumB) { pdx = dax; pdy = day }
+                                    else { pdx = dbx; pdy = dby }
+                                    val sm = pointerSmoother.feed(pdx, pdy)
+                                    if (!sm.isZero) sendMouseMove(sm.dx, sm.dy)
+                                }
+                                2 -> if (g2Swipe != 0 && (kotlin.math.abs(dCx) > 0.5f || kotlin.math.abs(dCy) > 0.5f)) {
+                                    // 滚动（只在已判定为滚动态时输出：未定态不发任何东西，
+                                    // 否则捏合启动窗口期的质心移动会被当成滚动漏出去 —— 用户规格
+                                    // 「缩放动作进行中，不响应移动手势」的前半段就靠这个保证）。
+                                    // 轴锁只在「还没判定」时判定，且**只判一次**：
+                                    // 斜着滑 → 判成 FREE → 本次手势一直保持双轴输出；
+                                    // 明显横/竖 → 锁单轴。判过就绝不改判（用户规格：
+                                    // 激活了斜向移动就应该一直能全方向移动，2026-10-30）。
+                                    if (!tpScrollAxisDecided) {
+                                        // 判定时机看**累计位移**（手势已经明确开始了才判，慢速滑动
+                                        // 也不会漏判）；方向看**最近窗口**（避免起手抖动被永久记住）。
+                                        // 只用窗口位移当门槛时，滑得慢就永远达不到门槛 → 一直停在
+                                        // 「未判定」= 双轴透传，表现就是竖向没锁住（2026-10-30）。
+                                        val travelled = maxOf(
+                                            kotlin.math.abs(cx - tpStartX), kotlin.math.abs(cy - tpStartY))
+                                        if (travelled >= dpPx(SCROLL_AXIS_MIN_DP)) {
+                                            val ax = TwoFingerLogic.decideAxisOrNull(
+                                                recentSumX, recentSumY, dpPx(SCROLL_WINDOW_MIN_DP), SCROLL_AXIS_BIAS)
+                                            if (ax != null) {
+                                                tpScrollAxis = ax
+                                                tpScrollAxisDecided = true
+                                            }
+                                        }
+                                    } else if (tpScrollAxis != TwoFingerLogic.AXIS_FREE) {
+                                        // 已锁单轴：只有「最近位移明确指向另一轴」才允许改判一次
+                                        // （门槛更高 30dp、bias 更严 3.0，避免滑着滑着又锁回去）。
+                                        // 斜向 FREE 不走这里 —— 激活斜向后就一直是全方向（用户规格）。
+                                        val ax = TwoFingerLogic.decideAxisOrNull(
+                                            recentSumX, recentSumY, dpPx(SCROLL_AXIS_SWITCH_DP), SCROLL_AXIS_SWITCH_BIAS)
+                                        if (ax != null && ax != tpScrollAxis && ax != TwoFingerLogic.AXIS_FREE) {
+                                            tpScrollAxis = ax
+                                            onDebug?.invoke("双指滚动 → 换向 axis=$tpScrollAxis")
+                                        }
+                                    }
+                                    val f = when (tpScrollAxis) {
+                                        1 -> dCx to 0f
+                                        2 -> 0f to dCy
+                                        else -> dCx to dCy
+                                    }
+                                    val gate = trackpadScrollGate.feed(f.first, f.second)
+                                    if (!gate.isZero) {
+                                        // 方向取反（用户要求）：手指上滑 → 页面内容向下（传统滚轮方向）
+                                        onMouse?.invoke(Protocol.MOUSE_SCROLL, -gate.dx / h * scrollScale, -gate.dy / h * scrollScale)
+                                        Haptics.scrollTick()     // 滚动中的细震（节流，像触摸板的段落感）
+                                        onDebug?.invoke("双指滑动 dx=${String.format("%.3f", gate.dx / h)} dy=${String.format("%.3f", gate.dy / h)} → 滚动 axis=$tpScrollAxis")
+                                    }
+                                }
                             }
                         }
                     }
@@ -1295,11 +1662,22 @@ class PenCanvasView(context: Context) : View(context) {
                     tpLastCy = cy
                     tpLastSpan = span
                 } else {
+                    if (tpPinchLatched) {
+                        // 捏合锁存中：捏合后抬掉一指，剩下的手指**不是**单指移动——
+                        // 只更新基准点，不发移动、不进拖拽、不触发双击拖拽（用户规格：
+                        // 触发缩放后直到手指离开，不应有任何移动指令）
+                        tpSingleX = cx
+                        tpSingleY = cy
+                        tpLastCx = cx
+                        tpLastCy = cy
+                        tpLastSpan = span
+                    } else {
                     // 双击后按住并移动 → 先按下左键，后面的位移就成了「拖动 / 框选」。
                     // 必须在发送位移**之前**按下：否则开头这一小段只是移动光标，选区起点会偏。
-                    if (tapDrag.onMove(cx, cy) == TapDrag.Act.DRAG_DOWN) {
+                    if (tapDrag.onMove(cx, cy) == TapDrag.Act.DRAG_DOWN && !pressDragging) {
                         onMouse?.invoke(Protocol.MOUSE_LEFT_DOWN, 0f, 0f)
                         onActionVisual?.invoke(Protocol.MOUSE_LEFT_CLICK)   // 左键按钮闪一下 = 已按住
+                        Haptics.dragStart()
                         onDebug?.invoke("双击按住拖动 → 按下左键，开始选择")
                     }
                     // 单指 → 移动光标（速度倍率可配置）
@@ -1312,29 +1690,45 @@ class PenCanvasView(context: Context) : View(context) {
                     //    getHistoricalX/Y（不单独派发事件），只吃最新点会丢掉中间的采样，
                     //    慢速移动就变成了几段折线。这里逐个历史点补发。
                     //
-                    // 移动死区（moveDeadZoneDp）：手指按下后先累计位移，
-                    // 超过死区才开始驱动光标 —— 手抖不再让光标乱飘，起步更稳。
+                    // 抖动过滤：交给[PointerSmoother]的噪声闸门（自标定底噪，
+                    // 只判「抖动 vs 真在动」，慢速移动照样跟得上，位移不丢）。
                     val idx = if (tpFingerId >= 0) e.findPointerIndex(tpFingerId) else -1
+                    // 重按 = 按下左键（移动途中直接用力度控制「按下 / 松开」）——
+                    // 必须在发送位移**之前**处理：否则开头这一小段只是移动光标，选区起点会偏。
+                    updatePressDrag(e, idx)
                     val hs = if (idx >= 0) e.historySize else 0
                     var prevX = tpSingleX
                     var prevY = tpSingleY
+                    // 本帧的**累计**位移：Android 会把一帧内的多个采样点塞进历史点里，
+                    // 逐点喂平滑器会被微死区误吃（每个采样点位移都很小），
+                    // 所以先把本帧所有位移加起来，再作为一个 delta 过平滑器。
+                    var frameDx = 0f
+                    var frameDy = 0f
                     if (idx >= 0) {
                         for (k in 0 until hs) {
                             val hx = e.getHistoricalX(idx, k)
                             val hy = e.getHistoricalY(idx, k)
                             tpMoved += kotlin.math.abs(hx - prevX) + kotlin.math.abs(hy - prevY)
-                            val gate = trackpadMoveGate.feed(hx - prevX, hy - prevY)
-                            if (!gate.isZero) sendMouseMove(gate.dx, gate.dy)
+                            frameDx += hx - prevX
+                            frameDy += hy - prevY
                             prevX = hx; prevY = hy
                         }
                     }
                     val dx = cx - prevX
                     val dy = cy - prevY
                     tpMoved += kotlin.math.abs(dx) + kotlin.math.abs(dy)
-                    val gate = trackpadMoveGate.feed(dx, dy)
-                    if (!gate.isZero) sendMouseMove(gate.dx, gate.dy)
+                    frameDx += dx
+                    frameDy += dy
+                    val sm = pointerSmoother.feed(frameDx, frameDy)
+                    // 指针路径上**不再叠加起步死区**（v1.4.3）：
+                    // 噪声闸门已经用「自标定底噪 + 滑窗净位移」把抖动和落下瞬态挡住了，
+                    // 再叠一个固定死区，只会让慢速移动又慢半拍（用户反馈：
+                    // 「慢慢移动好长一段距离，指针没动」——死区 + 速度死区叠加的结果）。
+                    if (!sm.isZero) sendMouseMove(sm.dx, sm.dy)
+                    logPointerGate()
                     tpSingleX = cx
                     tpSingleY = cy
+                    }
                 }
             }
 
@@ -1343,15 +1737,40 @@ class PenCanvasView(context: Context) : View(context) {
                 // 不能再减 1 —— 否则双指抬成单指时 tpActiveFingers 会掉到 0，
                 // 提前给 PC 发「手指全离开」，笔的悬停流立刻回来抢光标（表现为光标往回跳）。
                 tpActiveFingers = TrackpadState.fingersAfterPointerUp(cnt)
-                // 手指数变化：重置捏合判定基准（3 指收成 2 指后要能重新捏合）
-                tpStartSpan = span
-                tpPinchMode = false
-                // 从多指回到单指：重置单指基准，避免光标突然跳一下
-                tpSingleX = cx
-                tpSingleY = cy
-                tpLastCx = cx
-                tpLastCy = cy
-                tpLastSpan = span
+                if (tpPinchLatched) {
+                    // 捏合锁存中：手指抬起**不**重置状态机（保持 tp2State=1），
+                    // 剩下的手指按上面的锁存分支只更新基准、不发移动。
+                    // （2026-10-29 用户规格：触发缩放后直到手指离开，不应有任何移动指令）
+                    tpStartSpan = span
+                    tpSingleX = cx
+                    tpSingleY = cy
+                    tpLastCx = cx
+                    tpLastCy = cy
+                    tpLastSpan = span
+                } else {
+                    // 手指数变化：重置捏合判定基准（3 指收成 2 指后要能重新捏合）
+                    tpStartSpan = span
+                    tp2State = 0
+                    tpIdA = -1
+                    tpIdB = -1
+                    tpAccumA = 0f
+                    tpAccumB = 0f
+                    tpVecAX = 0f; tpVecAY = 0f; tpVecBX = 0f; tpVecBY = 0f
+                    tpScrollAxis = 0
+                    tpScrollAxisDecided = false
+                    resetRecentWindow()
+                    // 从多指回到单指：重置单指基准，避免光标突然跳一下
+                    tpSingleX = cx
+                    tpSingleY = cy
+                    tpLastCx = cx
+                    tpLastCy = cy
+                    tpLastSpan = span
+                    // 双指期间的滚动/跟随死区全部清掉，回单指后重新计
+                    trackpadScrollGate.reset()
+                    pointerSmoother.reset()
+                }
+                // 从多指回到单指：重按状态收尾（左键不能挂着）
+                releasePressDrag("手指数变化")
                 // 最后一根手指离开触摸板 → S Pen 恢复控制光标
                 if (tpActiveFingers == 0) onFingerState?.invoke(false)
             }
@@ -1359,7 +1778,16 @@ class PenCanvasView(context: Context) : View(context) {
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 tpActiveFingers = 0
                 tpFingerId = -1
-                tpPinchMode = false
+                tp2State = 0
+                // 重按拖着左键就抬手了 → 补发抬起 + 轻震动（防鼠标永久按住）
+                releasePressDrag("抬手")
+                logPressureDiag()        // 压力自检结论（只报一次）
+                tpPinchLatched = false   // 全部手指离开：捏合锁存解除
+                tpIdA = -1
+                tpIdB = -1
+                tpAccumA = 0f
+                tpAccumB = 0f
+                tpVecAX = 0f; tpVecAY = 0f; tpVecBX = 0f; tpVecBY = 0f
                 onFingerState?.invoke(false)
                 val now = android.os.SystemClock.uptimeMillis()
                 val dur = now - tpStartTime
@@ -1370,6 +1798,7 @@ class PenCanvasView(context: Context) : View(context) {
 
                 if (act == TapDrag.Act.DRAG_UP) {
                     onMouse?.invoke(Protocol.MOUSE_LEFT_UP, 0f, 0f)
+                    Haptics.dragEnd()
                     onDebug?.invoke("拖拽结束 → 松开左键")
                 } else if (tpMaxPointers >= 2) {
                     // 多指手势：单指敲击的判定结果一律作废，只按手指数分发配置好的动作
@@ -1388,10 +1817,12 @@ class PenCanvasView(context: Context) : View(context) {
                         TapDrag.Act.DOUBLE_CLICK -> {
                             onMouse?.invoke(Protocol.MOUSE_LEFT_DOUBLE, 0f, 0f)
                             onActionVisual?.invoke(Protocol.MOUSE_LEFT_DOUBLE)
+                            Haptics.click()
                             onDebug?.invoke("双击 → 鼠标双击（左键 ×2）")
                         }
                         TapDrag.Act.SINGLE_CLICK -> {
                             onMouse?.invoke(Protocol.MOUSE_LEFT_CLICK, 0f, 0f)
+                            Haptics.click()
                             onDebug?.invoke("单击 → 鼠标左键（按住太久）")
                         }
                         TapDrag.Act.PENDING_SINGLE ->
@@ -1435,6 +1866,40 @@ class PenCanvasView(context: Context) : View(context) {
          * 其余一律判「左右」。用户反馈横滑常被误判成上下，所以故意偏向横向。
          */
         private const val SWIPE_VERT_BIAS = 1.6f
+
+        /**
+         * 双指**滚动**轴锁的方向偏置：竖向要超过横向的它倍才锁竖（横向同理），
+         * 两轴相当 → 斜向不锁轴、双轴同时输出。
+         * 2.0 时竖滑容易被判成斜向（竖滑时手指横向摆幅相对更大，横向则天然稳）
+         * → 表现「横向锁得住、竖向锁不住」，所以收到 1.7 让两轴对称；
+         * 1.7 仍保留 30°~60° 为斜向窗口（45° 斜滑照旧不锁），比三/四指的 1.6 更宽。
+         */
+        private const val SCROLL_AXIS_BIAS = 1.7f
+
+        /**
+         * 轴锁判定的**时机**门槛(dp)：手势累计位移超过它才判定方向（保证手势确实开始了）。
+         * 方向本身取最近窗口的净位移，避免起手抖动被永久记住。
+         * （曾只用窗口位移当门槛 → 滑得慢就永远达不到 → 停在「未判定」= 双轴透传，
+         *   表现为竖向没锁住，2026-10-30）
+         */
+        private const val SCROLL_AXIS_MIN_DP = 24f
+        /** 方向判定用的**窗口位移**门槛(dp)：最近几帧只要有这么明确的位移就能定方向。 */
+        private const val SCROLL_WINDOW_MIN_DP = 8f
+        /** 已锁单轴后想改判的门槛(dp)与偏置：明显换方向（如横滑改竖滑）才允许改判。 */
+        private const val SCROLL_AXIS_SWITCH_DP = 30f
+        private const val SCROLL_AXIS_SWITCH_BIAS = 3.0f
+        /** 轴锁判定用的滑动窗口帧数（最近这么多帧的净位移） */
+        private const val RECENT_FRAMES = 6
+
+        /**
+         * 双指「都有位移」的最低累计量(dp)：低于它视为静止指。
+         * 这是**激活捏合**的门槛（也是单指跟随判定的前提）——
+         * 死区只在激活阶段起作用；进入缩放状态后不再有任何过滤
+         * （跨度一变就发，小的移动也响应，详见 tp2State == 1 分支，2026-10-30）。
+         */
+        private const val TP2_BOTH_MIN_DP = 3f
+        /** 捏合启动窗口（ms）：窗口内不锁单指跟随，给反向运动判定留机会 */
+        private const val TP2_FOLLOW_DELAY_MS = 150L
         /** 捏合触发一次性动作（音量/任务切换等）的冷却时间(ms) */
         private const val PINCH_ACTION_COOLDOWN_MS = 320L
         /** 左右滑动触发一次性动作的冷却时间(ms)：一次滑动只触发一次，不会连发 */
