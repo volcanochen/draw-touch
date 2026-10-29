@@ -14,6 +14,7 @@ SpenTablet PC 端协议级冒烟测试（回归套件核心）。
   7b. 桌面笔迹走分层窗口：画布能建起来、画一笔不报错（去黑边回归）
   8. 「笔让位」兜底超时 / 9. 心跳谎报自愈
   10. SAVE_REQ 截屏保存 → 存到电脑图片库 + 下发手机相册
+  11. 协议版本不匹配 → PC 下发 INFO 后拒绝对接
 
 用法：python tests/protocol_smoke.py [--host 127.0.0.1] [--port 6000]
 前置：PC 端 SpenTabletHost.exe 已启动（脚本会自动定位其日志文件）。
@@ -153,7 +154,8 @@ def main():
 
     # ---- 1. HELLO 握手 + INFO 回包 ----
     mark = log_size(log)
-    hello = f32(1080.0, 2400.0, 1.0, 0.0, 0.0, 0.0, 1.0)  # 数位板、保持比例、框复位
+    # 8 个 float：书写区宽高 / 比例偏好 / 工作模式 / 框 L T S / 协议兼容版本（末位）
+    hello = f32(1080.0, 2400.0, 1.0, 0.0, 0.0, 0.0, 1.0, 2.0)  # 数位板、保持比例、框复位、pv=2
     s.sendall(frame(T_HELLO, hello))
     info = recv_frame(s, timeout=5)
     check("HELLO → 收到 INFO 回包", info is not None and info[0] == T_INFO,
@@ -397,6 +399,32 @@ def main():
             check("落盘文件是合法 PNG", file_ok, detail)
         check("SAVE_REQ → 收到下发给手机的分片 PNG",
               total > 0 and got >= total, f"{got}/{total}B")
+
+    # ---- 11. 协议版本不兼容 → PC 拒绝对接（下发 INFO 后断开）----
+    mark = log_size(log)
+    s3 = socket.create_connection((args.host, args.port), timeout=5)
+    try:
+        bad = f32(1080.0, 2400.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0)  # pv=1 ≠ 2
+        s3.sendall(frame(T_HELLO, bad))
+        closed = False
+        deadline = time.time() + 6
+        while time.time() < deadline:
+            try:
+                if s3.recv(64) == b"":      # 先会读到 INFO 帧，EOF 才是断开
+                    closed = True
+                    break
+            except (ConnectionResetError, ConnectionAbortedError):
+                closed = True
+                break
+            except socket.timeout:
+                pass
+        check("版本不匹配 → PC 拒绝对接（断开连接）", closed)
+        check("拒绝原因写入日志", log_contains(log, "[Ver]", mark))
+    finally:
+        try:
+            s3.close()
+        except OSError:
+            pass
 
     s.close()
     print(f"\n== 结果：{len(passed)} 通过, {len(failed)} 失败 ==")

@@ -420,6 +420,9 @@ class PenCanvasView(context: Context) : View(context) {
     private var lastSwipeActionAt = 0L
     /** 本手势是否已判定为「捏合」：一旦判定，后续都走捏合而不是滚动（直到手势结束） */
     private var tpPinchMode = false
+
+    /** 双指滚动的轴锁：0 未锁 / 1 只横滚 / 2 只竖滚（新手势重新判定） */
+    private var tpScrollAxis = 0
     /** 手势开始时的双指跨度（捏合判定用**累计**跨度变化，而不是单帧） */
     private var tpStartSpan = 0f
 
@@ -859,8 +862,17 @@ class PenCanvasView(context: Context) : View(context) {
 
             onDebug?.invoke(
                 "${EvtDump.actionName(e.action)} ${EvtDump.toolName(tt)} " +
+                        "xy=(${x.toInt()},${y.toInt()}) view=${width}x$height " +
+                        "nx=${String.format("%.2f", nx)} ny=${String.format("%.2f", ny)} " +
                         "p=${String.format("%.2f", pressure)} gain=${String.format("%.1f", pressureGain)}"
             )
+            // 视图还没布局好（宽/高为 0）时，归一化分母取 1 → nx 被钳到 1，
+            // 光标/笔迹会**全部钉死在范围框右缘**（上下能动、左右钉死 —— 用户报过的症状）。
+            // 这时宁可不发，等 onSizeChanged 布局完成后再恢复。
+            if (width <= 0 || height <= 0) {
+                Log.w(TAG, "EVT 丢弃：书写区尺寸无效 ${width}x$height")
+                continue
+            }
             // 触摸板模式：手指正压在板上时，S Pen **完全让位**（一个笔事件都不发）。
             // 原因：PC 端把每个笔事件都当成「绝对定位光标」，
             // 笔的悬停流（笔在平板上时每秒 60 帧）会不断把光标拽回笔的位置，
@@ -1141,6 +1153,7 @@ class PenCanvasView(context: Context) : View(context) {
                 tpLastSpan = span
                 tpStartSpan = span
                 tpPinchMode = false
+                tpScrollAxis = 0
                 // 新手势开始 → 移动死区重新生效（手抖不再让光标乱飘）
                 trackpadMoveGate.reset()
                 trackpadScrollGate.reset()
@@ -1167,6 +1180,7 @@ class PenCanvasView(context: Context) : View(context) {
                 tpLastSpan = span
                 tpStartSpan = span     // 进入多点手势：以当前跨度为捏合判定基准
                 tpPinchMode = false
+                tpScrollAxis = 0       // 新的多点手势：滚动轴锁重新判定
                 // 多指介入 → 单指敲击 / 双击拖拽全部作废（左键若按着就松开）
                 releaseTapDrag("多指介入")
                 // 双指手势重新开始 → 滚动死区重新计算
@@ -1185,20 +1199,25 @@ class PenCanvasView(context: Context) : View(context) {
                         val totalDx = cx - tpStartX
                         val totalDy = cy - tpStartY
                         if (kotlin.math.hypot(totalDx.toDouble(), totalDy.toDouble()) > SWIPE_PX) {
-                            val horiz = kotlin.math.abs(totalDx) >= kotlin.math.abs(totalDy)
+                            // 方向判定**偏向横向**（用户反馈：横滑时手会自然带一点上下漂移，
+                            // 等幅比较经常把横滑误判成上下）。纵向幅度要明显大于横向
+                            // （超过 SWIPE_VERT_BIAS 倍）才判上下，其余一律按左右分发。
+                            val adx = kotlin.math.abs(totalDx)
+                            val ady = kotlin.math.abs(totalDy)
+                            val vert = ady > adx * SWIPE_VERT_BIAS
                             val right = totalDx > 0f
                             val up = totalDy < 0f
                             val code = if (cnt == 3) {
                                 when {
-                                    horiz && right -> g3L
-                                    horiz -> g3R
+                                    !vert && right -> g3L
+                                    !vert -> g3R
                                     up -> g3U
                                     else -> g3D
                                 }
                             } else {
                                 when {
-                                    horiz && right -> g4L
-                                    horiz -> g4R
+                                    !vert && right -> g4L
+                                    !vert -> g4R
                                     up -> g4U
                                     else -> g4D
                                 }
@@ -1249,7 +1268,23 @@ class PenCanvasView(context: Context) : View(context) {
                             // 双指滑动 → 滚轮（滚动比例可配置）
                             // 与光标移动同理：横纵都用 h 归一化，横向/纵向滚动速度才一致
                             // 移动死区：累计位移超过阈值才开始滚，避免手抖造成误滚
-                            val gate = trackpadScrollGate.feed(dCx, dCy)
+                            //
+                            // 轴锁（用户反馈：横着滑经常被误判成上下）：主方向一明确就锁定该轴，
+                            // 另一轴不再送出。纵向要明显占优（> SWIPE_VERT_BIAS 倍横向）才算上下，
+                            // 横滑时手带一点上下漂移不会让页面跟着竖滚。
+                            if (tpScrollAxis == 0) {
+                                val adx = kotlin.math.abs(cx - tpStartX)
+                                val ady = kotlin.math.abs(cy - tpStartY)
+                                if (adx > dpPx(10f) || ady > dpPx(10f)) {
+                                    tpScrollAxis = if (ady > adx * SWIPE_VERT_BIAS) 2 else 1
+                                }
+                            }
+                            val f = when (tpScrollAxis) {
+                                1 -> dCx to 0f
+                                2 -> 0f to dCy
+                                else -> dCx to dCy
+                            }
+                            val gate = trackpadScrollGate.feed(f.first, f.second)
                             if (!gate.isZero) {
                                 onMouse?.invoke(Protocol.MOUSE_SCROLL, gate.dx / h * scrollScale, gate.dy / h * scrollScale)
                                 onDebug?.invoke("双指滑动 dx=${String.format("%.3f", gate.dx / h)} dy=${String.format("%.3f", gate.dy / h)} → 滚动")
@@ -1395,6 +1430,11 @@ class PenCanvasView(context: Context) : View(context) {
         private const val MIN_FRAME = 0.05f
         /** 三指左右滑的触发阈值(px) */
         private const val SWIPE_PX = 140f
+        /**
+         * 上下滑判定偏置：纵向幅度要超过横向的这么多倍才判「上下」，
+         * 其余一律判「左右」。用户反馈横滑常被误判成上下，所以故意偏向横向。
+         */
+        private const val SWIPE_VERT_BIAS = 1.6f
         /** 捏合触发一次性动作（音量/任务切换等）的冷却时间(ms) */
         private const val PINCH_ACTION_COOLDOWN_MS = 320L
         /** 左右滑动触发一次性动作的冷却时间(ms)：一次滑动只触发一次，不会连发 */

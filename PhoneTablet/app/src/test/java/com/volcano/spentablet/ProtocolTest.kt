@@ -69,13 +69,13 @@ class ProtocolTest {
     }
 
     @Test
-    fun `hello 帧 - 28 字节 7 个 float`() {
+    fun `hello 帧 - 32 字节 8 个 float，末位是协议版本`() {
         val f = Protocol.buildHello(1080f, 2400f, Protocol.ASPECT_KEEP, Protocol.MODE_MOUSE, 0.1f, 0.2f, 1.5f)
         val buf = ByteBuffer.wrap(f)
         val (type, len, _) = header(buf)
         assertEquals(Protocol.TYPE_HELLO, type)
-        assertEquals(28, len)
-        assertEquals(6 + 28, f.size)
+        assertEquals(32, len)
+        assertEquals(6 + 32, f.size)
         assertEquals(1080f, buf.float, 1e-4f)
         assertEquals(2400f, buf.float, 1e-4f)
         assertEquals(Protocol.ASPECT_KEEP.toFloat(), buf.float, 1e-6f)
@@ -83,6 +83,8 @@ class ProtocolTest {
         assertEquals(0.1f, buf.float, 1e-6f)
         assertEquals(0.2f, buf.float, 1e-6f)
         assertEquals(1.5f, buf.float, 1e-6f)
+        // 第 8 个 float = 协议兼容版本：PC 端据此判断两端能否对接
+        assertEquals(Protocol.PROTO_VER.toFloat(), buf.float, 1e-6f)
     }
 
     @Test

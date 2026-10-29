@@ -22,6 +22,14 @@ object Protocol {
     const val MAGIC2: Byte = 0x50 // 'P'
     const val VERSION: Byte = 0x01
 
+    /**
+     * 协议兼容版本（PROTOCOL VERSION）：双端能力集的版本号，握手时互相交换。
+     * 任何一端发现对方与自己不一致 → 指示灯变黄、停止后续对接（功能口径对不上，
+     * 硬连只会出现「手势错乱 / 光标瞬移」这类查不出原因的怪象）。
+     * 改协议（加帧类型 / 改帧语义 / 改负载布局）时必须 +1，两端同步改。
+     */
+    const val PROTO_VER: Int = 2
+
     const val TYPE_PEN_DOWN: Int = 0x01
     const val TYPE_PEN_MOVE: Int = 0x02
     const val TYPE_PEN_UP: Int = 0x03
@@ -113,7 +121,7 @@ object Protocol {
 
     private const val PAYLOAD_LEN = 24
     /** 握手帧 payload 长度（7 个 float） */
-    private const val HELLO_LEN = 28
+    private const val HELLO_LEN = 32
 
     fun buildPen(
         type: Int,
@@ -335,6 +343,8 @@ object Protocol {
         buf.putFloat(frameL)
         buf.putFloat(frameT)
         buf.putFloat(frameScale)
+        // 协议兼容版本：老 PC 只认前 28 字节会忽略它；新 PC 用来做兼容性检查
+        buf.putFloat(PROTO_VER.toFloat())
         return buf.array()
     }
 }

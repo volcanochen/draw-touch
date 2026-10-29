@@ -42,6 +42,12 @@ public sealed class TcpPenServer : IDisposable
     /// <summary>截屏数据（下行分片，格式同 TYPE_SHOT）</summary>
     private const byte TYPE_SAVE = 0x12;
 
+    /// <summary>
+    /// 协议兼容版本：握手（HELLO 的第 8 个 float / INFO 的 pv=）互相交换，
+    /// 不一致就拒绝对接（手机黄灯警告、PC 拒收）。改协议时两端同步 +1。
+    /// </summary>
+    internal const int ProtoVer = 2;
+
     // 鼠标帧 kind（与手机端 Protocol.MOUSE_* 一致）
     private const int MOUSE_MOVE = 0;
     private const int MOUSE_LEFT_DOWN = 1;
@@ -274,7 +280,9 @@ public sealed class TcpPenServer : IDisposable
                 // 两个基准不同源，差值就没有意义（还会被上一次的残留值污染）。
                 long basePhone = -1;
                 long recvMouse = 0;
-                while (!token.IsCancellationRequested)
+                // 协议版本不匹配 → 拒绝**本条**连接（按连接局部，别串台到别的客户端）
+                bool rejectConn = false;
+                while (!token.IsCancellationRequested && !rejectConn)
                 {
                     if (!ReadExactly(ns, header, 6)) break;
                     if (header[0] != MAGIC1 || header[1] != MAGIC2)
@@ -296,7 +304,7 @@ public sealed class TcpPenServer : IDisposable
                     switch (header[3])
                     {
                         case TYPE_HELLO:
-                            HandleHello(payload);
+                            if (HandleHello(payload)) rejectConn = true;
                             break;
                         case TYPE_PAN:
                             HandlePan(payload);
@@ -383,9 +391,10 @@ public sealed class TcpPenServer : IDisposable
     }
 
     /// <summary>握手帧：手机上报绘制面像素尺寸与比例偏好，用于做正确的等比映射。</summary>
-    private void HandleHello(byte[] p)
+    /// <summary>握手帧。返回 true = 手机协议版本不匹配，调用方读完这帧就断开。</summary>
+    private bool HandleHello(byte[] p)
     {
-        if (p.Length < 12) return;
+        if (p.Length < 12) return false;
         float w = BitConverter.ToSingle(p, 0);
         float h = BitConverter.ToSingle(p, 4);
         float mode = BitConverter.ToSingle(p, 8);
@@ -393,6 +402,18 @@ public sealed class TcpPenServer : IDisposable
         float frameL = p.Length >= 20 ? BitConverter.ToSingle(p, 16) : -1f;
         float frameT = p.Length >= 24 ? BitConverter.ToSingle(p, 20) : -1f;
         float frameScale = p.Length >= 28 ? BitConverter.ToSingle(p, 24) : -1f;
+        // 手机上报的协议兼容版本（老手机 HELLO 只有 28 字节 → 视为 v0，不兼容）
+        int phonePv = p.Length >= 32 ? (int)BitConverter.ToSingle(p, 28) : 0;
+        bool reject = phonePv != ProtoVer;
+        if (reject)
+        {
+            // 被拒的连接**不得触碰共享配置**：手机端旧包会每 1~2 秒重连一次，
+            // 若每次都把模式/书写区写进 _cfg，会把正在正常工作的其它连接搅乱。
+            AppLog.Warn($"[Ver] 手机协议版本 v{phonePv} ≠ 本机 v{ProtoVer} → 下发 INFO 后断开，停止对接。" +
+                        "请把两端都更新到同一版本。");
+            SendInfo(_clientStream!);
+            return true;
+        }
         _cfg.SetPhoneHello(w, h, mode, work, frameL, frameT, frameScale);
         // 握手成功后立刻把主机信息（版本号/计算机名/候选 IP）下发给手机，供拓扑图展示
         SendInfo(_clientStream!);
@@ -403,6 +424,7 @@ public sealed class TcpPenServer : IDisposable
         AppLog.Info($"[Hello] 工作模式={(_cfg.IsMouseMode ? "触摸板" : "数位板")} " +
                     $"操作框 缩放×{_cfg.Scale:0.###} 位置({_cfg.FrameL:0.###},{_cfg.FrameT:0.###}) " +
                     $"→ 桌面映射区域 {r.x},{r.y} {r.w}×{r.h}");
+        return reject;
     }
 
     private int _panLog;
@@ -488,7 +510,7 @@ public sealed class TcpPenServer : IDisposable
         try
         {
             var ips = string.Join(",", NetInfo.ConnectionCandidates());
-            var text = $"ver={AppVersion.Version}&name={Uri.EscapeDataString(Environment.MachineName)}&ips={Uri.EscapeDataString(ips)}";
+            var text = $"ver={AppVersion.Version}&pv={ProtoVer}&name={Uri.EscapeDataString(Environment.MachineName)}&ips={Uri.EscapeDataString(ips)}";
             var body = System.Text.Encoding.UTF8.GetBytes(text);
             var buf = new byte[6 + body.Length];
             buf[0] = MAGIC1;
@@ -499,7 +521,7 @@ public sealed class TcpPenServer : IDisposable
             buf[5] = (byte)((body.Length >> 8) & 0xFF);
             Array.Copy(body, 0, buf, 6, body.Length);
             lock (ns) { ns.Write(buf, 0, buf.Length); }
-            AppLog.Info($"[Info] 下发主机信息：ver={AppVersion.Version} 候选IP={ips}");
+            AppLog.Info($"[Info] 下发主机信息：ver={AppVersion.Version} pv={ProtoVer} 候选IP={ips}");
         }
         catch (Exception ex)
         {

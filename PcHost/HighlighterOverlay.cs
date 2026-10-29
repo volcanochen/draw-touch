@@ -243,9 +243,19 @@ public sealed class HighlighterOverlay : IDisposable
         private static extern bool SystemParametersInfo(uint uiAction, uint uiParam, IntPtr pvParam, uint fWinIni);
 
         private bool _sysCursorReplaced;
-        /// <summary>原来的箭头方案（注册表里 "Arrow" 的值），关掉时原样写回</summary>
-        private string? _origCursorScheme;
+        /// <summary>替换前所有标准光标的注册表值（关掉时逐项写回；没配过的是 null → 删掉）</summary>
+        private readonly Dictionary<string, string?> _origCursors = new();
         private string? _curFilePath;
+
+        /// <summary>
+        /// 注册表游标方案里的全部标准光标值名。激光笔开启时**全部**换成激光笔 ——
+        /// 用户要求所有位置（含输入框 I 型、窗口边缘调整大小）都保持激光图标。
+        /// </summary>
+        private static readonly string[] CursorValueNames =
+        {
+            "Arrow", "Help", "AppStarting", "Wait", "Crosshair", "IBeam",
+            "SizeNWSE", "SizeNESW", "SizeWE", "SizeNS", "SizeAll", "UpArrow", "No", "Hand",
+        };
 
         /// <summary>
         /// 启动时的清理：上次如果异常退出（被强杀/崩溃），注册表里可能还留着我们的激光笔 .cur，
@@ -294,16 +304,21 @@ public sealed class HighlighterOverlay : IDisposable
                     AppLog.Warn("[Highlighter] 打不开游标方案注册表键");
                     return;
                 }
-                _origCursorScheme = key.GetValue("Arrow") as string;
+                // **全部**标准光标都备份（不只 Arrow）——用户要求激光笔开着时
+                // 所有位置都保持激光图标：输入框的 I 型、窗口边缘的调整大小光标都要换。
+                _origCursors.Clear();
+                foreach (var name in CursorValueNames)
+                    _origCursors[name] = key.GetValue(name) as string;
 
                 // 把光标写成 .cur 文件（Windows 的游标方案只认 .cur）
                 IntPtr loaded = MarkerCursor.LoadAsSystemCursor(_cursor.Image, _cursor.HotspotX, _cursor.HotspotY, out _curFilePath);
                 if (loaded == IntPtr.Zero) return;
 
-                key.SetValue("Arrow", _curFilePath!, Microsoft.Win32.RegistryValueKind.String);
+                foreach (var name in CursorValueNames)
+                    key.SetValue(name, _curFilePath!, Microsoft.Win32.RegistryValueKind.String);
                 SystemParametersInfo(SPI_SETCURSORS, 0, IntPtr.Zero, SPIF_SENDCHANGE);
                 _sysCursorReplaced = true;
-                AppLog.Info("[Highlighter] 系统箭头 → 激光笔（游标方案已生效）");
+                AppLog.Info($"[Highlighter] 系统 {CursorValueNames.Length} 种光标（箭头/I型/调整大小/手型/等待…）→ 激光笔（游标方案已生效）");
             }
             catch (Exception ex)
             {
@@ -311,7 +326,7 @@ public sealed class HighlighterOverlay : IDisposable
             }
         }
 
-        /// <summary>还原系统箭头光标。</summary>
+        /// <summary>还原全部系统光标（按替换前的注册表方案逐项写回）。</summary>
         private void RestoreSystemCursor()
         {
             if (!_sysCursorReplaced) return;
@@ -320,14 +335,17 @@ public sealed class HighlighterOverlay : IDisposable
                 using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Control Panel\Cursors", true);
                 if (key != null)
                 {
-                    if (!string.IsNullOrEmpty(_origCursorScheme))
-                        key.SetValue("Arrow", _origCursorScheme, Microsoft.Win32.RegistryValueKind.String);
-                    else
-                        key.DeleteValue("Arrow", false);
+                    foreach (var kv in _origCursors)
+                    {
+                        if (!string.IsNullOrEmpty(kv.Value))
+                            key.SetValue(kv.Key, kv.Value!, Microsoft.Win32.RegistryValueKind.String);
+                        else
+                            key.DeleteValue(kv.Key, false);
+                    }
                 }
                 SystemParametersInfo(SPI_SETCURSORS, 0, IntPtr.Zero, SPIF_SENDCHANGE);
                 _sysCursorReplaced = false;
-                AppLog.Info("[Highlighter] 系统箭头已还原");
+                AppLog.Info("[Highlighter] 系统光标已全部还原");
                 try { if (_curFilePath != null && File.Exists(_curFilePath)) File.Delete(_curFilePath); } catch { }
                 _curFilePath = null;
             }

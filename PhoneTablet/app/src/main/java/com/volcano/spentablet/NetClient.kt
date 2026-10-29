@@ -50,6 +50,13 @@ class NetClient(
     @Volatile var lastError: String? = null
         private set
 
+    /**
+     * 非空 = 拒绝再连这台 PC（协议版本不兼容等）。写线程每轮循环都检查，
+     * 命中就直接退出不再重连 —— 版本对不上的两端硬连，只会出现查不出原因的怪象。
+     * 置 null 恢复正常连接（用户手动改 PC 地址 / 清除阻止时用）。
+     */
+    @Volatile var holdReason: String? = null
+
     /** 收到 PC 主机下发的 INFO 帧（版本号/计算机名/候选 IP 文本）时回调。 */
     var onInfo: ((String) -> Unit)? = null
     /** 收到 PC 下发的完整截图（PNG 字节） */
@@ -142,7 +149,7 @@ class NetClient(
     }
 
     private fun loop(gen: Int) {
-        while (running && gen == generation) {
+        while (running && gen == generation && holdReason == null) {
             var socket: Socket? = null
             try {
                 socket = Socket()
@@ -169,7 +176,7 @@ class NetClient(
                 }
 
                 var lastBeat = 0L
-                while (running && gen == generation) {
+                while (running && gen == generation && holdReason == null) {
                     val frame = queue.poll(200, TimeUnit.MILLISECONDS)
                     if (frame != null) {
                         out.write(frame)
@@ -222,7 +229,7 @@ class NetClient(
         try {
             val ins = socket.getInputStream()
             val header = ByteArray(6)
-            while (running) {
+            while (running && holdReason == null) {
                 if (!readExactly(ins, header, 6)) break
                 if (header[0] != Protocol.MAGIC1.toByte() || header[1] != Protocol.MAGIC2.toByte()) {
                     Log.w(TAG, "NET 收到非法帧头，断开读线程")

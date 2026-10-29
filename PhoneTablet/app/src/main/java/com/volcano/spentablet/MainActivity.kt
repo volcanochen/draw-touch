@@ -116,6 +116,10 @@ class MainActivity : Activity() {
     private var pcVersion = "—"
     private var pcName = "—"
     private var pcIps = ""
+    /** PC 上报的协议兼容版本（INFO 帧里的 pv=；0 = 老 PC 没报，视为不兼容） */
+    private var pcProtoVer = 0
+    /** 非空 = 双端协议版本不匹配：指示灯变黄、停止后续对接（不再重连） */
+    private var protoMismatch: String? = null
 
     @Volatile
     private var alive = true
@@ -337,16 +341,25 @@ class MainActivity : Activity() {
                 val aspect = if (h > 0) String.format("%.3f", w / h) else "?"
                 val modeName = if (workMode == Protocol.MODE_MOUSE) "触摸板" else "数位板"
                 runOnUiThread {
-                    if (net.connected) {
-                        statusDot.setBackgroundColor(Color.parseColor("#33DD55")) // 绿：已连
-                        status.text = "" // 绿点即已连接，无需文字
-                        status.setTextColor(Color.WHITE)
-                    } else {
-                        statusDot.setBackgroundColor(Color.parseColor("#FF4444")) // 红：未连
-                        val friendly = net.friendlyError(err)
-                        status.text = if (friendly.isEmpty()) "未连接｜$modeName（点此设置）"
-                                      else "未连接：${friendly.substringBefore('\n')}"
-                        status.setTextColor(Color.parseColor("#FFFF6B6B"))
+                    when {
+                        // 黄：双端协议版本不兼容，已停止对接（不再重连，直到另一端升级）
+                        protoMismatch != null -> {
+                            statusDot.setBackgroundColor(Color.parseColor("#FFC107"))
+                            status.text = protoMismatch
+                            status.setTextColor(Color.parseColor("#FFFFC107"))
+                        }
+                        net.connected -> {
+                            statusDot.setBackgroundColor(Color.parseColor("#33DD55")) // 绿：已连
+                            status.text = "" // 绿点即已连接，无需文字
+                            status.setTextColor(Color.WHITE)
+                        }
+                        else -> {
+                            statusDot.setBackgroundColor(Color.parseColor("#FF4444")) // 红：未连
+                            val friendly = net.friendlyError(err)
+                            status.text = if (friendly.isEmpty()) "未连接｜$modeName（点此设置）"
+                                          else "未连接：${friendly.substringBefore('\n')}"
+                            status.setTextColor(Color.parseColor("#FFFF6B6B"))
+                        }
                     }
                 }
                 // 原来 infoText / dbg 两行字的内容 → 每 2 秒定量写入后台日志文件
@@ -853,19 +866,38 @@ class MainActivity : Activity() {
                                    else "当前：数位板模式（点击切换为触摸板）"
     }
 
-    /** 问号按钮：操作指南（按当前模式排序，触摸板手势显示**当前生效**的动作配置） */
+    /** 问号按钮：**只显示当前模式**的指南（触摸板手势为当前生效配置）；「更多」里才是全部 */
     private fun showGuide() {
+        val mouse = workMode == Protocol.MODE_MOUSE
+        val html = if (mouse) trackpadGuideHtml() else tabletGuideHtml()
+        val tv = guideTextView(html)
+        val scroll = android.widget.ScrollView(this).apply { addView(tv) }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("指南 · ${if (mouse) "触摸板" else "数位板"}模式")
+            .setView(scroll)
+            // 「更多」= 完整指南（连接说明 + 两种模式 + PC 下载）
+            .setNeutralButton("更多指南…") { _, _ -> showFullGuide() }
+            .setPositiveButton("知道了", null)
+            .show()
+    }
+
+    /** 完整指南：连接说明 + 两种模式（当前模式排前）+ 屏幕方向 + PC 下载 */
+    private fun showFullGuide() {
         val link = "https://github.com/volcanochen/drawing-phone/releases"
         val mouse = workMode == Protocol.MODE_MOUSE
-        // 手势 → 动作直接读 canvas 上的生效值：设置页改完会立刻写进 canvas，
-        // 所以这里永远显示「现在按下去会发生什么」，而不是出厂默认值。
-        val an = { code: Int -> canvas.actionName(code) }
         val cur = if (mouse) "（当前模式）" else ""
-
+        val trackpad = trackpadGuideHtml().replace("【触摸板模式】", "【触摸板模式$cur】")
+        val tablet = tabletGuideHtml().replace("【数位板模式】", "【数位板模式$cur】")
+        val tail = """
+            <b>【屏幕方向】</b>循环按钮：陀螺仪全向 / 横屏双朝向 / 竖屏双朝向<br><br>
+            <b>【PC 端下载】</b>（点击打开）：<br>
+            <a href="$link">$link</a>
+        """.trimIndent()
         val common = """
             <b>【自动连接（通常什么都不用做）】</b><br>
             · PC 端启动后，打开本 App 就会<b>自动连上</b>（mDNS 自动发现）<br>
-            · 左上角 <b><font color="#33DD55">绿点</font></b> = 已连接，<b><font color="#FF4444">红点</font></b> = 未连接<br>
+            · 左上角 <b><font color="#33DD55">绿点</font></b> = 已连接，<b><font color="#FF4444">红点</font></b> = 未连接，
+              <b><font color="#FFC107">黄点</font></b> = PC 端版本不兼容、已停止对接（把两端都更新到同一版本）<br>
             · 点左上角圆点可查看<b>网络拓扑</b>、切换桌面 PC<br><br>
             <b>【需要手动操作的场合（很少）】</b><br>
             · <b>切换到另一台 PC</b>：点绿点 → 「局域网里的桌面」点击切换<br>
@@ -873,25 +905,41 @@ class MainActivity : Activity() {
             · <b>自动发现失败</b>（路由器禁用组播等）：点齿轮 → 填 IP → 连接，<br>
               　或用「扫描网段找 PC」；USB 数据线 + adb 转发时填 127.0.0.1<br><br>
         """.trimIndent()
+        // 当前模式的章节放最前面：打开就该先看到「我现在怎么用」
+        val html = common + (if (mouse) trackpad + tablet else tablet + trackpad) + tail
+        val scroll = android.widget.ScrollView(this).apply { addView(guideTextView(html)) }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("使用指南 · ${if (mouse) "触摸板" else "数位板"}模式")
+            .setView(scroll)
+            .setPositiveButton("知道了", null)
+            .show()
+    }
 
-        val trackpad = """
-            <b>【触摸板模式${cur}（手指 = 触摸板）】</b><br>
+    /** 触摸板模式章节：手势动作读 canvas 上的**生效值**（设置页改完立即同步） */
+    private fun trackpadGuideHtml(): String {
+        val an = { code: Int -> canvas.actionName(code) }
+        return """
+            <b>【触摸板模式】（手指 = 触摸板）</b><br>
             · 单指滑动 = <b>移动光标</b>；<b>单击 = 左键；双击 = 双击</b>（不再是右键）<br>
             · <b>双击后不松手再拖</b> = 按住左键拖动 → 拖文件、框选文字（和笔记本触摸板一样）<br>
-            · 双指滑动 = <b>${an(canvas.g2Swipe)}</b>；双指捏合 = <b>${an(canvas.g2Pinch)}</b><br>
+            · 双指滑动 = <b>${an(canvas.g2Swipe)}</b>（自动锁定滚动方向：横滑不会误滚上下）；双指捏合 = <b>${an(canvas.g2Pinch)}</b><br>
             · 双指点击 = <b>${an(canvas.g2Tap)}</b>；三指点击 = <b>${an(canvas.g3Tap)}</b><br>
             · 三指　右滑=<b>${an(canvas.g3L)}</b>　左滑=<b>${an(canvas.g3R)}</b>　上滑=<b>${an(canvas.g3U)}</b>　下滑=<b>${an(canvas.g3D)}</b><br>
             · 四指　点击=<b>${an(canvas.g4Tap)}</b>　右滑=<b>${an(canvas.g4L)}</b>　左滑=<b>${an(canvas.g4R)}</b>　上滑=<b>${an(canvas.g4U)}</b>　下滑=<b>${an(canvas.g4D)}</b><br>
+            · 左右滑动有优先判定：上下要有<b>明显更大</b>的幅度才算上下（横滑带一点漂移不会误触发）<br>
             · 右侧滚轮条滑动 = 滚动，<b>双击滚轮条</b>切换普通滚动 / 无极滚动（动量可在设置里调）<br>
             · 底部<b>可拖动浮动面板</b> = 激光笔 + 左 / 中 / 右键（挡住画面就按住拖走，位置会记住）<br>
             · 点「激光笔」开/关：<b>桌面所有位置都保持激光笔图标</b>（包括输入框），走过的地方留下半透明荧光痕迹；长按换颜色（黄/绿/粉/蓝）<br>
             · 浮动键被手势/手指触发时都会在手机端闪一下，方便看清「打中了哪个键」<br>
             · <b>触摸板模式下 S Pen 不参与</b>：笔碰屏幕 / 悬停都不会动光标，光标只由手指控制<br>
-            · 手势动作可在设置里自定义（改完这里同步显示）<br><br>
+            · 手势动作可在设置里自定义（改完这里同步显示）<br>
         """.trimIndent()
+    }
 
-        val tablet = """
-            <b>【数位板模式${cur}（S Pen 作画）】</b><br>
+    /** 数位板模式章节 */
+    private fun tabletGuideHtml(): String {
+        return """
+            <b>【数位板模式】（S Pen 作画）</b><br>
             · 笔在橙色框内 = 在 PC 上作画（压感 / 倾斜）<br>
             · <b>默认是「备注」模式</b>：笔迹直接画在桌面的框里，手机与桌面同步<br>
             · 点底部<b>备注</b>按钮切到<b>「画笔」模式</b>：笔迹只画在手机上、定时淡出，桌面不受影响；再点一下切回「备注」<br>
@@ -899,17 +947,12 @@ class MainActivity : Activity() {
             · 框可以拖到任意显示器（含多屏 / 多桌面）<br>
             · 底部浮动圆钮：<b>备注 / 画笔</b>（切模式）/ <b>撤销</b>（点击手机+桌面各撤一笔、长按两边一起清空）/ <b>$shotBtnLabel</b>（预览：桌面框内容设为手机画布背景，可继续在上面画；再点「完成」恢复）/ <b>截屏</b>（桌面+笔迹存成图片，可在设置里选存到电脑/手机相册）<br>
             · 浮动面板 = <b>备注 / 撤销 / 预览</b> + 7 色板，<b>按住可整体拖动</b>（挡住画面就拖走，位置会记住）<br>
-            · 换色只影响之后画的笔；<b>笔悬停在按钮上会弹出该按钮的说明</b><br><br>
+            · 换色只影响之后画的笔；<b>笔悬停在按钮上会弹出该按钮的说明</b><br>
         """.trimIndent()
+    }
 
-        val tail = """
-            <b>【屏幕方向】</b>循环按钮：陀螺仪全向 / 横屏双朝向 / 竖屏双朝向<br><br>
-            <b>【PC 端下载】</b>（点击打开）：<br>
-            <a href="$link">$link</a>
-        """.trimIndent()
-
-        // 当前模式的章节放最前面：问号按钮打开就该先看到「我现在怎么用」
-        val html = common + (if (mouse) trackpad + tablet else tablet + trackpad) + tail
+    /** 指南正文的统一样式 */
+    private fun guideTextView(html: String): TextView {
         val tv = TextView(this).apply {
             text = if (android.os.Build.VERSION.SDK_INT >= 24)
                 android.text.Html.fromHtml(html, android.text.Html.FROM_HTML_MODE_LEGACY)
@@ -920,12 +963,7 @@ class MainActivity : Activity() {
             movementMethod = android.text.method.LinkMovementMethod.getInstance()
             setPadding(dp(20), dp(12), dp(20), dp(12))
         }
-        val scroll = android.widget.ScrollView(this).apply { addView(tv) }
-        android.app.AlertDialog.Builder(this)
-            .setTitle("使用指南 · ${if (mouse) "触摸板" else "数位板"}模式")
-            .setView(scroll)
-            .setPositiveButton("知道了", null)
-            .show()
+        return tv
     }
 
     private fun cycleOrientation() {
@@ -943,7 +981,18 @@ class MainActivity : Activity() {
         pcName = map["name"]?.let { try { java.net.URLDecoder.decode(it, "UTF-8") } catch (_: Throwable) { it } }
             ?: pcName
         pcIps = map["ips"]?.let { try { java.net.URLDecoder.decode(it, "UTF-8") } catch (_: Throwable) { it } } ?: pcIps
-        Log.i("SpenTablet", "PC INFO → ver=$pcVersion name=$pcName ips=$pcIps")
+        // 协议兼容性检查：PC 报上来的 pv 与本机不一致 → 黄灯警告 + 停止后续对接。
+        // 版本对不上的两端硬连，只会出现「手势错乱 / 光标瞬移」这类查不出原因的怪象。
+        pcProtoVer = map["pv"]?.toIntOrNull() ?: 0
+        if (pcProtoVer != Protocol.PROTO_VER) {
+            protoMismatch = "PC 端版本不兼容（协议 v$pcProtoVer ≠ 本机 v${Protocol.PROTO_VER}），已停止对接，请更新另一端"
+            if (::net.isInitialized) net.holdReason = protoMismatch
+            DebugLog.write("[ver] $protoMismatch")
+        } else if (protoMismatch != null) {
+            protoMismatch = null
+            if (::net.isInitialized) net.holdReason = null
+        }
+        Log.i("SpenTablet", "PC INFO → ver=$pcVersion pv=$pcProtoVer name=$pcName ips=$pcIps")
     }
 
     private fun openTopology() {
@@ -1869,6 +1918,9 @@ class MainActivity : Activity() {
 
     /** 连到发现到的 PC：候选地址逐个探测 → 填 IP/端口 → 记 prefs → 重连 */
     private fun connectToPc(f: MdnsDiscovery.Found, tag: String) {
+        // 用户手动选了 PC：清除上一台的「版本不兼容」阻止（新一台要重新做兼容性检查）
+        protoMismatch = null
+        if (::net.isInitialized) net.holdReason = null
         // 记住这台：下次自动发现时优先连它（局域网里有多台时尤其重要）
         prefs.edit().putString("lastPc", f.serviceName).apply()
         val candidates = f.candidates.ifEmpty { listOf(f.host) }
