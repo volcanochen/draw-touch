@@ -853,10 +853,16 @@ class MainActivity : Activity() {
                                    else "当前：数位板模式（点击切换为触摸板）"
     }
 
-    /** 问号按钮：操作控制指南（含 PC 端下载链接） */
+    /** 问号按钮：操作指南（按当前模式排序，触摸板手势显示**当前生效**的动作配置） */
     private fun showGuide() {
         val link = "https://github.com/volcanochen/drawing-phone/releases"
-        val html = """
+        val mouse = workMode == Protocol.MODE_MOUSE
+        // 手势 → 动作直接读 canvas 上的生效值：设置页改完会立刻写进 canvas，
+        // 所以这里永远显示「现在按下去会发生什么」，而不是出厂默认值。
+        val an = { code: Int -> canvas.actionName(code) }
+        val cur = if (mouse) "（当前模式）" else ""
+
+        val common = """
             <b>【自动连接（通常什么都不用做）】</b><br>
             · PC 端启动后，打开本 App 就会<b>自动连上</b>（mDNS 自动发现）<br>
             · 左上角 <b><font color="#33DD55">绿点</font></b> = 已连接，<b><font color="#FF4444">红点</font></b> = 未连接<br>
@@ -866,31 +872,44 @@ class MainActivity : Activity() {
             · 局域网里有<b>多台电脑</b>时，首次会弹框让你选；之后默认连你选过的那台<br>
             · <b>自动发现失败</b>（路由器禁用组播等）：点齿轮 → 填 IP → 连接，<br>
               　或用「扫描网段找 PC」；USB 数据线 + adb 转发时填 127.0.0.1<br><br>
-            <b>【触摸板模式（默认，手指=触摸板）】</b><br>
-            · 单指滑动 = 移动光标；<b>单击 = 左键；双击 = 双击</b>（<b>不再是右键</b>）<br>
+        """.trimIndent()
+
+        val trackpad = """
+            <b>【触摸板模式${cur}（手指 = 触摸板）】</b><br>
+            · 单指滑动 = <b>移动光标</b>；<b>单击 = 左键；双击 = 双击</b>（不再是右键）<br>
             · <b>双击后不松手再拖</b> = 按住左键拖动 → 拖文件、框选文字（和笔记本触摸板一样）<br>
-            · 右键请用<b>双指点击</b>或底部浮动面板的「右键」<br>
+            · 双指滑动 = <b>${an(canvas.g2Swipe)}</b>；双指捏合 = <b>${an(canvas.g2Pinch)}</b><br>
+            · 双指点击 = <b>${an(canvas.g2Tap)}</b>；三指点击 = <b>${an(canvas.g3Tap)}</b><br>
+            · 三指　右滑=<b>${an(canvas.g3L)}</b>　左滑=<b>${an(canvas.g3R)}</b>　上滑=<b>${an(canvas.g3U)}</b>　下滑=<b>${an(canvas.g3D)}</b><br>
+            · 四指　点击=<b>${an(canvas.g4Tap)}</b>　右滑=<b>${an(canvas.g4L)}</b>　左滑=<b>${an(canvas.g4R)}</b>　上滑=<b>${an(canvas.g4U)}</b>　下滑=<b>${an(canvas.g4D)}</b><br>
             · 右侧滚轮条滑动 = 滚动，<b>双击滚轮条</b>切换普通滚动 / 无极滚动（动量可在设置里调）<br>
             · 底部<b>可拖动浮动面板</b> = 激光笔 + 左 / 中 / 右键（挡住画面就按住拖走，位置会记住）<br>
-            · 点「激光笔」开/关：<b>桌面指针就变成激光笔</b>，走过的地方留下半透明荧光痕迹；长按换颜色（黄/绿/粉/蓝）<br>
+            · 点「激光笔」开/关：<b>桌面所有位置都保持激光笔图标</b>（包括输入框），走过的地方留下半透明荧光痕迹；长按换颜色（黄/绿/粉/蓝）<br>
             · 浮动键被手势/手指触发时都会在手机端闪一下，方便看清「打中了哪个键」<br>
-            · 双指滑动 = 滚动；双指捏合 = 缩放（Ctrl+滚轮）<br>
-            · 双指点击 = 右键；三指点击 = 中键；三指左右滑 = 前进/后退<br>
-            · 手势动作可在设置里自定义：还可设为音量加减 / 静音 / 任务切换<br>
-            · 手指按住时 S Pen 会自动让位（笔放在平板上也不会把光标抢走）<br><br>
-            <b>【数位板模式（S Pen 作画）】</b><br>
+            · <b>触摸板模式下 S Pen 不参与</b>：笔碰屏幕 / 悬停都不会动光标，光标只由手指控制<br>
+            · 手势动作可在设置里自定义（改完这里同步显示）<br><br>
+        """.trimIndent()
+
+        val tablet = """
+            <b>【数位板模式${cur}（S Pen 作画）】</b><br>
             · 笔在橙色框内 = 在 PC 上作画（压感 / 倾斜）<br>
             · <b>默认是「备注」模式</b>：笔迹直接画在桌面的框里，手机与桌面同步<br>
-            · 点底部<b>备注</b>按钮切到<b>「画笔」模式</b>：笔迹只画在手机上，桌面不受影响；再点一下切回「备注」<br>
+            · 点底部<b>备注</b>按钮切到<b>「画笔」模式</b>：笔迹只画在手机上、定时淡出，桌面不受影响；再点一下切回「备注」<br>
             · 单指滑动 = 移动范围框；双指捏合 = 缩放范围框<br>
             · 框可以拖到任意显示器（含多屏 / 多桌面）<br>
-            · 底部浮动圆钮：<b>备注 / 画笔</b>（切模式）/ <b>撤销</b>（点击手机+桌面各撤一笔、长按两边一起清空）/ <b>$shotBtnLabel</b>（预览：桌面框内容设为手机画布背景，可继续在上面画；再点「完成」恢复）<br>
+            · 底部浮动圆钮：<b>备注 / 画笔</b>（切模式）/ <b>撤销</b>（点击手机+桌面各撤一笔、长按两边一起清空）/ <b>$shotBtnLabel</b>（预览：桌面框内容设为手机画布背景，可继续在上面画；再点「完成」恢复）/ <b>截屏</b>（桌面+笔迹存成图片，可在设置里选存到电脑/手机相册）<br>
             · 浮动面板 = <b>备注 / 撤销 / 预览</b> + 7 色板，<b>按住可整体拖动</b>（挡住画面就拖走，位置会记住）<br>
             · 换色只影响之后画的笔；<b>笔悬停在按钮上会弹出该按钮的说明</b><br><br>
+        """.trimIndent()
+
+        val tail = """
             <b>【屏幕方向】</b>循环按钮：陀螺仪全向 / 横屏双朝向 / 竖屏双朝向<br><br>
             <b>【PC 端下载】</b>（点击打开）：<br>
             <a href="$link">$link</a>
         """.trimIndent()
+
+        // 当前模式的章节放最前面：问号按钮打开就该先看到「我现在怎么用」
+        val html = common + (if (mouse) trackpad + tablet else tablet + trackpad) + tail
         val tv = TextView(this).apply {
             text = if (android.os.Build.VERSION.SDK_INT >= 24)
                 android.text.Html.fromHtml(html, android.text.Html.FROM_HTML_MODE_LEGACY)
@@ -903,7 +922,7 @@ class MainActivity : Activity() {
         }
         val scroll = android.widget.ScrollView(this).apply { addView(tv) }
         android.app.AlertDialog.Builder(this)
-            .setTitle("使用指南")
+            .setTitle("使用指南 · ${if (mouse) "触摸板" else "数位板"}模式")
             .setView(scroll)
             .setPositiveButton("知道了", null)
             .show()

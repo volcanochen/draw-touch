@@ -728,6 +728,13 @@ class PenCanvasView(context: Context) : View(context) {
         for (i in 0 until n) {
             val tt = e.getToolType(i)
 
+            // 触摸板模式下 S Pen **一概不响应**（接触、拖动、悬停全都不发）：
+            // 光标完全归手指。以前笔在无手指时仍会把事件发给 PC → 光标被笔拽走，
+            // 手指刚挪过去又被拉回来，看起来像「指针反向跑」。
+            if (workMode == Protocol.MODE_MOUSE &&
+                tt != MotionEvent.TOOL_TYPE_FINGER && tt != MotionEvent.TOOL_TYPE_MOUSE
+            ) continue
+
             // 鼠标模式：多指手势进行中，S Pen 绝不能动光标
             //（笔在屏幕上一碰，光标就会跑，非常干扰双指滚动/捏合）
             if (workMode == Protocol.MODE_MOUSE && tpActiveFingers >= 2 && contact) {
