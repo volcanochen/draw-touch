@@ -143,6 +143,54 @@ public sealed class NoteOverlay : IDisposable
         [DllImport("user32.dll", EntryPoint = "SetWindowLongPtr")]
         private static extern IntPtr SetWindowLongPtr64(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
 
+        // ---- 物理像素坐标（绕开 WinForms 的 DPI 缩放层）----
+        // host 是 PMv2 感知，WinForms 却会对 Form.Bounds/Width/Height 做自己的缩放换算，
+        // 导致「窗口实际尺寸（如 4992×1920）≠ 物理虚拟屏（如 6432×2662）」；
+        // 而 UpdateLayeredWindow 的目标位置是物理屏幕坐标 —— 两个空间一混，
+        // 笔迹就被推到屏幕外（混合 DPI 多屏下尤其必现）。所以窗口位置用 MoveWindow
+        // 直接设物理矩形，画布尺寸与坐标换算全部以 GetWindowRect 的物理值为准。
+        private const int SM_XVIRTUALSCREEN = 76;
+        private const int SM_YVIRTUALSCREEN = 77;
+        private const int SM_CXVIRTUALSCREEN = 78;
+        private const int SM_CYVIRTUALSCREEN = 79;
+
+        [DllImport("user32.dll")]
+        private static extern int GetSystemMetrics(int nIndex);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RAWRECT { public int left, top, right, bottom; }
+
+        [DllImport("user32.dll")]
+        private static extern bool GetWindowRect(IntPtr hWnd, out RAWRECT rect);
+
+        [DllImport("user32.dll")]
+        private static extern bool MoveWindow(IntPtr hWnd, int x, int y, int w, int h, bool repaint);
+
+        /// <summary>窗口的物理像素矩形（每帧同步，WinForms 的 Left/Top 不可信）。</summary>
+        private RAWRECT _phys = new() { left = 0, top = 0, right = 4992, bottom = 1920 };
+
+        private int PhysW => Math.Max(1, _phys.right - _phys.left);
+        private int PhysH => Math.Max(1, _phys.bottom - _phys.top);
+
+        /// <summary>
+        /// 把窗口设为整块虚拟屏幕的**物理**矩形，并同步画布。
+        /// 句柄未创建时只记录目标（OnHandleCreated 会再调一次）。
+        /// </summary>
+        private void SyncPhysicalBounds()
+        {
+            int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            int vw = Math.Max(1, GetSystemMetrics(SM_CXVIRTUALSCREEN));
+            int vh = Math.Max(1, GetSystemMetrics(SM_CYVIRTUALSCREEN));
+            if (IsHandleCreated)
+                MoveWindow(Handle, vx, vy, vw, vh, false);
+            if (GetWindowRect(Handle, out var r) && r.right > r.left)
+                _phys = r;
+            else
+                _phys = new RAWRECT { left = vx, top = vy, right = vx + vw, bottom = vy + vh };
+            EnsureCanvas(PhysW, PhysH);
+        }
+
         private static IntPtr GetWindowLongPtr(IntPtr h, int i) =>
             IntPtr.Size == 8 ? GetWindowLongPtr64(h, i) : GetWindowLongPtr64(h, i);
 
@@ -169,14 +217,17 @@ public sealed class NoteOverlay : IDisposable
         {
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.Manual;
-            // 覆盖整块虚拟屏幕：范围框可能被拖到第二块显示器上
-            var v = SystemInformation.VirtualScreen;
-            Bounds = new Rectangle(v.Left, v.Top, v.Width, v.Height);
+            // 覆盖整块虚拟屏幕：范围框可能被拖到第二块显示器上。
+            // 实际的物理矩形由 OnHandleCreated → SyncPhysicalBounds() 用 MoveWindow 设置
+            //（WinForms 的 Bounds 在 PMv2 下会被它自己的 DPI 缩放改写，不可信）。
             ShowInTaskbar = false;
             TopMost = true;
             // 分层窗口不靠 BackColor / TransparencyKey 抠图，内容全由 UpdateLayeredWindow 推送
             BackColor = Color.Black;
-            EnsureCanvas();
+            EnsureCanvas(PhysW, PhysH);
+            // 画笔高频帧（60Hz+）合并到 20ms 一推：重画包围盒远比每帧推省
+            _flush.Tick += (_, _) => { if (_dirty) PushBounds(); };
+            _flush.Start();
         }
 
         /// <summary>鼠标穿透 + 不抢焦点 + 分层（点桌面时窗口本身无响应）</summary>
@@ -203,8 +254,10 @@ public sealed class NoteOverlay : IDisposable
             var ex = GetWindowLongPtr(Handle, GWL_EXSTYLE).ToInt64();
             if ((ex & WS_EX_LAYERED) == 0)
                 SetWindowLongPtr(Handle, GWL_EXSTYLE, new IntPtr(ex | WS_EX_LAYERED));
-            // 可见后重新推一次：分层窗口隐藏期间推送的内容会被丢掉
-            PushAll();
+            // 先把窗口摆到物理虚拟屏矩形（WinForms 缩放过的 Bounds 在这里被纠正），
+            // 再推送内容：分层窗口隐藏期间推送的内容会被丢掉
+            SyncPhysicalBounds();
+            PushBounds();
         }
 
         /// <summary>什么都不画：分层窗口的内容全部来自 UpdateLayeredWindow。</summary>
@@ -212,9 +265,10 @@ public sealed class NoteOverlay : IDisposable
 
         protected override void OnPaintBackground(PaintEventArgs e) { }
 
-        private void EnsureCanvas()
+        private void EnsureCanvas(int w, int h)
         {
-            int w = Math.Max(1, Width), h = Math.Max(1, Height);
+            w = Math.Max(1, w);
+            h = Math.Max(1, h);
             if (_canvas != null && _canvas.Width == w && _canvas.Height == h) return;
             _cg?.Dispose();
             _canvas?.Dispose();
@@ -225,7 +279,14 @@ public sealed class NoteOverlay : IDisposable
             ReleaseDib();
         }
 
-        public void VisibleOn() { TopMost = true; Show(); PushAll(); }
+        public void VisibleOn()
+        {
+            TopMost = true;
+            Show();
+            // Show 过程 WinForms 可能按自己的 DPI 逻辑改写窗口尺寸，再纠正一次
+            SyncPhysicalBounds();
+            PushBounds();
+        }
         public void VisibleOff() => Hide();
 
         public void SetRect(int x, int y, int w, int h)
@@ -234,21 +295,47 @@ public sealed class NoteOverlay : IDisposable
             // 已有笔迹存的是绝对坐标，框变化不需要重绘（笔迹留在原处）
         }
 
-        /// <summary>跟随虚拟屏幕尺寸（插拔显示器 / 改分辨率后调用）。</summary>
+        /// <summary>跟随虚拟屏幕物理尺寸（插拔显示器 / 改分辨率后调用）。</summary>
         public void ResizeToVirtualScreen()
         {
-            var v = SystemInformation.VirtualScreen;
-            if (v.Width <= 0 || v.Height <= 0) return;
-            if (Bounds == new Rectangle(v.Left, v.Top, v.Width, v.Height)) return;
-            Bounds = new Rectangle(v.Left, v.Top, v.Width, v.Height);
-            EnsureCanvas();
+            int oldW = PhysW, oldH = PhysH;
+            SyncPhysicalBounds();
+            if (PhysW == oldW && PhysH == oldH) return;
             RedrawAll();
         }
 
         public void SetColor(Color c) { CurrentColor = c; Pen.Color = c; }
 
-        /// <summary>窗口原点可能是负数（虚拟屏幕左/上边界）：屏幕坐标 → 画布坐标要减掉原点。</summary>
-        private PointF ToCanvas(PointF scr) => new(scr.X - Left, scr.Y - Top);
+        /// <summary>屏幕物理坐标 → 画布坐标：减掉窗口物理原点（虚拟屏左/上边界可能为负）。</summary>
+        private PointF ToCanvas(PointF scr) => new(scr.X - _phys.left, scr.Y - _phys.top);
+
+        // UpdateLayeredWindow 的 pptDst/psize 语义是「**重设**窗口的位置与尺寸」——
+        // 不能拿它做「整屏窗口 + 脏区局部推送」（每次都会把窗口挪到脏区、缩成脏区大小，
+        // 之前的笔画全部丢失 —— 实测窗口被推到 (-1428,859)，笔迹全部落在屏幕外）。
+        // 正确姿势：窗口 = 所有笔迹的**包围盒**。窗口位置/尺寸每次由 ULW 设为包围盒的
+        // 屏幕矩形，内容 = 画布上包围盒区域。包围盒通常远小于整屏，拷贝与合成都便宜。
+        private Rectangle _bb = Rectangle.Empty;      // 包围盒（画布坐标，含笔宽留白）
+        private bool _dirty;                          // 画布有新内容待推送
+        private readonly System.Windows.Forms.Timer _flush = new() { Interval = 20 };
+
+        /// <summary>把画布坐标点纳入包围盒（带笔宽留白，笔帽是圆的要外扩一点）。</summary>
+        private void ExtendBounds(PointF cp)
+        {
+            int pad = (int)Math.Ceiling(PenWidth) + 4;
+            var r = new Rectangle((int)cp.X - pad, (int)cp.Y - pad, pad * 2 + 1, pad * 2 + 1);
+            _bb = _bb.IsEmpty ? r : Rectangle.Union(_bb, r);
+        }
+
+        /// <summary>重算全部笔迹的包围盒（撤销 / 清空 / 换屏后调用）。</summary>
+        private void RecalcBounds()
+        {
+            _bb = Rectangle.Empty;
+            foreach (var s in Strokes)
+            {
+                foreach (var p in s.Points)
+                    ExtendBounds(ToCanvas(p));
+            }
+        }
 
         public void AddPoint(float nx, float ny, PenState st)
         {
@@ -264,7 +351,6 @@ public sealed class NoteOverlay : IDisposable
                         DotBrush.Color = CurrentColor;
                         _cg.FillEllipse(DotBrush, cp.X - PenWidth / 2 - 1, cp.Y - PenWidth / 2 - 1,
                             PenWidth + 2, PenWidth + 2);
-                        Push(DirtyAround(cp, cp));
                         break;
                     case PenState.Move:
                         if (Strokes.Count > 0)
@@ -274,7 +360,6 @@ public sealed class NoteOverlay : IDisposable
                             last.Points.Add(pt);
                             Pen.Color = last.Color;
                             _cg.DrawLine(Pen, prev, cp);
-                            Push(DirtyAround(prev, cp));
                         }
                         break;
                     case PenState.Up:
@@ -286,10 +371,14 @@ public sealed class NoteOverlay : IDisposable
                             DotBrush.Color = s.Color;
                             _cg.FillEllipse(DotBrush, p.X - PenWidth / 2 - 1, p.Y - PenWidth / 2 - 1,
                                 PenWidth + 2, PenWidth + 2);
-                            Push(DirtyAround(p, p));
                         }
                         break;
                 }
+                // 扩大包围盒并标记待推：DOWN/MOVE 由 20ms 定时器合并推送，
+                // 抬笔立即推一次（笔停在哪里就要立刻看到哪里）
+                ExtendBounds(cp);
+                _dirty = true;
+                if (st == PenState.Up) PushBounds();
             }
             catch (Exception ex)
             {
@@ -308,21 +397,10 @@ public sealed class NoteOverlay : IDisposable
             RedrawAll();
         }
 
-        /// <summary>脏区 = 两点包围盒 + 笔宽留白（笔帽是圆的，端点要往外让一点）</summary>
-        private Rectangle DirtyAround(PointF a, PointF b)
-        {
-            int pad = (int)Math.Ceiling(PenWidth) + 3;
-            int x0 = (int)Math.Floor(Math.Min(a.X, b.X)) - pad;
-            int y0 = (int)Math.Floor(Math.Min(a.Y, b.Y)) - pad;
-            int x1 = (int)Math.Ceiling(Math.Max(a.X, b.X)) + pad;
-            int y1 = (int)Math.Ceiling(Math.Max(a.Y, b.Y)) + pad;
-            return new Rectangle(x0, y0, x1 - x0, y1 - y0);
-        }
-
         /// <summary>清空画布并按当前笔画重画一遍（撤销 / 清空 / 换屏后调用）。</summary>
         private void RedrawAll()
         {
-            if (_cg == null || _canvas == null) { PushAll(); return; }
+            if (_cg == null || _canvas == null) { PushBounds(); return; }
             _cg.Clear(Color.Transparent);
             foreach (var s in Strokes)
             {
@@ -343,42 +421,50 @@ public sealed class NoteOverlay : IDisposable
                 }
             }
             Pen.Color = CurrentColor;
-            PushAll();
+            var oldBb = _bb;   // 撤销/清空后被擦掉的区域也要重推（推成透明）
+            RecalcBounds();
+            if (!oldBb.IsEmpty)
+                _bb = _bb.IsEmpty ? oldBb : Rectangle.Union(_bb, oldBb);
+            PushBounds();
         }
 
-        private void PushAll() => Push(new Rectangle(0, 0, Math.Max(1, Width), Math.Max(1, Height)));
-
-        /// <summary>把脏区那几行拷进 DIB，再 UpdateLayeredWindow 推上屏幕。</summary>
-        private void Push(Rectangle dirty)
+        /// <summary>
+        /// 把「笔迹包围盒」区域的内容经 DIB 用 UpdateLayeredWindow 推上屏幕
+        /// （窗口始终 = 虚拟屏矩形不变；与 Highlighter 同一套脏区推送）。
+        /// </summary>
+        private void PushBounds()
         {
+            _dirty = false;
             var canvas = _canvas;
             if (canvas == null || !IsHandleCreated || !Visible) return;
-            dirty = Rectangle.Intersect(dirty, new Rectangle(0, 0, canvas.Width, canvas.Height));
-            if (dirty.Width <= 0 || dirty.Height <= 0) return;
+            var bb = Rectangle.Intersect(_bb, new Rectangle(0, 0, canvas.Width, canvas.Height));
+            if (bb.Width <= 0 || bb.Height <= 0) return;   // 没有笔迹：不推（窗口内容为空）
             try
             {
+                // 与 HighlighterOverlay.PushRegion 完全同一套做法（激光笔实测稳定）：
+                // DIB = 整画布大小，脏区按绝对偏移拷入，ULW 从 DIB 的脏区偏移处取内容。
+                // （之前「窗口=包围盒重定位」的写法实测不显示：位置对了尺寸却不对，
+                //   ULW 推的内容整个落空 —— 别再绕回去。）
                 EnsureDib(canvas.Width, canvas.Height);
-                if (_dibHandle == IntPtr.Zero || _memDc == IntPtr.Zero) return;
 
-                // 只拷脏区这几行，整屏全拷太费带宽
                 var data = canvas.LockBits(new Rectangle(0, 0, canvas.Width, canvas.Height),
                     ImageLockMode.ReadOnly, PixelFormat.Format32bppPArgb);
-                int rowBytes = dirty.Width * 4;
+                int rowBytes = bb.Width * 4;
                 var row = new byte[rowBytes];
-                for (int y = dirty.Y; y < dirty.Y + dirty.Height; y++)
+                for (int y = bb.Y; y < bb.Y + bb.Height; y++)
                 {
-                    IntPtr src = (IntPtr)((long)data.Scan0 + (long)y * data.Stride + (long)dirty.X * 4);
-                    IntPtr dst = (IntPtr)((long)_dibBits + (long)y * canvas.Width * 4 + (long)dirty.X * 4);
+                    IntPtr src = (IntPtr)((long)data.Scan0 + (long)y * data.Stride + (long)bb.X * 4);
+                    IntPtr dst = (IntPtr)((long)_dibBits + (long)y * canvas.Width * 4 + (long)bb.X * 4);
                     Marshal.Copy(src, row, 0, rowBytes);
                     Marshal.Copy(row, 0, dst, rowBytes);
                 }
                 canvas.UnlockBits(data);
 
                 IntPtr screenDc = GetDC(IntPtr.Zero);
-                var vs = SystemInformation.VirtualScreen;
-                var ptSrc = new POINT { x = dirty.X, y = dirty.Y };
-                var ptDst = new POINT { x = vs.Left + dirty.X, y = vs.Top + dirty.Y };
-                var sz = new SIZE { cx = dirty.Width, cy = dirty.Height };
+                // 目标位置 = 窗口物理原点 + 画布坐标（画布=虚拟屏大小，窗口=虚拟屏矩形）
+                var ptDst = new POINT { x = _phys.left + bb.X, y = _phys.top + bb.Y };
+                var ptSrc = new POINT { x = bb.X, y = bb.Y };
+                var sz = new SIZE { cx = bb.Width, cy = bb.Height };
                 var blend = new BLENDFUNCTION
                 {
                     BlendOp = AC_SRC_OVER,
@@ -389,9 +475,7 @@ public sealed class NoteOverlay : IDisposable
                 if (!UpdateLayeredWindow(Handle, screenDc, ref ptDst, ref sz, _memDc, ref ptSrc, 0, ref blend, ULW_ALPHA))
                 {
                     int err = Marshal.GetLastWin32Error();
-                    // 第一次失败很常见（窗口刚建），只在反复失败时记日志，避免刷屏
-                    if (err != 0 && ++_pushErr % 20 == 1)
-                        AppLog.Warn($"[NoteOverlay] UpdateLayeredWindow 失败 err={err} 区域={dirty}");
+                    AppLog.Warn($"[NoteOverlay] UpdateLayeredWindow 失败 err={err} 包围盒={bb}");
                 }
                 ReleaseDC(IntPtr.Zero, screenDc);
             }
@@ -401,9 +485,10 @@ public sealed class NoteOverlay : IDisposable
             }
         }
 
-        private int _pushErr;
-
-        /// <summary>建立（并复用）一块与画布同尺寸的 32bpp DIB，作为分层窗口的源位图。</summary>
+        /// <summary>
+        /// 建立（并复用）与画布同尺寸的 32bpp DIB，作为分层窗口的源位图
+        /// （与 Highlighter 相同：脏区按绝对偏移拷入，ULW 从偏移处取内容）。
+        /// </summary>
         private void EnsureDib(int w, int h)
         {
             if (_dibHandle != IntPtr.Zero && _dibW == w && _dibH == h) return;

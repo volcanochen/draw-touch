@@ -787,11 +787,7 @@ public sealed class TcpPenServer : IDisposable
     /// <summary>残量上限：系统在虚拟桌面/异构多屏下截断位移时，残量不能无限堆积。</summary>
     private const double MoveRemainLimit = 600;
 
-    // 捏合缩放（Ctrl+滚轮方案）：不足 1 格的余量跨帧累计，避免慢速捏合「没反应」
-    private double _zoomNotch;
-
-    /// <summary>捏合系数 → 滚轮格数的换算系数：ln(1.105)×10 ≈ 1 格，即放大 10.5% 走一格。</summary>
-    private const double ZoomNotchPerLn = 10.0;
+    // （缩放余量与换算已移入 MouseControl 的触摸板缩放会话：CtrlZoomFactor/CtrlZoomEnd）
 
     /// <summary>激光笔帧：开关 + 颜色索引。</summary>
     private void HandleHighlighter(byte[] p)
@@ -854,6 +850,10 @@ public sealed class TcpPenServer : IDisposable
                     }
                     else
                     {
+                        // 手指真正离开触摸板 → 结束一切缩放会话：
+                        // 触摸注入的抬接触点 / Ctrl 缩放会话松开 Ctrl——应用此刻定稿刷新。
+                        MouseControl.EndTouchZoomIfActive();
+                        MouseControl.CtrlZoomEnd();
                         AppLog.Info("[Mouse] 手指离开触摸板 → S Pen 恢复控制光标");
                     }
                 }
@@ -898,28 +898,20 @@ public sealed class TcpPenServer : IDisposable
                 double factor = dx;
                 if (factor <= 0) break;
 
-                // ① 优先「真实触摸板捏合」：把两个接触点喂给系统，由系统翻译成前台应用的缩放手势。
-                //    这台机器的 InjectTouchInput 会熔断（err=87），此时自动降级到 ②。
-                bool usedTouch = false;
-                if (_cfg.PinchMode != "Wheel" && MouseControl.TryGetCursorPos(out var zx, out var zy))
-                    usedTouch = MouseControl.UpdateTouchZoom(factor, zx, zy);
-                if (usedTouch)
+                // ① 触摸注入（部分机器支持；本机 Win11 26300 被系统禁用，会立即熔断跳过）
+                if (_cfg.PinchMode != "Wheel" && MouseControl.TouchZoomAvailable() &&
+                    MouseControl.TryGetCursorPos(out var zx, out var zy) &&
+                    MouseControl.UpdateTouchZoom(factor, zx, zy))
                 {
-                    AppLog.Info($"[Mouse] 捏合 ×{factor:F3} → 触摸板真实缩放");
+                    if (_mouseLog++ % 20 == 0)
+                        AppLog.Info($"[Mouse] 捏合 ×{factor:F3} → 触摸注入缩放");
                     break;
                 }
 
-                // ② 通用方案：Ctrl + 滚轮 —— Office/OneNote/浏览器/PDF/看图 都认这个，
-                //    而且不会和任何文本排版快捷键撞车。真实触摸板捏合在系统里也等价于它。
-                //    factor 是对数关系换算成滚轮格数：×1.105 ≈ 1 格；零散余量累计到下一次。
-                _zoomNotch = Math.Clamp(_zoomNotch + Math.Log(factor) * ZoomNotchPerLn, -6, 6);
-                int notches = (int)_zoomNotch;
-                if (notches != 0)
-                {
-                    _zoomNotch -= notches;
-                    MouseControl.CtrlWheel(notches);
-                    AppLog.Info($"[Mouse] 捏合 ×{factor:F3} → Ctrl+滚轮 {notches:+0;-0} 格{(notches > 0 ? "（放大）" : "（缩小）")}");
-                }
+                // ② 触摸板缩放会话（照抄真实触摸板抓包 2026-10-29）：
+                //    Ctrl 按住跨整轮手势 + 逐格滚轮；停手时无消息无刷新；
+                //    手指离开触摸板（MOUSE_FINGER off）松开 Ctrl → 应用定稿。
+                MouseControl.CtrlZoomFactor(factor);
                 break;
             }
             case MOUSE_MIDDLE_CLICK:

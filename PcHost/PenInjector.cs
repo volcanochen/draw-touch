@@ -127,6 +127,13 @@ internal sealed class PenInjector : IInjector
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool DestroySyntheticPointerDevice(IntPtr device);
 
+    // 虚拟屏幕原点（SM_XVIRTUALSCREEN / SM_YVIRTUALSCREEN）
+    private const int SM_XVIRTUALSCREEN = 76;
+    private const int SM_YVIRTUALSCREEN = 77;
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int nIndex);
+
     private IntPtr _device = IntPtr.Zero;
     private uint _frame;
 
@@ -153,10 +160,17 @@ internal sealed class PenInjector : IInjector
         pi.pointerId = 1;
         pi.frameId = ++_frame;
         pi.historyCount = 1;
-        pi.pixelX = s.Px; pi.pixelY = s.Py;
-        pi.pixelRawX = s.Px; pi.pixelRawY = s.Py;
+        // InjectSyntheticPointerInput 的 ptPixelLocation **不是**标准虚拟屏幕坐标
+        // （主屏左上角为原点），而是以整个虚拟屏幕的最左上角为原点（virtual-screen-relative）。
+        // 第二屏在主屏左侧/上方时标准坐标为负，直接喂给 API 会被系统错判
+        // （实测笔被钉在主屏最右边缘）。这里平移到 relative 空间；每次取最新值，
+        // 显示器插拔/改布局也自动适应。单屏时 VirtualX/Y = 0，无影响。
+        int relX = s.Px - GetSystemMetrics(SM_XVIRTUALSCREEN);
+        int relY = s.Py - GetSystemMetrics(SM_YVIRTUALSCREEN);
+        pi.pixelX = relX; pi.pixelY = relY;
+        pi.pixelRawX = relX; pi.pixelRawY = relY;
         // himetric 实测被 Windows 忽略（坐标以 pixelX/pixelY 为准），这里按 96 DPI 惯例填上保持一致
-        pi.himetricX = (int)(s.Px * 26.4583); pi.himetricY = (int)(s.Py * 26.4583);
+        pi.himetricX = (int)(relX * 26.4583); pi.himetricY = (int)(relY * 26.4583);
         pi.himetricRawX = pi.himetricX; pi.himetricRawY = pi.himetricY;
 
         uint pf = s.State switch

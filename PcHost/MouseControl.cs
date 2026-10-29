@@ -252,13 +252,90 @@ internal static class MouseControl
         SendWheel(MOUSEEVENTF_HWHEEL, pixels);
     }
 
-    /// <summary>Ctrl + 像素级滚轮（缩放画布）。</summary>
+    /// <summary>Ctrl + 像素级滚轮（缩放画布）。整轮 Ctrl 按下→滚→抬起，独立的一次缩放操作。</summary>
     public static void CtrlWheelPixels(int pixels)
     {
         if (pixels == 0) return;
         SendKey(VK_CONTROL, up: false);
         SendWheel(MOUSEEVENTF_WHEEL, pixels);
         SendKey(VK_CONTROL, up: true);
+    }
+
+    // ============ 触摸板缩放会话（照抄真实触摸板抓包结果 2026-10-29） ============
+    // PointerProbe 实测真实触摸板捏合发给应用的消息流：
+    //   VK_CONTROL 按下 → WM_MOUSEWHEEL delta=±120 ×N（间隔 40~160ms）
+    //   → 停手期间【一条消息都没有】→ VK_CONTROL 松开。
+    // 结论：OneNote 的「模糊缩放、松手定稿」由 Ctrl 的 KEYUP 触发；停手不刷新是因为
+    // 停手时没有消息，而不是有什么 keep-alive。旧实现每格都「按 Ctrl→滚→松 Ctrl」，
+    // 每格都是一次独立缩放操作 → 每格立即重排（用户抱怨的「停一下就刷新」根源）。
+    // 正确姿势：捏合开始只按一次 Ctrl，期间只发滚轮，MOUSE_FINGER off 才松开。
+
+    private static bool _czActive;          // Ctrl 会话进行中
+    private static double _czAccum;         // 未发送的缩放余量（格，小数）
+    private static int _czSent;             // 本会话已发送的滚轮格数（调试显示用）
+    private static int _czFlushCount;       // 本会话 flush 次数（日志节流用）
+    private static long _czLastMs;          // 最后一个缩放帧时刻（兜底用）
+    private const int CZ_MAX_ACCUM = 6;     // 余量上限（格），防失控
+    private const int CZ_SAFETY_MS = 10000; // 手机断连兜底：10s 无帧自动松 Ctrl
+    private const int CZ_FLUSH_MS = 16;     // 发送节拍：60Hz 匀速（真实触摸板 ~30格/s 匀速流）
+
+    private static readonly System.Threading.Timer? _czTimer =
+        new System.Threading.Timer(_ => CtrlZoomTick(), null,
+            System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
+
+    private static void CtrlZoomTick()
+    {
+        try
+        {
+            if (!_czActive) return;
+            long now = Environment.TickCount64;
+            if (now - _czLastMs >= CZ_SAFETY_MS) { CtrlZoomEnd(); return; }
+            CtrlZoomFlush();
+            try { _czTimer?.Change(CZ_FLUSH_MS, System.Threading.Timeout.Infinite); } catch { }
+        }
+        catch { }
+    }
+
+    /// <summary>把累计余量以小数 delta 匀速发出（不按整格量化，消除爆发式节奏=卡顿）。</summary>
+    private static void CtrlZoomFlush()
+    {
+        int delta = (int)Math.Round(_czAccum * 120.0);
+        if (delta == 0) return;
+        SendWheel(MOUSEEVENTF_WHEEL, delta);
+        _czAccum -= delta / 120.0;
+        _czSent += delta;
+        _czFlushCount++;
+        // 日志节流：会话首条 + 每 20 条 + 明显累计时输出
+        if (_czFlushCount == 1 || _czFlushCount % 20 == 0 || Math.Abs(_czAccum) > 0.9)
+            AppLog.Info($"[TouchZoom] 匀速滚轮 {delta:+0;-0}（会话累计 {_czSent / 120.0:+0.0;-0.0} 格，余量 {_czAccum:F2} 格）");
+    }
+
+    /// <summary>捏合开始/继续：Ctrl 只在首轮按下；只累计，发送由 60Hz 定时器匀速完成。</summary>
+    public static void CtrlZoomFactor(double factor)
+    {
+        if (!_czActive)
+        {
+            SendKey(VK_CONTROL, up: false);
+            _czActive = true;
+            _czAccum = 0;
+            _czSent = 0;
+            _czFlushCount = 0;
+            AppLog.Info("[TouchZoom] Ctrl↓ 缩放会话开始（Ctrl 按住跨整轮手势，60Hz 匀速滚轮）");
+        }
+        _czAccum = Math.Clamp(_czAccum + Math.Log(factor) * 10.0, -CZ_MAX_ACCUM, CZ_MAX_ACCUM);
+        _czLastMs = Environment.TickCount64;
+        try { _czTimer?.Change(CZ_FLUSH_MS, System.Threading.Timeout.Infinite); } catch { }
+    }
+
+    /// <summary>捏合结束（手指离开触摸板）：发完余量 → 松开 Ctrl → 应用此刻定稿刷新。</summary>
+    public static void CtrlZoomEnd()
+    {
+        if (!_czActive) return;
+        _czActive = false;
+        CtrlZoomFlush();
+        _czAccum = 0;
+        SendKey(VK_CONTROL, up: true);
+        AppLog.Info($"[TouchZoom] Ctrl↑ 缩放会话结束（共 {_czSent / 120.0:+0.0;-0.0} 格；松开 Ctrl = 应用定稿刷新）");
     }
 
     // ================= 真实「触摸板缩放」：模拟双指捏合（触摸注入） =================
@@ -268,18 +345,17 @@ internal static class MouseControl
     // 若系统不支持触摸注入（很老的系统 / 注入失败），调用方应回退到 Ctrl+滚轮。
 
     private const uint POINTER_TYPE_TOUCH = 0x00000002;
-    // 官方 POINTER_FLAGS 值（winuser.h / POINTER_FLAGS 枚举）。
-    // 注意状态机（InjectTouchInput 文档）：
+    // 官方 POINTER_FLAGS 值（winuser.h）。
+    // 状态机（与真实触摸接触一致）：
     //   接触开始 = INRANGE|INCONTACT|DOWN；接触移动 = INRANGE|INCONTACT|UPDATE；
-    //   接触抬起转悬停 = INRANGE|UP；彻底结束 = UP。抬起必须发 UP，否则接触点永远挂着。
+    //   接触抬起 = INRANGE|UP。手势存续期间必须持续喂帧（同坐标 UPDATE 合法），
+    //   抬起必须发 UP，否则接触点永远挂着。
     private const uint POINTER_FLAG_NEW = 0x00000001;
     private const uint POINTER_FLAG_INRANGE = 0x00000002;
     private const uint POINTER_FLAG_INCONTACT = 0x00000004;
     private const uint POINTER_FLAG_DOWN = 0x00010000;
     private const uint POINTER_FLAG_UPDATE = 0x00020000;
     private const uint POINTER_FLAG_UP = 0x00040000;
-    private const uint TOUCH_MASK_CONTACTAREA = 0x0001;
-    private const uint TOUCH_FEEDBACK_NONE = 0x00000001;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct TZPoint { public int X; public int Y; }
@@ -321,21 +397,48 @@ internal static class MouseControl
     }
 
     [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool InitializeTouchInjection(uint maxCount, uint dwMode);
+    private static extern IntPtr CreateSyntheticPointerDevice(uint pointerType, uint maxCount, uint feedbackMode);
 
     [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool InjectTouchInput(uint count, [In] POINTER_TOUCH_INFO[] contacts);
+    private static extern bool InjectSyntheticPointerInput(IntPtr device, [In] POINTER_TYPE_INFO[] pointerInfo, uint count);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    // 官方布局：type(DWORD) + 4 字节对齐填充 + union（POINTER_TOUCH_INFO，8 字节对齐 → 偏移 8）。
+    // 之前误写成「完整 POINTER_INFO + 完整 TOUCH_INFO」并列 → 封送垃圾 → err=87。
+    private const uint TOUCH_MASK_PRESSURE = 0x00000004;
+    // 触摸反馈模式（winuser.h：DEFAULT=1、INDIRECT=2、NONE=3）。
+    // 必须用 NONE：INDIRECT 会让 Windows 在屏幕上画出两个白色触摸圆环（用户看到的
+    // 「虚拟手指点」）。NONE = 只投递手势、不画任何视觉反馈，
+    // 实测（2026-10-30）fb=3 创建设备与整套注入时序均成功。
+    private const uint TOUCH_FEEDBACK_NONE = 0x00000003;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINTER_TYPE_INFO
+    {
+        public uint type;                  // POINTER_INPUT_TYPE = PT_TOUCH
+        public POINTER_TOUCH_INFO touch;   // union 成员
+    }
+
+    private static IntPtr _synthDevice;
 
     private static bool _touchInit;
     private static bool _touchReady;
     private static bool _tzActive;
     private static int _tzFailCount;
-    private static uint _tzFrameId;
-    private static int _tzCx, _tzCy;     // 捏合中心（屏幕像素）
-    private static int _tzSpan;          // 当前半跨度（像素）
-    private static long _tzLastMs;
-    private static readonly System.Threading.Timer? _tzEndTimer =
-        new System.Threading.Timer(_ => EndTouchZoom(), null, System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
+    private static int _tzCx, _tzCy;     // 捏合中心（屏幕像素，整轮手势固定）
+    // 当前半跨度（像素）。**必须是浮点**：手机每帧给的 factor 常常只有 1.001~1.02，
+    // 用 int 存的话 24×1.01=24.24 会被截断回 24，微小增量永远累积不起来 →
+    // 缩到最小跨度后怎么都放不大（2026-10-30 用户反馈「卡住」的根因）。
+    private static double _tzSpan;
+    private static double _tzMaxSpan;    // 本轮手势的跨度上限（受虚拟屏幕边界约束）
+    private static bool _tzClampLogged;  // 本轮是否已经记过「触界」日志（避免刷屏）
+    private static int _tzLastX, _tzLastY; // 最后一帧注入坐标（UP 必须与其完全一致）
+    private static long _tzLastMs;       // 上一帧（真实或 keep-alive）注入时刻
+    private static long _tzLastRealMs;   // 上一「真实事件」时刻（手机缩放帧/手势开始）
+    private static readonly System.Threading.Timer? _tzTickTimer =
+        new System.Threading.Timer(_ => TouchZoomTick(), null, System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
 
     /// <summary>系统是否支持触摸注入（用于决定能否走真实触摸板缩放）。</summary>
     public static bool TouchZoomAvailable()
@@ -350,36 +453,82 @@ internal static class MouseControl
         _touchInit = true;
         try
         {
-            // maxCount=2：同时两个接触点；dwMode=TOUCH_FEEDBACK_NONE 关掉系统的视觉反馈
-            _touchReady = InitializeTouchInjection(2, TOUCH_FEEDBACK_NONE);
+            // InjectTouchInput 在新版 Windows 上已损坏（社区共识：任何参数永远 87）。
+            // 改用 CreateSyntheticPointerDevice(PT_TOUCH) + InjectSyntheticPointerInput
+            // —— 本机实测可用（2026-10-29）。参数照抄社区可用样例：maxCount=2。
+            // 反馈模式用 NONE（3）：INDIRECT 会在屏幕上画出两个触摸圆环。
+            _synthDevice = CreateSyntheticPointerDevice(POINTER_TYPE_TOUCH, 2, TOUCH_FEEDBACK_NONE);
+            _touchReady = _synthDevice != IntPtr.Zero;
             if (_touchReady)
-                AppLog.Info("[TouchZoom] 触摸注入初始化成功（首次捏合时验证可用性）");
+                AppLog.Info("[TouchZoom] 合成指针设备创建成功（双指触摸注入可用）");
             else
-                AppLog.Warn($"[TouchZoom] 初始化触摸注入失败 err={Marshal.GetLastWin32Error()}（将回退 Ctrl+滚轮）");
+                AppLog.Warn($"[TouchZoom] 创建合成指针设备失败 err={Marshal.GetLastWin32Error()}（将回退 Ctrl+滚轮）");
         }
         catch (Exception ex)
         {
             _touchReady = false;
-            AppLog.Warn($"[TouchZoom] 不支持触摸注入：{ex.Message}（将回退 Ctrl+滚轮）");
+            AppLog.Warn($"[TouchZoom] 不支持合成指针注入：{ex.Message}（将回退 Ctrl+滚轮）");
         }
     }
 
     /// <summary>捏合基准半跨度（像素）。</summary>
     private const int TZ_BASE_SPAN = 90;
-    private const int TZ_MIN_SPAN = 24;
-    private const int TZ_MAX_SPAN = 600;
-    /// <summary>手指停止发捏合帧超过此时长(ms)就抬起接触点，结束这次捏合。</summary>
-    private const int TZ_IDLE_MS = 220;
+    // 上下限决定**一次手势**能表达的缩放范围（相对基准 90）：
+    // 下限 12 = 可缩到 13%（7.5 倍），上限 900 = 可放到 10 倍。
+    // 原来是 24/600：缩到 24 只要手指间距变到 27% 就触底，之后捏拢的量全丢，
+    // 反向张开得先把丢失的量补回来 → 表现就是「缩小后放不大」。
+    private const double TZ_MIN_SPAN = 12;
+    private const double TZ_MAX_SPAN = 900;
+    /// <summary>两指离屏幕边缘至少留这么多像素，防止注入到虚拟屏幕之外。</summary>
+    private const int TZ_EDGE_MARGIN = 8;
+    // 官方文档（InjectTouchInput）三条硬规则（2026-10-29 调研确认）：
+    //  1) 相邻注入帧间隔超过 100ms → ERROR_TIMEOUT，接触点被系统判「过期」取消
+    //     （应用收到手势终结 → 刷新重排）。手势存续期间必须持续喂帧。
+    //  2) 「按住不动」的官方姿势 = DOWN 之后在【相同坐标】连发 UPDATE 帧——
+    //     同坐标帧完全合法。之前「同坐标必 87」是我们对熔断的误诊。
+    //  3) UP 帧坐标必须与上一帧 UPDATE 完全一致，否则 err=87 且【所有活动触点】
+    //     被取消——怀疑就是最初熔断的真凶。
+    // 真实触摸板手停时硬件仍 ≥125Hz 上报（坐标不变）→ 应用看到「坐标没变的活跃手势」
+    // → 零位移增量 → 不刷新。我们用 60ms 同坐标 keep-alive 帧模仿（16Hz，留足余量）。
+    /// <summary>手停 keep-alive 帧间隔(ms)：必须 &lt; 100（官方 ERROR_TIMEOUT 红线）。</summary>
+    private const int TZ_KEEPALIVE_MS = 60;
+    /// <summary>兜底：手机端这么久没有任何真实事件（缩放帧/离板帧）才强制抬手，
+    /// 防手机断连后接触点永久残留。keep-alive 帧不刷新此计时。</summary>
+    private const int TZ_SAFETY_LIFT_MS = 10000;
 
     private static void EndTouchZoom()
     {
         if (!_tzActive) return;
         _tzActive = false;
-        // 必须发真正的 UP 帧（INRANGE|UP）把两个接触点抬起来。
-        // 以前发的是 UPDATE|INRANGE|INCONTACT——接触点永远处于「接触中」，
-        // 系统等效认为两根手指一直按着 → 左键锁死 → 「鼠标控制不了」就是这个造成的。
-        InjectOneFrame(phase: TouchPhase.Up, _tzCx, _tzCy, _tzSpan);
-        AppLog.Info("[TouchZoom] 捏合结束（抬起接触点）");
+        // 必须发真正的 UP 帧（INRANGE|UP）把两个接触点抬起来，且坐标与上一帧一致（规则 3）。
+        InjectOneFrame(phase: TouchPhase.Up, _tzLastX, _tzLastY, _tzSpan);
+        AppLog.Info($"[TouchZoom] 捏合结束（抬起接触点，应用定稿刷新）最终跨度±{_tzSpan:0.0}");
+    }
+
+    /// <summary>周期回调：手停时注入【同坐标】keep-alive 帧维持手势；太久没真实事件才兜底抬手。</summary>
+    private static void TouchZoomTick()
+    {
+        try
+        {
+            if (!_tzActive) return;
+            long now = Environment.TickCount64;
+            if (now - _tzLastRealMs >= TZ_SAFETY_LIFT_MS) { EndTouchZoom(); return; }
+            if (now - _tzLastMs >= TZ_KEEPALIVE_MS)
+            {
+                // 官方「按住不动」姿势：相同坐标连发 UPDATE 帧。
+                // 应用只看到手势活跃、没有任何位移增量 → 不刷新、不平移。
+                if (InjectOneFrame(TouchPhase.Move, _tzLastX, _tzLastY, _tzSpan))
+                    _tzLastMs = Environment.TickCount64;
+                else
+                {
+                    // 注入失败（可能已被系统超时取消）→ 尝试清理后结束，下一轮重新 Down
+                    EndTouchZoom();
+                    return;
+                }
+            }
+            try { _tzTickTimer?.Change(TZ_KEEPALIVE_MS, System.Threading.Timeout.Infinite); } catch { }
+        }
+        catch { }
     }
 
     /// <summary>触摸帧的三种阶段：落下 / 移动（保持接触）/ 抬起。</summary>
@@ -396,51 +545,121 @@ internal static class MouseControl
         EnsureTouchInit();
         if (!_touchReady) return false;
         long now = Environment.TickCount64;
-        if (!_tzActive || now - _tzLastMs > TZ_IDLE_MS)
+        if (!_tzActive)
         {
-            // 开新一轮捏合：在当前光标处落下两个接触点（基准跨度）
+            // 开新一轮捏合：在当前光标处落下两个接触点（基准跨度）。
+            // 可用样例在 DOWN 前有一帧 flags=0 的「预注入」（复位设备状态），照抄，尽力而为。
+            InjectSyntheticPointerInput(_synthDevice, BuildSynthFrame(0, cx, cy, TZ_BASE_SPAN), 2);
             _tzCx = cx; _tzCy = cy;
             _tzSpan = TZ_BASE_SPAN;
+            _tzClampLogged = false;
+            // 上限还要受屏幕边界约束：两指是水平排布（y 相同），只需保证 x 方向不出界，
+            // 否则注入的坐标落到虚拟屏幕之外会被系统丢弃/夹住，缩放就断了。
+            var vs = SystemInformation.VirtualScreen;
+            _tzMaxSpan = Math.Min(TZ_MAX_SPAN,
+                Math.Max(TZ_MIN_SPAN, Math.Min(cx - vs.Left, vs.Right - cx) - TZ_EDGE_MARGIN));
             if (!InjectOneFrame(TouchPhase.Down, cx, cy, _tzSpan)) return false;
             _tzActive = true;
-            AppLog.Info($"[TouchZoom] 开始捏合 @({cx},{cy}) 跨度±{_tzSpan}");
+            _tzLastX = cx; _tzLastY = cy;
+            AppLog.Info($"[TouchZoom] 开始捏合 @({cx},{cy}) 跨度±{_tzSpan:0.0} 上限{_tzMaxSpan:0.0}");
         }
         else
         {
-            // 按相对系数缩放当前跨度（前台应用据此算出缩放量）
-            int ns = (int)Math.Clamp(_tzSpan * factor, TZ_MIN_SPAN, TZ_MAX_SPAN);
-            _tzSpan = ns;
-            if (!InjectOneFrame(TouchPhase.Move, cx, cy, _tzSpan)) return false;
+            // 整轮手势固定中心（捏合期间光标不会动）；跨度按相对系数缩放（浮点累积，
+            // 再小的 factor 也会一点点攒起来，不会被截断吃掉）。
+            // 跨度没变时就是同坐标帧——官方「按住不动」姿势，完全合法（规则 2）。
+            double want = _tzSpan * factor;
+            _tzSpan = Math.Clamp(want, TZ_MIN_SPAN, _tzMaxSpan);
+            // 触界自检：夹住了说明这一段缩放量被丢弃（手指继续捏但画面对不上），
+            // 记一条便于日后判断上下限是否还要放宽。
+            if (!_tzClampLogged && Math.Abs(want - _tzSpan) > 0.5)
+            {
+                _tzClampLogged = true;
+                AppLog.Warn($"[TouchZoom] 跨度触界 want={want:0.0} → {_tzSpan:0.0}（上限{_tzMaxSpan:0.0}）");
+            }
+            if (!InjectOneFrame(TouchPhase.Move, _tzCx, _tzCy, _tzSpan))
+            {
+                // 触点可能已被系统取消 → 结束手势，下一个缩放帧重新 Down
+                _tzActive = false;
+                return false;
+            }
+            _tzLastX = _tzCx; _tzLastY = _tzCy;
         }
         _tzLastMs = now;
-        // 220ms 内没新帧就自动抬起（结束捏合）
-        try { _tzEndTimer?.Change(TZ_IDLE_MS, System.Threading.Timeout.Infinite); } catch { }
+        _tzLastRealMs = now;
+        // 下一拍：手停由 TouchZoomTick 注入同坐标 keep-alive 帧（<100ms 红线内）；
+        // 正常结束由 MOUSE_FINGER off 触发
+        try { _tzTickTimer?.Change(TZ_KEEPALIVE_MS, System.Threading.Timeout.Infinite); } catch { }
         return true;
     }
 
+    /// <summary>构造同帧双指（参数照抄 TouchInjectTest mode 5 实测可用组合）。flags=0 即预注入复位帧。</summary>
+    private static POINTER_TYPE_INFO[] BuildSynthFrame(uint flags, int cx, int cy, double span)
+    {
+        var arr = new POINTER_TYPE_INFO[2];
+        for (int i = 0; i < 2; i++)
+        {
+            // 跨度是浮点（要能累积微小增量），注入时才取整到像素。
+            int px = (int)Math.Round(i == 0 ? cx - span : cx + span);
+            arr[i] = new POINTER_TYPE_INFO
+            {
+                type = POINTER_TYPE_TOUCH,
+                touch = new POINTER_TOUCH_INFO
+                {
+                    pointerInfo = new POINTER_INFO
+                    {
+                        pointerType = POINTER_TYPE_TOUCH,
+                        pointerId = 1u + (uint)i,          // 从 1 开始（0 在部分系统被判无效）
+                        frameId = 0,                        // 可用样例：恒 0 不递增
+                        pointerFlags = flags,
+                        sourceDevice = IntPtr.Zero,
+                        hwndTarget = GetForegroundWindow(), // 可用样例：喂给前台窗口
+                        ptPixelLocation = new TZPoint { X = px, Y = cy },
+                        ptPixelLocationRaw = new TZPoint { X = px, Y = cy },
+                        historyCount = 0,                   // 可用样例：0
+                    },
+                    touchMask = TOUCH_MASK_PRESSURE,        // 只报压力，不用接触面积
+                    pressure = 1,
+                },
+            };
+        }
+        return arr;
+    }
+
     /// <summary>构造并发出一帧（两个接触点）：Down 落点 / Move 保持接触移动 / Up 抬起结束。</summary>
-    private static bool InjectOneFrame(TouchPhase phase, int cx, int cy, int span)
+    /// <remarks>
+    /// 参数严格照抄 TouchInjectTest mode 5（本机 2026-10-29 实测零 FAIL 的组合）：
+    /// frameId 恒 0、historyCount=0、hwndTarget=前台窗口、touchMask=PRESSURE、pressure=1、
+    /// pointerId 从 1 开始、双指同帧一次调用。
+    /// </remarks>
+    private static bool InjectOneFrame(TouchPhase phase, int cx, int cy, double span)
     {
         try
         {
-            var a = MakeContact(0, cx - span, cy, phase);
-            var b = MakeContact(1, cx + span, cy, phase);
-            var arr = new[] { a, b };
-            _tzFrameId++;
-            bool ok = InjectTouchInput(2, arr);
+            if (_synthDevice == IntPtr.Zero) return false;
+            // 状态机（与真实触摸接触一致）：
+            //   Down  = INRANGE|INCONTACT|DOWN   （接触开始）
+            //   Move  = INRANGE|INCONTACT|UPDATE （接触移动）
+            //   Up    = INRANGE|UP               （接触抬起终结）
+            uint flags = phase switch
+            {
+                TouchPhase.Down => POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_DOWN,
+                TouchPhase.Move => POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_UPDATE,
+                _ => POINTER_FLAG_INRANGE | POINTER_FLAG_UP,
+            };
+            bool ok = InjectSyntheticPointerInput(_synthDevice, BuildSynthFrame(flags, cx, cy, span), 2);
             if (!ok)
             {
                 var err = Marshal.GetLastWin32Error();
-                // 熔断：某些 Windows 版本（实测 Win11 26300）触摸注入全组合返回 err=87，
-                // 是系统级问题不是参数问题。连续失败 3 次就永久禁用，走 Ctrl+/- 回退，不再刷日志。
+                // 连续失败 3 次视为系统级不支持，永久禁用走 Ctrl+滚轮回退。
                 if (++_tzFailCount >= 3 && _touchReady)
                 {
                     _touchReady = false;
-                    AppLog.Warn($"[TouchZoom] 触摸注入连续失败 err={err} ×{_tzFailCount}，本机不支持，已熔断并永久回退 Ctrl+/-");
+                    AppLog.Warn($"[TouchZoom] 合成指针注入连续失败 err={err} ×{_tzFailCount}，已熔断并永久回退 Ctrl+滚轮");
                 }
                 else
                 {
-                    AppLog.Warn($"[TouchZoom] InjectTouchInput 失败 err={err}");
+                    AppLog.Warn($"[TouchZoom] InjectSyntheticPointerInput 失败 err={err}");
                 }
             }
             else
@@ -454,49 +673,6 @@ internal static class MouseControl
             AppLog.Warn($"[TouchZoom] 注入异常：{ex.Message}");
             return false;
         }
-    }
-
-    private static POINTER_TOUCH_INFO MakeContact(uint id, int x, int y, TouchPhase phase)
-    {
-        const int r = 3; // 接触点包围盒半径（像素）
-        // 状态机严格按 InjectTouchInput 文档：
-        //   Down  = INRANGE|INCONTACT|DOWN   （接触开始）
-        //   Move  = INRANGE|INCONTACT|UPDATE （接触移动）
-        //   Up    = INRANGE|UP               （接触抬起转悬停，接触点终结）
-        uint flags = phase switch
-        {
-            TouchPhase.Down => POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_DOWN,
-            TouchPhase.Move => POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_UPDATE,
-            _ => POINTER_FLAG_INRANGE | POINTER_FLAG_UP,
-        };
-        return new POINTER_TOUCH_INFO
-        {
-            pointerInfo = new POINTER_INFO
-            {
-                pointerType = POINTER_TYPE_TOUCH,
-                pointerId = id,
-                frameId = _tzFrameId,
-                pointerFlags = flags,
-                sourceDevice = IntPtr.Zero,
-                hwndTarget = IntPtr.Zero,
-                ptPixelLocation = new TZPoint { X = x, Y = y },
-                ptHimetricLocation = new TZPoint { X = 0, Y = 0 },
-                ptPixelLocationRaw = new TZPoint { X = x, Y = y },
-                ptHimetricLocationRaw = new TZPoint { X = 0, Y = 0 },
-                dwTime = 0,
-                historyCount = 1,   // 文档：未合并时计数为 1；0 在部分系统上会被判为无效参数
-                inputData = 0,
-                dwKeyStates = 0,
-                performanceCount = 0,
-                buttonChangeType = 0,
-            },
-            touchFlags = 0,
-            touchMask = TOUCH_MASK_CONTACTAREA,
-            rcContact = new RECT { left = x - r, top = y - r, right = x + r, bottom = y + r },
-            rcContactRaw = new RECT { left = x - r, top = y - r, right = x + r, bottom = y + r },
-            orientation = 0,
-            pressure = 0,
-        };
     }
 
     /// <summary>捏合注入还活着就立刻结束（模式切换 / 释放全部输入时调用，防接触点残留）。</summary>

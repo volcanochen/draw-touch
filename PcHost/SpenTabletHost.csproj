@@ -25,4 +25,18 @@
     <PackageReference Include="Makaretu.Dns.Multicast.New" Version="0.38.0" />
   </ItemGroup>
 
+  <!-- 构建时间戳：每次编译生成 obj/BuildTime.g.cs（托盘菜单 / 设置窗口显示，
+       用户用来确认跑的是哪个包） -->
+  <Target Name="GenBuildTime" BeforeTargets="BeforeCompile">
+    <PropertyGroup>
+      <BuildTimeText>$([System.DateTime]::Now.ToString("yyyy-MM-dd HH:mm:ss"))</BuildTimeText>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(IntermediateOutputPath)BuildTime.g.cs"
+                      Lines="namespace SpenTabletHost;%3B internal static partial class BuildInfo %7B public const string BuildTime = &quot;$(BuildTimeText)&quot;%3B }"
+                      Overwrite="true" />
+    <ItemGroup>
+      <Compile Include="$(IntermediateOutputPath)BuildTime.g.cs" />
+    </ItemGroup>
+  </Target>
+
 </Project>

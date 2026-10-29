@@ -100,6 +100,10 @@ internal sealed class TrayApp : ApplicationContext
     {
         var menu = new ContextMenuStrip();
 
+        // 版本信息（只读）：确认跑的是哪个包（版本 + 构建时间）
+        menu.Items.Add(new ToolStripMenuItem($"SpenTablet Host v{AppVersion.Version}（构建于 {BuildInfo.BuildTime}）")
+        { Enabled = false });
+
         var mConfig = new ToolStripMenuItem("配置…");
         mConfig.Click += (_, _) => OpenConfig();
         menu.Items.Add(mConfig);
