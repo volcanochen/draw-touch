@@ -3,7 +3,7 @@ using System.Drawing;
 using System.Threading;
 using System.Windows.Forms;
 
-namespace SpenTabletHost;
+namespace DrawTouchHost;
 
 /// <summary>
 /// 可选调试浮窗：实时显示收到的笔样（坐标/压感/倾斜/按键），
@@ -25,7 +25,7 @@ internal sealed class DebugOverlay : Form
             Padding = new Padding(8)
         };
         Controls.Add(_lbl);
-        Text = "SpenTablet 调试";
+        Text = "draw&touch 调试";
         TopMost = true;
         FormBorderStyle = FormBorderStyle.FixedToolWindow;
         Width = 300;

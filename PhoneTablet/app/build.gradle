@@ -7,15 +7,15 @@ static def buildTime() {
 }
 
 android {
-    namespace 'com.volcano.spentablet'
+    namespace 'com.volcano.drawtouch'
     compileSdk 34
 
     defaultConfig {
-        applicationId "com.volcano.spentablet"
+        applicationId "com.volcano.drawtouch"
         minSdk 21
         targetSdk 34
-        versionCode 24
-        versionName "1.4.8"
+        versionCode 25
+        versionName "1.4.9"
         // 构建信息注入 BuildConfig：BUILD_TIME 每次构建都是当前时间
         buildConfigField "String", "BUILD_TIME", "\"${buildTime()}\""
     }

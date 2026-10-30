@@ -11,5 +11,5 @@ if not defined DN (
 )
 "%DN%" publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
 echo.
-echo 发布完成：SpenTablet\PcHost\publish\SpenTabletHost.exe
+echo 发布完成：SpenTablet\PcHost\publish\DrawTouchHost.exe
 pause

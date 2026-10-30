@@ -1,4 +1,4 @@
-# SpenTablet 自动化测试套件
+# draw&touch 自动化测试套件
 
 > 本文档描述 `SpenTablet/tests/` 目录及 `PhoneTablet/app/src/test/` 目录中**实际存在**的测试代码。
 > 所有测试项、命令、断言内容均来源于仓库代码事实；未实现的测试能力在文中明确标注为「暂无」。
@@ -9,7 +9,7 @@
 
 ### 1.1 覆盖范围
 
-测试套件覆盖 SpenTablet 项目的**手机端（Android/Kotlin）↔ PC 端（.NET 8 WinForms）之间的自定义二进制协议**，以及两端各自可独立验证的纯逻辑单元。
+测试套件覆盖 DrawTouch 项目的**手机端（Android/Kotlin）↔ PC 端（.NET 8 WinForms）之间的自定义二进制协议**，以及两端各自可独立验证的纯逻辑单元。
 
 | 层次 | 被测对象 | 运行位置 | 是否需要设备 |
 |---|---|---|---|
@@ -17,7 +17,7 @@
 | 纯 JVM 单元测试 | `PhoneTablet/.../Protocol.kt`（帧编码）、`PhoneTablet/.../UpdateChecker.kt`（语义化版本比较） | PC（Gradle `testReleaseUnitTest`） | 否 |
 | 系统 API 诊断探针 | Windows `InitializeTouchInjection` / `InjectTouchInput`（user32 P/Invoke） | PC（交互式桌面会话） | 否（但需要真实桌面会话） |
 
-**核心功能验证链路**：`tests/protocol_smoke.py` 用 Python 直接构造二进制帧，通过 TCP 连到本机正在运行的 `SpenTabletHost.exe`，逐项发帧并**同时断言「协议回包」与「host.log 日志」**。它等价于一个「无 Android 设备、只依赖 PC 端」的伪手机端，用于在每次改动 PC 端后做快速回归。
+**核心功能验证链路**：`tests/protocol_smoke.py` 用 Python 直接构造二进制帧，通过 TCP 连到本机正在运行的 `DrawTouchHost.exe`，逐项发帧并**同时断言「协议回包」与「host.log 日志」**。它等价于一个「无 Android 设备、只依赖 PC 端」的伪手机端，用于在每次改动 PC 端后做快速回归。
 
 ### 1.2 被测对象的协议常量（测试脚本内硬编码，与 PC 端 `TcpPenServer.cs` 对齐）
 
@@ -55,14 +55,14 @@ MOUSE 动作码（`MOUSE_*`）：0 移动 / 1 左键按下 / 2 左键抬起 / 3 
 |---|---|---|
 | Python 3 | `C:\Users\adminlocal\.workbuddy\binaries\python\versions\3.13.12\python.exe` | 跑冒烟测试与门禁脚本（仅用标准库 `socket/struct/argparse/pathlib`） |
 | .NET SDK 8 | `C:\Users\adminlocal\.dotnet\dotnet.exe` | 编译 PC 端与 TouchProbe |
-| .NET 8 运行时 | `C:\Users\adminlocal\.dotnet\shared\Microsoft.NETCore.App\8.0.33` | 运行 **框架依赖** 版 host（`bin/Release/.../SpenTabletHost.exe`） |
+| .NET 8 运行时 | `C:\Users\adminlocal\.dotnet\shared\Microsoft.NETCore.App\8.0.33` | 运行 **框架依赖** 版 host（`bin/Release/.../DrawTouchHost.exe`） |
 | JDK 17 | `C:\VOLCANO\myws\myEnv\tools\jdk-17.0.13` | Gradle 编译 Android 端 |
 | Android SDK | `C:\VOLCANO\myws\myEnv\tools\android-sdk` | `compileSdk 34` / `buildTools` |
 | Gradle 8.9 | `C:\VOLCANO\myws\myEnv\tools\gradle-8.9\bin\gradle.bat` | 运行 Android 单元测试与构建 |
 | JUnit 4.13.2 | 由 Gradle 解析（`PhoneTablet/app/build.gradle` 的 `testImplementation 'junit:junit:4.13.2'`） | Android 单元测试 |
 
 > **运行时坑**：`C:\Program Files\dotnet` 只有 6.0.25 / 9.0.3 / 9.0.5，**没有 8.0**。
-> 直接双击 `bin/Release/.../SpenTabletHost.exe` 会报 “You must install or update .NET to run this application”。
+> 直接双击 `bin/Release/.../DrawTouchHost.exe` 会报 “You must install or update .NET to run this application”。
 > 解决：设置 `DOTNET_ROOT=C:\Users\adminlocal\.dotnet`（`release_gate.py` 已自动设置）。
 > 若使用 `publish` 目录里的自包含单文件 exe，则无需任何 .NET 运行时。
 
@@ -94,10 +94,10 @@ ANDROID_HOME=/c/VOLCANO/myws/myEnv/tools/android-sdk \
 ```bash
 # 方式 A：用框架依赖版（需 DOTNET_ROOT）
 export DOTNET_ROOT="/c/Users/adminlocal/.dotnet"
-./PcHost/bin/Release/net8.0-windows/win-x64/SpenTabletHost.exe   # 后台常驻
+./PcHost/bin/Release/net8.0-windows/win-x64/DrawTouchHost.exe   # 后台常驻
 
 # 方式 B：用自包含单文件版（无需运行时）
-./PcHost/bin/Release/net8.0-windows/win-x64/publish/SpenTabletHost.exe
+./PcHost/bin/Release/net8.0-windows/win-x64/publish/DrawTouchHost.exe
 
 # 跑测试
 python tests/protocol_smoke.py --host 127.0.0.1 --port 6000
@@ -141,7 +141,7 @@ cd ../.. && python tests/cursor_inject_check.py            # 默认 +240,+120
 **⑥ 手动验证（需要真机 + 人工观察，无自动化脚本）**
 
 - 手机端安装：`PhoneTablet/app/build/outputs/apk/debug/app-debug.apk`（debug 签名，可覆盖安装）
-- PC 端运行：解压 `release/<版本>/assets/SpenTabletHost-win64-vX.Y.Z.zip` 双击 `SpenTabletHost.exe`（自包含，Win10 1809+）
+- PC 端运行：解压 `release/<版本>/assets/DrawTouchHost-win64-vX.Y.Z.zip` 双击 `DrawTouchHost.exe`（自包含，Win10 1809+）
 - 手机与 PC 同一局域网；USB 调试场景可 `adb reverse tcp:6000 tcp:6000`
 - 手机端连上后打开「设置」可查看 PC 主机信息与网络拓扑；调试日志见手机端 `DebugLog.kt` 的落盘目录
 
@@ -153,7 +153,7 @@ cd ../.. && python tests/cursor_inject_check.py            # 默认 +240,+120
 
 - **不要先停下来问用户"能不能开始"**，直接跑；
 - 但**必须**在开测时和收官时各弹一次横幅告诉用户，让他知道电脑不是卡了、以及什么时候桌面交还了；
-- 统一走 `tests/desk_notify.py`（内部调用 `SpenTabletHost.exe --notify`，右下角置顶、
+- 统一走 `tests/desk_notify.py`（内部调用 `DrawTouchHost.exe --notify`，右下角置顶、
   `WS_EX_NOACTIVATE` 不抢焦点、到点自动消失，不需要任何人点按钮）：
 
 ```python
@@ -181,7 +181,7 @@ SpenTablet/
 │       ├── TouchProbe.csproj                #   net8.0-windows 控制台工程（UseWindowsForms=true）
 │       ├── bin/  obj/                       #   构建产物（已加入 .gitignore，不入库）
 │       └── (运行结果仅打印到控制台，无断言、无退出码语义)
-└── PhoneTablet/app/src/test/java/com/volcano/spentablet/   # Android 端单元测试（与主源码同 module）
+└── PhoneTablet/app/src/test/java/com/volcano/drawtouch/   # Android 端单元测试（与主源码同 module）
     ├── ProtocolTest.kt                      # 帧编码字节级断言 + 动作码契约（9 项）
     ├── UpdateCheckerVersionTest.kt          # 语义化版本比较（7 项）
     ├── GestureDeadZoneTest.kt               # 移动死区闸门 + 捏合判定死区（13 项）
@@ -195,18 +195,18 @@ SpenTablet/
 **`tests/protocol_smoke.py`**（235 行）
 - `frame()` / `f32()`：构造小端二进制帧（magic `SP` + ver 1 + type + u16 长度 + payload）
 - `recv_frame()`：按帧头长度精确收包，帧头非 `SP` 直接抛 `AssertionError`
-- `find_host_log()`：在 4 个候选目录（publish / bin-Release / bin-Debug / 根 publish）中**按 mtime 选最新**的 `SpenTabletHost.log`（host 日志写在各自 EXE 同目录）
+- `find_host_log()`：在 4 个候选目录（publish / bin-Release / bin-Debug / 根 publish）中**按 mtime 选最新**的 `DrawTouchHost.log`（host 日志写在各自 EXE 同目录）
 - `log_contains(log, needle, since_size, timeout)`：只检索「本次标记之后的日志增量」，避免匹配到历史日志造成假通过
 - 分 9 段用例：握手 → 截图 → 模式 → 鼠标 → 捏合 → 激光笔 → 备注/平移/复位 → 笔让位兜底超时 → 自愈断连
 
 **`tests/release_gate.py`**
 - 三段式门禁，路径与端口为脚本内常量（`GRADLE`/`JDK`/`SDK`/`DOTNET`/`HOST_EXE`/`PORT=6000`）
-- 自己负责 host 生命周期：`taskkill /IM SpenTabletHost.exe /F` → `subprocess.Popen` 启动 → 轮询 socket 探测 6000 端口（最多 15 秒）→ 跑冒烟 → `terminate()`
+- 自己负责 host 生命周期：`taskkill /IM DrawTouchHost.exe /F` → `subprocess.Popen` 启动 → 轮询 socket 探测 6000 端口（最多 15 秒）→ 跑冒烟 → `terminate()`
 - `--skip-gradle` / `--skip-smoke` 仅用于本地调试，**正式发布不得使用**
 
 **`tests/CursorProbe/Program.cs` + `tests/cursor_inject_check.py`**（排障工具，cursor_inject_check 带断言）
 - `CursorProbe` 先把自己设成 per-monitor DPI aware（不设会算出一堆假位移），然后打印：前台窗口/进程及
-  `TokenElevation`、关注的进程（SpenTabletHost / WorkBuddy / explorer）各自是否提权、`GetClipCursor` 裁剪区、
+  `TokenElevation`、关注的进程（DrawTouchHost / WorkBuddy / explorer）各自是否提权、`GetClipCursor` 裁剪区、
   `SetCursorPos` 与 `SendInput(绝对/相对)` 的返回值 + `GetLastError` + 真实位移
 - `cursor_inject_check.py`：TCP 连 host → 发 `TYPE_MOUSE` 移动帧 → 比对光标位置，断言「确实动了且方向一致」
 - **坐标空间坑**：探针与 host 的 DPI 感知不同，同一光标在两边读到 1244 vs 2177（比值 1.75 = 系统缩放），
@@ -266,7 +266,7 @@ SpenTablet/
 | `PinchMode` | string | `"Touch"` | 捏合缩放方式：`Touch` 优先真实触摸注入、失败自动降级 Ctrl+滚轮 / `Wheel` 直接用 Ctrl+滚轮。旧值 `Keys`（Ctrl+±）已废弃，读到时按 `Wheel` 处理 —— 那个在 OneNote/Word 里是下标/删除线快捷键 |
 
 > 模板文件 `PcHost/appsettings.json` **已入库**（随源码分发）；运行时实际读取的是**各 EXE 同目录**下的副本
-> （`PcHost/bin/.../SpenTabletHost.exe` 或 `publish/SpenTabletHost.exe` 同级目录），`bin/`、`publish/` 已被 `.gitignore` 忽略。
+> （`PcHost/bin/.../DrawTouchHost.exe` 或 `publish/DrawTouchHost.exe` 同级目录），`bin/`、`publish/` 已被 `.gitignore` 忽略。
 > 仓库根目录下没有该文件。
 
 ### 4.2 测试脚本参数
@@ -287,7 +287,7 @@ SpenTablet/
 | `GRADLE` | `C:\VOLCANO\myws\myEnv\tools\gradle-8.9\bin\gradle.bat` | 换机器需修改 |
 | `JDK` / `SDK` | jdk-17.0.13 / android-sdk | 同上 |
 | `DOTNET` | `C:\Users\adminlocal\.dotnet\dotnet.exe` | 同上 |
-| `HOST_EXE` | `PcHost/bin/Release/net8.0-windows/win-x64/SpenTabletHost.exe` | 门禁启动的 host 位置 |
+| `HOST_EXE` | `PcHost/bin/Release/net8.0-windows/win-x64/DrawTouchHost.exe` | 门禁启动的 host 位置 |
 | `PORT` | 6000 | 门禁探测的端口 |
 
 ### 4.4 Android 构建配置（`PhoneTablet/app/build.gradle`）
@@ -414,16 +414,16 @@ SpenTablet/
 ## 6. 常见问题（FAQ）
 
 **Q1：跑冒烟测试报 `ConnectionRefusedError: [WinError 10061]`**
-host 没起来或端口不是 6000。先确认进程：`tasklist | findstr SpenTabletHost`；启动前用 `taskkill /IM SpenTabletHost.exe /F` 清掉占用旧实例的残留进程。
+host 没起来或端口不是 6000。先确认进程：`tasklist | findstr DrawTouchHost`；启动前用 `taskkill /IM DrawTouchHost.exe /F` 清掉占用旧实例的残留进程。
 
-**Q2：启动 `bin/Release/.../SpenTabletHost.exe` 报 “You must install or update .NET to run this application”**
+**Q2：启动 `bin/Release/.../DrawTouchHost.exe` 报 “You must install or update .NET to run this application”**
 本机 `C:\Program Files\dotnet` 没有 .NET 8 运行时。设置 `DOTNET_ROOT=C:\Users\adminlocal\.dotnet` 后再启动，或改用 `publish` 目录的自包含单文件 exe（无需运行时）。
 
 **Q3：冒烟测试跑完一堆「日志确认」全 FAIL，但协议回包正常**
 host 日志写在**它自己 EXE 所在目录**。若你从 `bin/Release/.../` 启动 host，而脚本此前指向 `publish` 的日志，就会断言不到。`find_host_log()` 已按「mtime 最新的日志」自动选择，但同一台机器上**同时存在两个 host 实例**时仍会错判——确保只有一个 host 在跑。
 
 **Q4：`publish` 目录里只有 exe 没有 dll，是不是发布坏了？**
-不是。`PcHost/SpenTabletHost.csproj` 启用了 `PublishSingleFile` + `SelfContained`，托管程序集被打包进 exe，目录里看不到 `SpenTabletHost.dll` 属正常。**反而不要给 `dotnet publish` 加 `--self-contained false`**——那会退化成依赖框架模式，产物在没装 .NET 8 的机器上直接打不开。
+不是。`PcHost/DrawTouchHost.csproj` 启用了 `PublishSingleFile` + `SelfContained`，托管程序集被打包进 exe，目录里看不到 `DrawTouchHost.dll` 属正常。**反而不要给 `dotnet publish` 加 `--self-contained false`**——那会退化成依赖框架模式，产物在没装 .NET 8 的机器上直接打不开。
 
 **Q5：NOTE 开/关、PAN 平移的断言偶尔失败**
 host 对这两类日志做了抽样节流（NOTE 原为每 10 条、PAN 每 12 条记 1 条）。当前版本已把 NOTE 开关改为恒记日志；PAN 在冒烟里连发 13 帧以保证命中节流窗口。手工只发 1 帧时看不到日志属正常。

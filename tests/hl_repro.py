@@ -23,8 +23,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from desk_notify import notify  # noqa: E402
 
-HOST_EXE = ROOT / "PcHost" / "bin" / "Release" / "net8.0-windows" / "win-x64" / "SpenTabletHost.exe"
-LOG = HOST_EXE.parent / "SpenTabletHost.log"
+HOST_EXE = ROOT / "PcHost" / "bin" / "Release" / "net8.0-windows" / "win-x64" / "DrawTouchHost.exe"
+LOG = HOST_EXE.parent / "DrawTouchHost.log"
 DOTNET = Path(r"C:\Users\adminlocal\.dotnet\dotnet.exe")
 
 MAGIC = b"SP"

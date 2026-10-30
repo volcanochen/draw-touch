@@ -5,7 +5,7 @@ using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace SpenTabletHost;
+namespace DrawTouchHost;
 
 /// <summary>
 /// TCP 服务器：接收手机端发来的二进制笔事件帧，解析后交给 IInjector 注入到 Windows。
@@ -681,7 +681,7 @@ public sealed class TcpPenServer : IDisposable
                 png = ms.ToArray();
             }
 
-            string name = "SpenTablet_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".png";
+            string name = "DrawTouch_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".png";
             if (toPc)
             {
                 // 保存目录按优先级逐个试。真实环境里「图片库」可能根本建不了目录：
@@ -692,11 +692,11 @@ public sealed class TcpPenServer : IDisposable
                 if (!string.IsNullOrWhiteSpace(_cfg.ShotSaveDir))
                     candidates.Add(_cfg.ShotSaveDir!);
                 candidates.Add(Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "SpenTablet"));
+                    Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "draw&touch"));
                 candidates.Add(Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "SpenTablet"));
+                    Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "draw&touch"));
                 candidates.Add(Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SpenTablet"));
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "draw&touch"));
                 candidates.Add(Path.Combine(AppContext.BaseDirectory, "shots"));
 
                 string? saved = null;

@@ -29,10 +29,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 HOST_CANDIDATES = [
-    ROOT / "PcHost" / "bin" / "Release" / "net8.0-windows" / "win-x64" / "SpenTabletHost.exe",
-    ROOT / "PcHost" / "bin" / "Release" / "net8.0-windows" / "SpenTabletHost.exe",
-    ROOT / "PcHost" / "bin" / "Debug" / "net8.0-windows" / "win-x64" / "SpenTabletHost.exe",
-    ROOT / "PcHost" / "bin" / "Debug" / "net8.0-windows" / "SpenTabletHost.exe",
+    ROOT / "PcHost" / "bin" / "Release" / "net8.0-windows" / "win-x64" / "DrawTouchHost.exe",
+    ROOT / "PcHost" / "bin" / "Release" / "net8.0-windows" / "DrawTouchHost.exe",
+    ROOT / "PcHost" / "bin" / "Debug" / "net8.0-windows" / "win-x64" / "DrawTouchHost.exe",
+    ROOT / "PcHost" / "bin" / "Debug" / "net8.0-windows" / "DrawTouchHost.exe",
 ]
 
 # 静默开关：批量跑（比如门禁）时只想弹一次提示，可用 SPEN_NO_NOTIFY=1 关掉
@@ -59,7 +59,7 @@ def notify(text, seconds=8, kind="busy"):
     if exe is None:
         if not _warned:
             _warned = True
-            print("（提示）找不到 SpenTabletHost.exe，跳过桌面横幅；"
+            print("（提示）找不到 DrawTouchHost.exe，跳过桌面横幅；"
                   "先编译一次 PcHost 就能看到测试提示。")
         return False
     try:

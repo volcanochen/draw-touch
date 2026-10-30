@@ -2,7 +2,7 @@ using System;
 using System.IO;
 using System.Text.Json;
 
-namespace SpenTabletHost;
+namespace DrawTouchHost;
 
 /// <summary>appsettings.json 的读写。始终放在 EXE 所在目录，保证双击启动时也能找到。</summary>
 internal static class ConfigStore

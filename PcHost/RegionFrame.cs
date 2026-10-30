@@ -2,7 +2,7 @@ using System;
 using System.Drawing;
 using System.Windows.Forms;
 
-namespace SpenTabletHost;
+namespace DrawTouchHost;
 
 /// <summary>
 /// 桌面上的「操作范围框」：用橙色边框标出 S Pen 实际能覆盖的区域。
@@ -26,7 +26,7 @@ internal sealed class RegionFrame : Form
         _cfg = cfg;
 
         FormBorderStyle = FormBorderStyle.None;   // 无边框，Text 只作为可检索的窗口标识，不会显示出来
-        Text = "SpenTabletRegionFrame";
+        Text = "DrawTouchRegionFrame";
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
         TopMost = true;

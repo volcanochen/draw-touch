@@ -1,5 +1,5 @@
 <svg viewBox='0 0 680 690' width='100%' role='img' xmlns='http://www.w3.org/2000/svg' font-family='system-ui,-apple-system,sans-serif'>
-<title>SpenTablet 全链路数值流程图：手机手势判定 → 语义指令过网 → PC 合成触点注入</title>
+<title>DrawTouch 全链路数值流程图：手机手势判定 → 语义指令过网 → PC 合成触点注入</title>
 <desc>图2流程展开：左侧八个环节，右侧挂实际数值，橙色框为关键出入数据（13字节语义帧与Up定稿帧）。</desc>
 <defs><marker id='arrowD' viewBox='0 0 10 10' refX='8' refY='5' markerWidth='6' markerHeight='6' orient='auto-start-reverse'><path d='M2 1L8 5L2 9' fill='none' stroke='#5F5E5A' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></marker></defs>
 <rect x='40' y='40' width='600' height='30' rx='8' fill='#9FE1CB'/>

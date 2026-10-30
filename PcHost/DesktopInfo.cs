@@ -1,7 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 
-namespace SpenTabletHost;
+namespace DrawTouchHost;
 
 /// <summary>
 /// 桌面环境探针：判断「是不是换了一块屏 / 换了一个 Windows 虚拟桌面」。

@@ -31,7 +31,7 @@ def main():
         print(f"  发送 {note or kind}: kind={kind} dx={dx} dy={dy}")
         time.sleep(0.35)
 
-    print("依次注入各手势帧，请观察 PC 端 SpenTabletHost.log：")
+    print("依次注入各手势帧，请观察 PC 端 DrawTouchHost.log：")
     send(MOUSE_SCROLL, 0.0, -0.15, "双指上滑（纵向滚动）")
     send(MOUSE_SCROLL, 0.12, 0.0, "双指右滑（横向滚动）")
     send(MOUSE_ZOOM, 1.25, 0.0, "双指捏合张开（缩放）")

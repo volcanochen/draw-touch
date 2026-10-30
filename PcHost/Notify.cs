@@ -3,7 +3,7 @@ using System.Drawing;
 using System.Media;
 using System.Windows.Forms;
 
-namespace SpenTabletHost;
+namespace DrawTouchHost;
 
 /// <summary>
 /// 桌面测试的「开始 / 结束」提示横幅 —— 给自动化测试脚本用的零交互通知。
@@ -18,7 +18,7 @@ namespace SpenTabletHost;
 ///   · 到时间自动关闭 —— 不留需要点「确定」的对话框，测试脚本也不用回收它。
 ///
 /// 用法（由 tests/desk_notify.py 调用）：
-///   SpenTabletHost.exe --notify "正在测试：会动鼠标" --seconds 20 --kind busy
+///   DrawTouchHost.exe --notify "正在测试：会动鼠标" --seconds 20 --kind busy
 ///
 /// 为什么不复用托盘气泡：托盘气泡只在 host 进程活着时才有，而门禁测试会先杀掉
 /// host 再起干净的实例，气泡发不出去；而且气泡需要 WER 注册，在 CI/无人值守时
@@ -29,7 +29,7 @@ internal static class Notify
     /// <summary>解析命令行并显示横幅，然后退出进程（不进入主程序逻辑）。</summary>
     public static void Run(string[] args)
     {
-        string text = Option(args, "--notify", "SpenTablet 测试");
+        string text = Option(args, "--notify", "draw&touch 测试");
         string kind = Option(args, "--kind", "busy");
         int seconds = int.TryParse(Option(args, "--seconds", "8"), out int s) ? s : 8;
         Show(text, seconds, kind);

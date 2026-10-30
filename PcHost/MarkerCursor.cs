@@ -4,7 +4,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 
-namespace SpenTabletHost;
+namespace DrawTouchHost;
 
 /// <summary>
 /// 激光笔光标：把 Windows 的箭头指针换成一个**醒目的激光光斑**。
@@ -216,7 +216,7 @@ internal sealed class MarkerCursor : IDisposable
     public static IntPtr LoadAsSystemCursor(Bitmap bmp, int hotX, int hotY, out string curPath)
     {
         curPath = Path.Combine(Path.GetTempPath(),
-            $"SpenTablet-marker-{(uint)bmp.Width}x{(uint)bmp.Height}.cur");
+            $"DrawTouch-marker-{(uint)bmp.Width}x{(uint)bmp.Height}.cur");
         try
         {
             WriteCurFile(curPath, bmp, hotX, hotY);

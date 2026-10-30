@@ -87,7 +87,7 @@ def find_region_frame():
         if n:
             buf = ctypes.create_unicode_buffer(n + 1)
             user32.GetWindowTextW(hwnd, buf, n + 1)
-            if buf.value == "SpenTabletRegionFrame":
+            if buf.value == "DrawTouchRegionFrame":
                 found["hwnd"] = hwnd
                 return False
         return True
@@ -153,7 +153,7 @@ def main():
     send(pan_frame(0.1, 0.0), "PAN(0.1,0)")
 
     s.close()
-    print("\n完成。请比对 PC 端 SpenTabletHost.log 中的 [Mode]/[Mouse]/[MousePen]/[Pan] 记录。")
+    print("\n完成。请比对 PC 端 DrawTouchHost.log 中的 [Mode]/[Mouse]/[MousePen]/[Pan] 记录。")
 
 
 if __name__ == "__main__":

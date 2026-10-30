@@ -1,6 +1,6 @@
 """抓取指定标题的窗口并保存为 PNG（纯 ctypes，不依赖 PIL / Add-Type）。
 
-用法: python shot.py "SpenTablet 设置" out.png
+用法: python shot.py "DrawTouch 设置" out.png
 """
 import ctypes
 import ctypes.wintypes as wt
@@ -84,6 +84,6 @@ def grab(title, out):
 
 
 if __name__ == "__main__":
-    title = sys.argv[1] if len(sys.argv) > 1 else "SpenTablet 设置"
+    title = sys.argv[1] if len(sys.argv) > 1 else "DrawTouch 设置"
     out = sys.argv[2] if len(sys.argv) > 2 else "shot.png"
     sys.exit(0 if grab(title, out) else 1)

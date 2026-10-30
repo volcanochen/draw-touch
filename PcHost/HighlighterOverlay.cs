@@ -7,7 +7,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 
-namespace SpenTabletHost;
+namespace DrawTouchHost;
 
 /// <summary>
 /// 激光笔叠加层：把桌面指针变成激光笔。
@@ -269,7 +269,7 @@ public sealed class HighlighterOverlay : IDisposable
                 if (key == null) return;
                 var v = key.GetValue("Arrow") as string;
                 if (string.IsNullOrEmpty(v)) return;
-                if (!v.Contains("SpenTablet-marker", StringComparison.OrdinalIgnoreCase)) return;
+                if (!v.Contains("DrawTouch-marker", StringComparison.OrdinalIgnoreCase)) return;
                 // 还原成系统自带的那支箭头
                 var aero = Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -648,7 +648,7 @@ public sealed class HighlighterOverlay : IDisposable
             try
             {
                 _cursor?.SavePreview(System.IO.Path.Combine(
-                    System.IO.Path.GetTempPath(), "SpenTablet-highlighter-cursor.png"));
+                    System.IO.Path.GetTempPath(), "DrawTouch-highlighter-cursor.png"));
             }
             catch { }
         }

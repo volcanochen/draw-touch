@@ -1,7 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 
-namespace SpenTabletHost;
+namespace DrawTouchHost;
 
 /// <summary>
 /// 运行配置（来自 appsettings.json），并负责把手机传来的归一化坐标(0..1)映射到 Windows 虚拟屏幕像素。
@@ -58,7 +58,7 @@ public sealed class MappingConfig
 
     /// <summary>
     /// 截屏保存目录（手机点「截屏」时 PNG 存到哪）。
-    /// 留空 = 默认「图片库\SpenTablet」；目录不存在会自动创建。
+    /// 留空 = 默认「图片库\DrawTouch」；目录不存在会自动创建。
     /// </summary>
     public string ShotSaveDir { get; set; } = "";
 

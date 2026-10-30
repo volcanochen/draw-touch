@@ -2,7 +2,7 @@ using System;
 using System.Linq;
 using System.Windows.Forms;
 
-namespace SpenTabletHost;
+namespace DrawTouchHost;
 
 internal static class Program
 {
@@ -27,6 +27,17 @@ internal static class Program
         bool openConfig = args != null && args.Any(a =>
             a.Equals("--config", StringComparison.OrdinalIgnoreCase) ||
             a.Equals("/config", StringComparison.OrdinalIgnoreCase));
+        // --version：打印版本号后立刻退出（给发布脚本核验产物用）。
+        // 单文件发布会把程序集压缩进 exe，明文搜版本号是**搜不到**的
+        // （v1.4.8 的包就搜不到），所以让程序自己报，才核验得准。
+        if (args != null && args.Any(a =>
+            a.Equals("--version", StringComparison.OrdinalIgnoreCase) ||
+            a.Equals("/version", StringComparison.OrdinalIgnoreCase)))
+        {
+            Console.WriteLine("DrawTouchHost " + AppVersion.Version);
+            return;
+        }
+
         // ---- DPI 感知：必须让 WinForms 自己接管 ----
         // 合成笔注入用的是物理像素，进程一定要 DPI 感知，否则 GetSystemMetrics
         // 返回的是虚拟化尺寸，坐标映射会整体错位一个缩放倍率。
@@ -74,7 +85,7 @@ internal static class Program
         var cfg = ConfigStore.Load();
         cfg.ResolveVirtualScreen();
 
-        AppLog.Info("=== SpenTablet Host（把三星 Note + S Pen 变成 PC 数位板）===");
+        AppLog.Info("=== draw&touch Host（把三星 Note + S Pen 变成 PC 数位板）===");
         AppLog.Info($"虚拟屏幕: X={cfg.VirtualX} Y={cfg.VirtualY} W={cfg.VirtualW} H={cfg.VirtualH}");
         AppLog.Info($"注入模式: {cfg.Mode}｜比例: {cfg.Aspect}｜工作模式: {cfg.WorkMode}｜端口: {cfg.ListenPort}");
         AppLog.Info($"配置文件: {ConfigStore.Path}");
@@ -120,14 +131,14 @@ internal static class Program
         }
         catch (System.Net.Sockets.SocketException ex)
         {
-            // 端口被占用 = 大概率已经有一个 SpenTabletHost 在跑（托盘里没退出干净）
+            // 端口被占用 = 大概率已经有一个 DrawTouchHost 在跑（托盘里没退出干净）
             MessageBox.Show(
                 $"端口 {cfg.ListenPort} 已被占用（{ex.SocketErrorCode}）。\n\n" +
-                "多半是已经有一个 SpenTabletHost 在运行：\n" +
+                "多半是已经有一个 DrawTouchHost 在运行：\n" +
                 "· 看看右下角托盘图标，双击打开的可能是旧版本界面；\n" +
                 "· 请在托盘图标上右键 →「退出」，再重新启动本程序。\n\n" +
                 "（也可以用 --config 参数启动，确认打开的是哪个版本）",
-                "SpenTablet 启动失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                "draw&touch 启动失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 

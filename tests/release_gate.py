@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SpenTablet 发布门禁（release gate）。
+DrawTouch 发布门禁（release gate）。
 
 发布任何版本前必须跑通全部三道检查，全绿才允许发布：
   1. Android 单元测试（Protocol 帧编码 + UpdateChecker 版本比较）
@@ -24,7 +24,7 @@ GRADLE = Path(r"C:\VOLCANO\myws\myEnv\tools\gradle-8.9\bin\gradle.bat")
 JDK = Path(r"C:\VOLCANO\myws\myEnv\tools\jdk-17.0.13")
 SDK = Path(r"C:\VOLCANO\myws\myEnv\tools\android-sdk")
 DOTNET = Path(r"C:\Users\adminlocal\.dotnet\dotnet.exe")
-HOST_EXE = ROOT / "PcHost" / "bin" / "Release" / "net8.0-windows" / "win-x64" / "SpenTabletHost.exe"
+HOST_EXE = ROOT / "PcHost" / "bin" / "Release" / "net8.0-windows" / "win-x64" / "DrawTouchHost.exe"
 HOST_STDOUT = HOST_EXE.parent / "host_smoke_stdout.log"
 PORT = 6000
 
@@ -49,12 +49,12 @@ def gate_gradle():
 
 
 def kill_host():
-    """结束残留的 SpenTabletHost 进程。
+    """结束残留的 DrawTouchHost 进程。
 
     必须在做 dotnet build **之前**调用：运行中的 host 会锁住
-    bin/Release 下的 SpenTabletHost.dll，导致编译报「无法复制文件」。
+    bin/Release 下的 DrawTouchHost.dll，导致编译报「无法复制文件」。
     """
-    subprocess.run(["taskkill", "/IM", "SpenTabletHost.exe", "/F"],
+    subprocess.run(["taskkill", "/IM", "DrawTouchHost.exe", "/F"],
                    capture_output=True)
     time.sleep(1)
 
@@ -63,7 +63,7 @@ def gate_pcbuild():
     print("\n[2/3] PC 端 Release 编译")
     # 编译前先结束残留 host —— 运行中的进程会锁住输出 DLL
     kill_host()
-    r = run([DOTNET, "build", ROOT / "PcHost" / "SpenTabletHost.csproj", "-c", "Release"])
+    r = run([DOTNET, "build", ROOT / "PcHost" / "DrawTouchHost.csproj", "-c", "Release"])
     detail = "" if r.returncode == 0 else (r.stdout or b"").decode(errors="ignore")[-400:]
     step("dotnet build -c Release", r.returncode == 0, detail)
 
@@ -148,7 +148,7 @@ def main():
     ap.add_argument("--skip-smoke", action="store_true", help="跳过冒烟测试（临时调试用）")
     args = ap.parse_args()
 
-    print("== SpenTablet 发布门禁 ==")
+    print("== DrawTouch 发布门禁 ==")
     if not args.skip_gradle:
         gate_gradle()
     gate_pcbuild()

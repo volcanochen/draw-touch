@@ -7,7 +7,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 
-namespace SpenTabletHost;
+namespace DrawTouchHost;
 
 /// <summary>
 /// 桌面笔迹叠加层（屏幕备注）：一个**真透明**、置顶、鼠标穿透的窗口，

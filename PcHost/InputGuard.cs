@@ -3,7 +3,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 
-namespace SpenTabletHost;
+namespace DrawTouchHost;
 
 /// <summary>
 /// 输入注入权限守卫 —— 解决「指针在某些窗口上完全动不了，切到别的窗口立刻恢复」。

@@ -98,7 +98,7 @@ internal static class Program
 
         // ---- 关注进程 ----
         Out("关注进程提权状态：");
-        foreach (var name in new[] { "SpenTabletHost", "WorkBuddy", "explorer" })
+        foreach (var name in new[] { "DrawTouchHost", "WorkBuddy", "explorer" })
         {
             foreach (var pr in System.Diagnostics.Process.GetProcessesByName(name))
                 Out($"  {name,-16} pid={pr.Id,-6} 提权={Elev((uint)pr.Id)}");

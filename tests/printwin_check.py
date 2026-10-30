@@ -27,9 +27,9 @@ class BMIH(ctypes.Structure):
 
 def find_layered_windows():
     out = subprocess.check_output(
-        'tasklist /FI "IMAGENAME eq SpenTabletHost.exe" /FO CSV',
+        'tasklist /FI "IMAGENAME eq DrawTouchHost.exe" /FO CSV',
         shell=True).decode("gbk", "replace")
-    pids = [int(p) for p in re.findall(r'"SpenTabletHost\.exe","(\d+)"', out)]
+    pids = [int(p) for p in re.findall(r'"DrawTouchHost\.exe","(\d+)"', out)]
     found = []
 
     def cb(h, l):

@@ -1,7 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 
-namespace SpenTabletHost;
+namespace DrawTouchHost;
 
 /// <summary>
 /// 一支笔在某一时刻的采样。坐标已是映射到虚拟屏幕后的像素值（px/py）。

@@ -13,7 +13,7 @@
 
     <application
         android:allowBackup="true"
-        android:label="SpenTablet"
+        android:label="draw&amp;touch"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
         android:supportsRtl="true">
 

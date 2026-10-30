@@ -1,4 +1,4 @@
-# SpenTablet —— 把旧三星 Note + S Pen 变成 PC 数位板 & 触摸板
+# draw&touch —— 把旧三星 Note + S Pen 变成 PC 数位板 & 触摸板
 
 把闲置的三星 Note 手写笔手机，变成 Windows PC 上的**压感数位板**和**多点触摸板**。  
 手机与 PC 通过局域网 / USB 实时通信，打开即用，零配置。
@@ -41,8 +41,11 @@
 - **应用内检查更新**：直接比对 GitHub Releases 最新版本，有新版弹窗提示更新内容，
   确认后自动下载 APK 并拉起系统安装；启动时也会静默检查（仅发现新版才提示）
 - **跨屏范围框**：桌面上橙色框=可作画区域，可以拖到**任意显示器**（多屏），双指捏合缩放
-- **陀螺仪方向**：跟随（四向）/ 横屏双朝向 / 竖屏双朝向，三种模式一键循环
-- **独立设置页**：IP / 比例 / 模式 / 增益 / 触摸板配置 / 版本信息 / 检查更新，按返回键即关
+- **陀螺仪方向**：跟随系统（听系统的自动旋转开关）/ 横屏双朝向 / 竖屏双朝向，三种模式一键循环
+- **分类清楚的设置页**：设置项按 **8 个类别**归置（连接 / 模式与映射 / 指针与滚动 / 按压识别 /
+  手势绑定 / 触觉反馈 / 显示与截图 / 关于），每个类别是**统一的卡片结构**（标题 + 说明 + 内容）；
+  **横屏自动排成两列**充分利用横向空间，两列各自独立滚动；竖屏单列。
+  数值调节行把**数值单独排成一列**，标签换行也不会把数值挤到第二行
 
 ## 🖼 功能实机一览
 
@@ -73,12 +76,12 @@
 ## 🚀 快速开始（三步）
 
 1. **PC 端**：从 [Releases](https://github.com/volcanochen/drawing-phone/releases/latest)  
-   下载 `SpenTabletHost-win64-*.zip` 解压运行 `SpenTabletHost.exe`（自包含单文件、免安装、托盘常驻）；  
-   或自行编译：`cd PcHost && dotnet publish -c Release` → `publish/SpenTabletHost.exe`  
+   下载 `DrawTouchHost-win64-*.zip` 解压运行 `DrawTouchHost.exe`（自包含单文件、免安装、托盘常驻）；  
+   或自行编译：`cd PcHost && dotnet publish -c Release` → `publish/DrawTouchHost.exe`  
    > 首次运行会请求一次**管理员权限**（UAC）。原因：前台程序若以管理员身份运行（WorkBuddy 就是），
    > Windows 会拦掉普通权限进程的鼠标注入，表现为「指针在这一窗口上完全动不了」。
    > 不想提权可加参数 `--no-elevate`，届时托盘会提示并在菜单里提供一键提权重启。
-2. **手机端**：从 Releases 下载 `SpenTabletPhone-*.apk` 安装；  
+2. **手机端**：从 Releases 下载 `DrawTouchPhone-*.apk` 安装；  
    或 Android Studio 打开 `PhoneTablet/` 目录自行构建
 3. **连上就用**：PC 和手机连同一网络 → 打开 App → 绿点亮起 → 完成！  
    手机横过来当触摸板，掏出 S Pen 直接画画
@@ -163,8 +166,8 @@
 - **撤销**：点击**手机屏与桌面各撤一笔**，**长按两边一起清空**
 - **预览 / 完成**（原「捕获」）：把 PC 范围框内的画面**设为手机画布背景**（不弹新窗口），背景之上可以像白底一样继续书写绘画；  
   预览后按钮变成**完成**，再点一下即清除背景、解除范围框锁定
-- **截屏**：把「范围框画面 + 桌面笔迹」合成一张 PNG 保存 —— **存到电脑**（默认 `图片库\SpenTablet`，
-  可在配置里改 `ShotSaveDir`）和 / 或**传回手机存进相册**（`Pictures/SpenTablet`，图库里直接看得到）。
+- **截屏**：把「范围框画面 + 桌面笔迹」合成一张 PNG 保存 —— **存到电脑**（默认 `图片库\DrawTouch`，
+  可在配置里改 `ShotSaveDir`）和 / 或**传回手机存进相册**（`Pictures/DrawTouch`，图库里直接看得到）。
   范围和两个保存位置都能在手机设置里单独开关
 - **笔悬浮提示**：S Pen 悬停在任意按钮上（不接触屏幕）会弹出该按钮的功能说明，移开或真正按下即收掉  
   （自绘气泡，不依赖系统 `tooltipText`——那个要 API 26，本项目 minSdk 21）
@@ -215,7 +218,7 @@
 
 主界面不再显示调试文字（保持极简），全部改为**后台定量循环日志**：
 
-- 文件：`Android/data/com.volcano.spentablet/files/spen_debug.log`
+- 文件：`Android/data/com.volcano.drawtouch/files/spen_debug.log`
 - 每 2 秒一条统计（连接 / 书写区 / 范围框 / 发送丢弃帧数），事件按 300ms 节流
 - 单文件超 256KB 自动轮转 `.old`，总占用恒定 ≤ ~512KB
 
@@ -272,13 +275,13 @@ SpenTablet/
 ├── release/                # 各版本发布说明（二进制发到 GitHub Releases）
 │   ├── v1.1.0/RELEASE_NOTES.md
 │   ├── v1.3.0/RELEASE_NOTES.md
-│   └── v1.4.8/RELEASE_NOTES.md   # 当前版本
+│   └── v1.4.9/RELEASE_NOTES.md   # 当前版本
 ├── tests/                  # 自动化回归（发布门禁：python tests/release_gate.py）
 │   ├── README.md           # 测试套件说明：覆盖范围/运行方式/用例清单/FAQ
 │   ├── protocol_smoke.py   # 协议级冒烟测试：模拟手机连 host，16 项端到端断言
 │   └── release_gate.py     # 发布门禁：单测 + PC 编译 + 冒烟全绿才允许发布
 ├── PhoneTablet/            # Android 端（Android Studio 打开此目录）
-│   └── app/src/main/java/com/volcano/spentablet/
+│   └── app/src/main/java/com/volcano/drawtouch/
 │       ├── Protocol.kt        # 二进制帧编解码（含 INFO/NOTE/SHOT/HL 帧）
 │       ├── NetClient.kt       # TCP 长连接 + 自动重连 + 下行帧接收（截图分片重组）
 │       ├── MdnsDiscovery.kt   # mDNS/NSD 自动发现 PC
@@ -299,7 +302,7 @@ SpenTablet/
     ├── HighlighterOverlay.cs        # 激光笔：光标替换 + 激光笔迹置顶窗口
     ├── NoteOverlay.cs               # 桌面备注：透明置顶穿透窗口画笔迹
     ├── TcpPenServer.cs              # TCP 帧解析 + INFO 下发 + 截图捕获下发
-    ├── MdnsAdvertiser.cs            # mDNS 广播 _spentablet._tcp
+    ├── MdnsAdvertiser.cs            # mDNS 广播 _drawtouch._tcp
     ├── MappingConfig.cs             # 坐标映射 / 虚拟屏幕钳制 / 模式
     ├── RegionFrame.cs               # 桌面操作范围框（可穿透点击）
     ├── NetInfo.cs                   # 网卡枚举 / USB共享识别 / 防火墙

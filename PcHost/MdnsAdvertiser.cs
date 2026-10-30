@@ -1,15 +1,15 @@
 using Makaretu.Dns;
 using System;
 
-namespace SpenTabletHost;
+namespace DrawTouchHost;
 
 /// <summary>
-/// mDNS 服务广播：向局域网宣布 <c>_spentablet._tcp</c>，手机端用 Android NSD 自动发现本机，
+/// mDNS 服务广播：向局域网宣布 <c>_drawtouch._tcp</c>，手机端用 Android NSD 自动发现本机，
 /// 彻底告别「手填 PC IP」。手机开热点 / 同一路由器 / USB 网络共享 同网段均可被发现。
 ///
 /// 实现基于 Makaretu.Dns.Multicast（纯托管 mDNS / DNS-SD 实现，无需安装 Bonjour 服务）。
 /// 关键 API 要点：
-///   - ServiceProfile 的 serviceName 传 "_spentablet._tcp"（**不要**带 .local，库内会自动补全）
+///   - ServiceProfile 的 serviceName 传 "_drawtouch._tcp"（**不要**带 .local，库内会自动补全）
 ///   - Advertise() 把服务登记进应答目录（被动应答手机端的查询）
 ///   - Announce() 主动发一次宣告（手机端晚启动也能立刻发现）
 ///   - Unadvertise() 退出时发 goodbye，避免手机端缓存旧地址
@@ -17,7 +17,7 @@ namespace SpenTabletHost;
 public sealed class MdnsAdvertiser : IDisposable
 {
     /// <summary>手机端 NsdManager 搜索的服务类型。</summary>
-    public const string ServiceType = "_spentablet._tcp";
+    public const string ServiceType = "_drawtouch._tcp";
 
     private readonly MulticastService _mdns;
     private readonly ServiceDiscovery _sd;
@@ -46,7 +46,7 @@ public sealed class MdnsAdvertiser : IDisposable
             (ushort)port,
             primary == null ? null : new[] { primary });
         _profile.AddProperty("ver", "1");
-        _profile.AddProperty("app", "SpenTablet");
+        _profile.AddProperty("app", "draw&touch");
         // 把全部候选 IP 放进 TXT：手机端逐个试，第一个能连上的就是对的
         // （PC 可能同时开着 USB 共享和 WiFi，手机只能走其中一条路）
         if (candidates.Count > 0)

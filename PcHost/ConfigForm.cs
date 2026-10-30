@@ -2,7 +2,7 @@ using System;
 using System.Drawing;
 using System.Windows.Forms;
 
-namespace SpenTabletHost;
+namespace DrawTouchHost;
 
 /// <summary>
 /// 设置窗口。分四组：连接 / 输入 / 映射 / 桌面显示。
@@ -65,7 +65,7 @@ internal sealed class ConfigForm : Form
         _setDebug = setDebug;
 
         // 标题里带上构建时间戳：一眼看出当前跑的是哪个版本（避免对着旧窗口排查半天）
-        Text = "SpenTablet 设置  ·  " + BuildStamp();
+        Text = "draw&touch 设置  ·  " + BuildStamp();
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
@@ -166,13 +166,13 @@ internal sealed class ConfigForm : Form
                 btnCopyIp.Text = "已复制 ✓";
                 BeginInvoke((Action)(() => { btnCopyIp.Text = "复制 IP"; }));
             }
-            catch (Exception ex) { MessageBox.Show($"复制失败：{ex.Message}", "SpenTablet"); }
+            catch (Exception ex) { MessageBox.Show($"复制失败：{ex.Message}", "draw&touch"); }
         };
         var btnFw = new Button { Text = "允许防火墙", Width = 96, Height = 26 };
         btnFw.Click += (_, _) =>
         {
             var (ok, msg) = NetInfo.AddFirewallRule((int)_nudPort.Value);
-            MessageBox.Show(msg, "SpenTablet", MessageBoxButtons.OK,
+            MessageBox.Show(msg, "draw&touch", MessageBoxButtons.OK,
                             ok ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
             RefreshInfo();
         };
@@ -445,14 +445,14 @@ internal sealed class ConfigForm : Form
         sb.AppendLine("【USB 网络共享怎么连】");
         sb.AppendLine("  1) 手机：设置 → 连接 → 移动网络共享 → 打开「USB 网络共享」");
         sb.AppendLine("  2) PC 上运行 ipconfig，找到上面标「疑似 USB 网络共享」的那块网卡的 IPv4");
-        sb.AppendLine("  3) 手机端 SpenTablet 填这个 IP + 端口 6000，或直接点「自动查找 PC」");
+        sb.AppendLine("  3) 手机端 DrawTouch 填这个 IP + 端口 6000，或直接点「自动查找 PC」");
         sb.AppendLine("  4) 若提示「连接被拒绝」→ 点上方「允许防火墙」并同意 UAC");
         sb.AppendLine();
         sb.AppendLine("【方式 A · ADB 转发（最稳，推荐）】");
         sb.AppendLine("  PC 上执行：adb reverse tcp:6000 tcp:6000");
         sb.AppendLine("  手机端保持 127.0.0.1:6000 即可（装过 APK 后要重跑一次 reverse）");
 
-        MessageBox.Show(sb.ToString(), "SpenTablet 网络诊断", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        MessageBox.Show(sb.ToString(), "draw&touch 网络诊断", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     private void Save()
@@ -482,7 +482,7 @@ internal sealed class ConfigForm : Form
                     $"范围框={(_cfg.ShowRegion ? "显示" : "隐藏")} 浮窗={_cfg.Debug}");
 
         MessageBox.Show("已保存。\n· 比例 / 映射区域 / 工作模式 / 范围框显示：立即生效\n· 端口与注入模式：需重启程序（可用「保存并重启」）",
-                        "SpenTablet", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        "draw&touch", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     protected override void Dispose(bool disposing)

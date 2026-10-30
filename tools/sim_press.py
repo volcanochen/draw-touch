@@ -2,7 +2,7 @@
 """
 用真实采集数据离线复刻 App 端的「重按」判定算法，逐帧输出触发时间线。
 
-复刻的是 PhoneTablet/app/src/main/java/com/volcano/spentablet/PressSignal.kt：
+复刻的是 PhoneTablet/app/src/main/java/com/volcano/drawtouch/PressSignal.kt：
   1. size = sqrt(major × minor)，EMA(0.25) 平滑
   2. 近期静息水平 rest = 最近 N 帧的 P20（滚动窗口，跟着手指走）
   3. 通道仲裁：压力不可用（伪压感）→ 退化到面积通道

@@ -18,7 +18,7 @@ import sys
 import time
 
 HOST, PORT = "127.0.0.1", 6000
-LOG = r"C:\Users\adminlocal\WorkBuddy\2026-10-26-17-47-23\SpenTablet\PcHost\publish\SpenTabletHost.log"
+LOG = r"C:\Users\adminlocal\WorkBuddy\2026-10-26-17-47-23\SpenTablet\PcHost\publish\DrawTouchHost.log"
 
 TYPE_ZOOM = 0x09
 MIN_FRAME = 0.05

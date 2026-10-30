@@ -5,5 +5,5 @@ pluginManagement {
         gradlePluginPortal()
     }
 }
-rootProject.name = "SpenTablet"
+rootProject.name = "draw&touch"
 include ':app'

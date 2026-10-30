@@ -1,7 +1,7 @@
 using System;
 using System.IO;
 
-namespace SpenTabletHost;
+namespace DrawTouchHost;
 
 /// <summary>
 /// 简易日志：同时写控制台和日志文件。
@@ -21,7 +21,7 @@ internal static class AppLog
             try { dir = Path.GetDirectoryName(Environment.ProcessPath) ?? Directory.GetCurrentDirectory(); }
             catch { dir = Directory.GetCurrentDirectory(); }
             if (string.IsNullOrEmpty(dir)) dir = Directory.GetCurrentDirectory();
-            _file = Path.Combine(dir, "SpenTabletHost.log");
+            _file = Path.Combine(dir, "DrawTouchHost.log");
             return _file;
         }
     }

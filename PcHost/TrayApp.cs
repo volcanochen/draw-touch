@@ -2,7 +2,7 @@ using System;
 using System.Drawing;
 using System.Windows.Forms;
 
-namespace SpenTabletHost;
+namespace DrawTouchHost;
 
 /// <summary>
 /// 系统托盘常驻：不再占用控制台窗口，右键菜单可打开配置、开关调试浮窗、查看日志、退出。
@@ -35,7 +35,7 @@ internal sealed class TrayApp : ApplicationContext
         _tray = new NotifyIcon
         {
             Icon = _iconOff,
-            Text = "SpenTablet 数位板｜未连接",
+            Text = "draw&touch 数位板｜未连接",
             Visible = true,
             ContextMenuStrip = BuildMenu()
         };
@@ -64,7 +64,7 @@ internal sealed class TrayApp : ApplicationContext
                 _lastConnected = conn;
                 _tray.Icon = conn ? _iconOn : _iconOff;
             }
-            _tray.Text = $"{(_cfg.IsMouseMode ? "SpenTablet 鼠标模式" : "SpenTablet 数位板")}｜{(conn ? "已连接手机" : "未连接")}";
+            _tray.Text = $"{(_cfg.IsMouseMode ? "draw&touch 鼠标模式" : "draw&touch 数位板")}｜{(conn ? "已连接手机" : "未连接")}";
 
             // 注入被权限拦截（前台是管理员权限程序）→ 弹一次气泡，告诉用户怎么一键修好
             var notice = InputGuard.TakeNotice();
@@ -85,7 +85,7 @@ internal sealed class TrayApp : ApplicationContext
             ? $"已启动，监听端口 {cfg.ListenPort}\n右键托盘图标 → 配置 / 网络诊断"
             : $"已启动，监听端口 {cfg.ListenPort}\n手机端 PC IP 填：{ip}" +
               (fw ? "" : "\n⚠ 防火墙尚未放行该端口，请右键 → 配置 → 允许防火墙");
-        _tray.ShowBalloonTip(6000, "SpenTablet 已就绪", tip, ToolTipIcon.Info);
+        _tray.ShowBalloonTip(6000, "draw&touch 已就绪", tip, ToolTipIcon.Info);
 
         if (openConfig)
         {
@@ -101,7 +101,7 @@ internal sealed class TrayApp : ApplicationContext
         var menu = new ContextMenuStrip();
 
         // 版本信息（只读）：确认跑的是哪个包（版本 + 构建时间）
-        menu.Items.Add(new ToolStripMenuItem($"SpenTablet Host v{AppVersion.Version}（构建于 {BuildInfo.BuildTime}）")
+        menu.Items.Add(new ToolStripMenuItem($"draw&touch Host v{AppVersion.Version}（构建于 {BuildInfo.BuildTime}）")
         { Enabled = false });
 
         var mConfig = new ToolStripMenuItem("配置…");
@@ -139,10 +139,10 @@ internal sealed class TrayApp : ApplicationContext
             {
                 string ip = NetInfo.GuessTetheringIp();
                 Clipboard.SetText(string.IsNullOrEmpty(ip) ? NetInfo.DescribeAll() : ip);
-                _tray.ShowBalloonTip(2500, "SpenTablet",
+                _tray.ShowBalloonTip(2500, "draw&touch",
                     string.IsNullOrEmpty(ip) ? "没有检测到可用 IP" : $"已复制：{ip}", ToolTipIcon.Info);
             }
-            catch (Exception ex) { MessageBox.Show($"复制失败：{ex.Message}", "SpenTablet"); }
+            catch (Exception ex) { MessageBox.Show($"复制失败：{ex.Message}", "draw&touch"); }
         };
         menu.Items.Add(mCopyIp);
 
@@ -150,7 +150,7 @@ internal sealed class TrayApp : ApplicationContext
         mLog.Click += (_, _) =>
         {
             try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(AppLog.FilePath) { UseShellExecute = true }); }
-            catch (Exception ex) { MessageBox.Show($"打开日志失败：{ex.Message}", "SpenTablet"); }
+            catch (Exception ex) { MessageBox.Show($"打开日志失败：{ex.Message}", "draw&touch"); }
         };
         menu.Items.Add(mLog);
 
@@ -160,7 +160,7 @@ internal sealed class TrayApp : ApplicationContext
         {
             string r = InputGuard.SelfCheck(_cfg);
             AppLog.Info("[Host] 自检结果：" + r.Replace("\n", " "));
-            MessageBox.Show(r, "SpenTablet 注入自检", MessageBoxButtons.OK,
+            MessageBox.Show(r, "draw&touch 注入自检", MessageBoxButtons.OK,
                 r.StartsWith("✅") ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
         };
         menu.Items.Add(mCheck);
@@ -176,8 +176,8 @@ internal sealed class TrayApp : ApplicationContext
             if (!InputGuard.RelaunchElevated())
             {
                 MessageBox.Show("提权未完成（可能被取消）。\n\n" +
-                                "也可以手动：右键 SpenTabletHost.exe →「以管理员身份运行」。",
-                    "SpenTablet", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                                "也可以手动：右键 DrawTouchHost.exe →「以管理员身份运行」。",
+                    "draw&touch", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
             AppLog.Info("[Host] 用户从托盘请求以管理员身份重启");

@@ -7,7 +7,7 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
 
-namespace SpenTabletHost;
+namespace DrawTouchHost;
 
 /// <summary>一块网卡的 IPv4 信息。</summary>
 public sealed class NicInfo
@@ -194,7 +194,7 @@ internal static class NetInfo
              i.IsVirtual ? "  （虚拟网卡/隧道，手机端不能用）" : "")).ToList();
     }
 
-    public const string FirewallRuleName = "SpenTablet 数位板";
+    public const string FirewallRuleName = "draw&touch 数位板";
 
     /// <summary>检查 Windows 防火墙里是否已有放行规则。</summary>
     public static bool HasFirewallRule(int port)

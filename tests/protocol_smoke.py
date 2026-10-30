@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-SpenTablet PC 端协议级冒烟测试（回归套件核心）。
+DrawTouch PC 端协议级冒烟测试（回归套件核心）。
 
 模拟手机直连 PC host（127.0.0.1:6000），逐项发帧并断言：
   1. HELLO 握手 → 收到 INFO 回包（版本/机器名/IP）
@@ -17,7 +17,7 @@ SpenTablet PC 端协议级冒烟测试（回归套件核心）。
   11. 协议版本不匹配 → PC 下发 INFO 后拒绝对接
 
 用法：python tests/protocol_smoke.py [--host 127.0.0.1] [--port 6000]
-前置：PC 端 SpenTabletHost.exe 已启动（脚本会自动定位其日志文件）。
+前置：PC 端 DrawTouchHost.exe 已启动（脚本会自动定位其日志文件）。
 退出码：0=全部通过，1=有失败。
 """
 import socket
@@ -88,7 +88,7 @@ def find_host_log() -> Path:
         root / "PcHost" / "bin" / "Debug" / "net8.0-windows",
         root / "PcHost" / "publish",
     ]
-    logs = [d / "SpenTabletHost.log" for d in dirs]
+    logs = [d / "DrawTouchHost.log" for d in dirs]
     existing = [c for c in logs if c.exists()]
     if not existing:
         return logs[0]
@@ -147,7 +147,7 @@ def main():
     args = ap.parse_args()
 
     log = find_host_log()
-    print(f"== SpenTablet 协议冒烟测试 ==  {args.host}:{args.port}")
+    print(f"== DrawTouch 协议冒烟测试 ==  {args.host}:{args.port}")
     print(f"   host 日志: {log}")
 
     s = socket.create_connection((args.host, args.port), timeout=5)

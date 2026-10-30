@@ -30,8 +30,8 @@ v11_*.png
 
 # release 目录只跟踪发布说明，二进制走 GitHub Releases
 release/**/assets/
-release/**/SpenTabletHost-*.zip
-release/**/SpenTabletPhone-*.apk
+release/**/*.zip
+release/**/*.apk
 release/**/stage/
 release/**/release_url.txt
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 复现「捕获 → 绘制 → 移动范围框 → 再绘制 → PC 端崩溃」的协议回放脚本。
-直连 127.0.0.1:6000，按真实时序把帧灌进去；跑完观察 SpenTabletHost.log 是否有异常。
+直连 127.0.0.1:6000，按真实时序把帧灌进去；跑完观察 DrawTouchHost.log 是否有异常。
 """
 import socket, struct, sys, time
 
@@ -91,7 +91,7 @@ def main():
     s.sendall(note(0)); time.sleep(0.2)
 
     s.close()
-    print("回放完成。请看 PC 端 SpenTabletHost.log 是否出现异常，以及进程是否还活着。")
+    print("回放完成。请看 PC 端 DrawTouchHost.log 是否出现异常，以及进程是否还活着。")
 
 
 if __name__ == "__main__":
