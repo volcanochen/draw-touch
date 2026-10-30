@@ -222,8 +222,14 @@ class PenCanvasView(context: Context) : View(context) {
         onDebug?.invoke(pointerSmoother.debugInfo() + "｜接触面 " + pressSignal.sizeDiag())
     }
 
-    /** 触摸板：双指滑动的死区闸门（相对移动，不补回） */
-    private val trackpadScrollGate = MoveDeadZone { dpPx(moveDeadZoneDp) }
+    /**
+     * 触摸板：双指滑动的输出器（轴锁投影 + 起手死区）。
+     *
+     * 用 [ScrollEmitter] 而不是裸的 [MoveDeadZone]：它把「这一帧的位移永远算数」
+     * 这条性质**焊进类型里** —— 调用方拿不到「要不要丢掉这一帧」的选择权，
+     * 也就不会再出现「逐帧门限把慢速滑动的位移整帧丢掉」这种坑。
+     */
+    private val scrollEmitter = ScrollEmitter { dpPx(moveDeadZoneDp) }
 
     /** 数位板：手指拖操作框的死区闸门（绝对映射，需补回死区量保持 1:1） */
     private val panGate = MoveDeadZone(catchUp = true) { dpPx(moveDeadZoneDp) }
@@ -683,7 +689,7 @@ class PenCanvasView(context: Context) : View(context) {
         releaseTapDrag("切模式")
         // 死区闸门也要清干净，避免切换模式后残留上一模式的死区状态
         pointerSmoother.reset()
-        trackpadScrollGate.reset()
+        scrollEmitter.reset()
         panGate.reset()
         clearTrail()
     }
@@ -727,7 +733,7 @@ class PenCanvasView(context: Context) : View(context) {
         tpVecAX = 0f; tpVecAY = 0f; tpVecBX = 0f; tpVecBY = 0f
         tpStartSpan = 0f
         pointerSmoother.reset()
-        trackpadScrollGate.reset()
+        scrollEmitter.reset()
         // 兜底复位时双击拖拽可能还按着左键，一并松开
         releaseTapDrag("兜底复位")
         // onFingerState(false) 内部就会发 MOUSE_FINGER(0) 给 PC，不用再单独发一帧
@@ -1406,7 +1412,7 @@ class PenCanvasView(context: Context) : View(context) {
                 Haptics.resetScrollTick()
                 // 新手势开始 → 移动死区重新生效（手抖不再让光标乱飘）
                 pointerSmoother.reset()
-                trackpadScrollGate.reset()
+                scrollEmitter.reset()
                 // 手指一落上来，S Pen 就让位（PC 端收到这个信号后会松开笔的按键）
                 tpPenDown = false
                 onFingerState?.invoke(true)
@@ -1462,7 +1468,7 @@ class PenCanvasView(context: Context) : View(context) {
                 // 多指介入 → 单指敲击 / 双击拖拽全部作废（左键若按着就松开）
                 releaseTapDrag("多指介入")
                 // 双指手势重新开始 → 滚动死区重新计算
-                trackpadScrollGate.reset()
+                scrollEmitter.reset()
             }
 
             MotionEvent.ACTION_MOVE -> {
@@ -1608,10 +1614,24 @@ class PenCanvasView(context: Context) : View(context) {
                                     val sm = pointerSmoother.feed(pdx, pdy)
                                     if (!sm.isZero) sendMouseMove(sm.dx, sm.dy)
                                 }
-                                2 -> if (g2Swipe != 0 && (kotlin.math.abs(dCx) > 0.5f || kotlin.math.abs(dCy) > 0.5f)) {
+                                2 -> if (g2Swipe != 0) {
                                     // 滚动（只在已判定为滚动态时输出：未定态不发任何东西，
                                     // 否则捏合启动窗口期的质心移动会被当成滚动漏出去 —— 用户规格
                                     // 「缩放动作进行中，不响应移动手势」的前半段就靠这个保证）。
+                                    //
+                                    // 【2026-10-30 修复】这里原本还有一道逐帧门限
+                                    // `abs(dCx) > 0.5f || abs(dCy) > 0.5f`，
+                                    // 小于它的帧被**整帧丢掉**、压根没进死区累加器。
+                                    // 触摸芯片量化步长 0.377 逻辑像素 —— 慢速滑动一帧正好走一个
+                                    // 量化步，于是**每一帧都被丢掉**，累计位移永远攒不起来，
+                                    // 表现就是用户反馈的「很缓慢地滑动，累计的移动没有变成滚动」。
+                                    // 换算成速度：0.5px/帧 × 60fps = 30 逻辑像素/秒，
+                                    // 低于这个速度的双指滚动 = 位移 100% 丢失、一点都滚不动。
+                                    //
+                                    // 现在**每一帧的位移都必定算数**：
+                                    // 「发不发」交给 [ScrollEmitter] 按**累计量**裁决，
+                                    // 「算不算数」永远为真。
+                                    //
                                     // 轴锁只在「还没判定」时判定，且**只判一次**：
                                     // 斜着滑 → 判成 FREE → 本次手势一直保持双轴输出；
                                     // 明显横/竖 → 锁单轴。判过就绝不改判（用户规格：
@@ -1642,12 +1662,7 @@ class PenCanvasView(context: Context) : View(context) {
                                             onDebug?.invoke("双指滚动 → 换向 axis=$tpScrollAxis")
                                         }
                                     }
-                                    val f = when (tpScrollAxis) {
-                                        1 -> dCx to 0f
-                                        2 -> 0f to dCy
-                                        else -> dCx to dCy
-                                    }
-                                    val gate = trackpadScrollGate.feed(f.first, f.second)
+                                    val gate = scrollEmitter.feed(tpScrollAxis, dCx, dCy)
                                     if (!gate.isZero) {
                                         // 方向取反（用户要求）：手指上滑 → 页面内容向下（传统滚轮方向）
                                         onMouse?.invoke(Protocol.MOUSE_SCROLL, -gate.dx / h * scrollScale, -gate.dy / h * scrollScale)
@@ -1766,7 +1781,7 @@ class PenCanvasView(context: Context) : View(context) {
                     tpLastCy = cy
                     tpLastSpan = span
                     // 双指期间的滚动/跟随死区全部清掉，回单指后重新计
-                    trackpadScrollGate.reset()
+                    scrollEmitter.reset()
                     pointerSmoother.reset()
                 }
                 // 从多指回到单指：重按状态收尾（左键不能挂着）

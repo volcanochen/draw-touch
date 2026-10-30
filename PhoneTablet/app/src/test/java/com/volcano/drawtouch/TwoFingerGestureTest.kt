@@ -38,7 +38,7 @@ class TwoFingerGestureTest {
         var lastZoomed = false
         var lastScrolled = false
         var lastMoved = false
-        private val scrollGate = MoveDeadZone { 14f }   // 8dp ≈ 14px
+        private val scrollEmitter = ScrollEmitter { 14f }   // 8dp ≈ 14px
         private val moveGate = MoveDeadZone { 14f }
 
         fun frame(
@@ -84,12 +84,10 @@ class TwoFingerGestureTest {
                     if (axis == 0) {
                         axis = TwoFingerLogic.decideAxis(totalCx, totalCy, 27f, 2.0f)
                     }
-                    val f = when (axis) {
-                        1 -> centroidDx to 0f
-                        2 -> 0f to centroidDy
-                        else -> centroidDx to centroidDy
-                    }
-                    val g = scrollGate.feed(f.first, f.second)
+                    // 用生产代码同一个 [ScrollEmitter]（不再复刻一份）——
+                    // 复刻会漂移：曾经的「单帧位移 > 0.5px」逐帧门限就只存在于生产代码里，
+                    // 复刻版没有它，于是单测全绿、真机却是「慢速滑动完全不滚」。
+                    val g = scrollEmitter.feed(axis, centroidDx, centroidDy)
                     lastScrolled = !g.isZero
                 }
                 else -> { /* 未定态：不输出（缩放启动窗口期不漏滚动） */ }
@@ -235,5 +233,32 @@ class TwoFingerGestureTest {
         assertEquals("斜向应保持双轴", 0, sm.axis)
         assertTrue(sm.state == 2 || sm.state == 0)
         assertTrue("斜向滚动应正常输出", sm.lastScrolled)
+    }
+
+    /**
+     * 【回归】慢速双指滑动的累计位移必须变成滚动。
+     *
+     * 用户反馈（2026-10-30）：「双指滚动内容的时候，好像过程中是有死区的，
+     * 也就是**我很缓慢的滑动，累计的移动没有变成滚动**。」
+     *
+     * 旧实现有一道逐帧门限「单帧位移 > 0.5px」，小于它的帧被**整帧丢掉**、
+     * 压根没进死区累加器。触摸芯片量化步长 0.377 逻辑像素 —— 慢速滑动一帧
+     * 正好走一个量化步 → **每一帧都被丢掉** → 累计位移永远攒不起来。
+     *
+     * 本例 0.3px/帧 ≈ 18 逻辑像素/秒（远低于旧门限折算出的 30px/s），
+     * 两指同向移动 → 既不是捏合、也不是单指跟随 → 应当最终滚起来。
+     */
+    @Test
+    fun `慢速双指滑动的累计位移必须变成滚动`() {
+        val sm = SM()
+        var totalY = 0f
+        var scrolled = false
+        for (i in 1..300) {
+            totalY += 0.3f
+            sm.frame(0f, -0.3f, 0f, -0.3f, 0f, -0.3f, 0f, totalY)
+            if (sm.lastScrolled) { scrolled = true; break }
+        }
+        assertTrue("慢速双指滑动必须累计成滚动（累计位移不能被丢掉）", scrolled)
+        assertEquals("慢速滑动应判成滚动态", 2, sm.state)
     }
 }
