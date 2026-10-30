@@ -77,6 +77,27 @@ internal static class MouseControl
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT { public int X; public int Y; }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT { public int Left, Top, Right, Bottom; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MONITORINFO
+    {
+        public int cbSize;
+        public RECT rcMonitor;
+        public RECT rcWork;
+        public uint dwFlags;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CURSORINFO
+    {
+        public int cbSize;
+        public int flags;
+        public IntPtr hCursor;
+        public POINT ptScreenPos;
+    }
+
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
 
@@ -84,7 +105,33 @@ internal static class MouseControl
     private static extern bool GetCursorPos(out POINT lpPoint);
 
     [DllImport("user32.dll")]
+    private static extern bool SetCursorPos(int x, int y);
+
+    [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int index);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr lprcClip, MonitorEnumProc lpfnEnum, IntPtr dwData);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorInfo(ref CURSORINFO pci);
+
+    private delegate bool MonitorEnumProc(IntPtr hMonitor, IntPtr hdc, IntPtr lprc, IntPtr lParam);
+
+    private const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
+    /// <summary>MONITORINFO.dwFlags 里代表「这是主显示器」的位。</summary>
+    private const uint MONITORINFOF_PRIMARY = 0x00000001;
+    /// <summary>GetCursorInfo 的 CURSORINFO.flags 里代表「光标当前可见」的位。</summary>
+    private const int CURSOR_SHOWING = 0x00000001;
 
     /// <summary>设环境变量 SPEN_DEBUG_MOVE=1 可打印每一帧的坐标细节（排查「移位不对/Gain 不对」时用）。</summary>
     private static readonly bool _debugMove =
@@ -99,6 +146,113 @@ internal static class MouseControl
         if (!GetCursorPos(out var p)) return false;
         x = p.X; y = p.Y;
         return true;
+    }
+
+    /// <summary>主显示器句柄（dwFlags 带 MONITORINFOF_PRIMARY 的那个）。取不到返回 Zero。</summary>
+    private static IntPtr GetPrimaryMonitorHandle()
+    {
+        IntPtr found = IntPtr.Zero;
+        MonitorEnumProc cb = null!;
+        cb = (IntPtr hMon, IntPtr hdc, IntPtr lprc, IntPtr data) =>
+        {
+            var mi = new MONITORINFO { cbSize = Marshal.SizeOf(typeof(MONITORINFO)) };
+            if (GetMonitorInfo(hMon, ref mi) && (mi.dwFlags & MONITORINFOF_PRIMARY) != 0)
+            {
+                found = hMon;
+                return false;   // 停止枚举
+            }
+            return true;
+        };
+        try { EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, cb, IntPtr.Zero); } catch { }
+        return found;
+    }
+
+    /// <summary>取某个显示器的矩形（虚拟屏幕物理坐标）。</summary>
+    private static bool TryGetMonitorRect(IntPtr hMon, out RECT rect)
+    {
+        rect = default;
+        if (hMon == IntPtr.Zero) return false;
+        var mi = new MONITORINFO { cbSize = Marshal.SizeOf(typeof(MONITORINFO)) };
+        if (!GetMonitorInfo(hMon, ref mi)) return false;
+        rect = mi.rcMonitor;
+        return true;
+    }
+
+    /// <summary>
+    /// 这一帧能不能用「合成触摸注入」做捏合缩放？返回安全时给出捏合中心（= 当前光标位置）。
+    ///
+    /// 【为什么只允许主显示器 + 主显示器上的前台窗口】——这是 2026-10-30 用户报的
+    /// 「副屏捏合 → 指针消失、飞到右边主屏的右侧」的根因，实测复现结论：
+    ///   · 触点坐标落在**副屏**时，Windows 会把这次触摸「提升成鼠标」并按
+    ///     **另一块显示器**的坐标空间解释它 → 光标被系统直接搬到主屏右边缘
+    ///     （实测跳到主屏物理 x=3072，即逻辑 1755 = 主屏右沿）；
+    ///   · 触摸接触点活动期间，Windows 还会**把光标藏起来**（CURSOR_SHOWING 变 false），
+    ///     而且抬起后也不会自己恢复 —— 这就是「指针消失」。
+    /// 结论：副屏 / 前台窗口不在主屏时**一律不注入触摸**，改走 Ctrl+滚轮回退
+    ///（缩放中心仍然是光标位置，手感一致，且绝不会动到光标）。
+    /// </summary>
+    private static bool TouchZoomTargetSafe(out int cx, out int cy)
+    {
+        cx = 0; cy = 0;
+        if (!GetCursorPos(out var p)) return false;
+        var hPri = GetPrimaryMonitorHandle();
+        if (hPri == IntPtr.Zero) return false;
+        // ① 光标必须在主显示器上
+        if (MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST) != hPri) return false;
+        // ② 前台窗口也必须在主显示器上（触点会被投递给它，坐标按它的显示器解释）
+        var fg = GetForegroundWindow();
+        if (fg != IntPtr.Zero && MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST) != hPri) return false;
+        cx = p.X; cy = p.Y;
+        return true;
+    }
+
+    /// <summary>光标偏离「捏合开始时的位置」超过这个像素数就算被系统挪动了。</summary>
+    private const int TZ_PIN_TOLERANCE_PX = 3;
+
+    /// <summary>
+    /// 把光标钉回捏合开始时的位置。
+    ///
+    /// 触摸注入会被 Windows 提升成鼠标，光标因此可能被系统挪走（甚至飞到别的屏）。
+    /// 每帧（keep-alive）检查一次、一旦发现偏移就立刻拉回来。
+    /// </summary>
+    private static bool PinCursorToSaved(int saveX, int saveY, bool force)
+    {
+        if (!GetCursorPos(out var p)) return false;
+        int dx = p.X - saveX, dy = p.Y - saveY;
+        if (dx == 0 && dy == 0) return false;
+        if (!force && Math.Abs(dx) <= TZ_PIN_TOLERANCE_PX && Math.Abs(dy) <= TZ_PIN_TOLERANCE_PX)
+            return false;
+        SetCursorPos(saveX, saveY);
+        AppLog.Info($"[TouchZoom] 光标被系统触摸提升挪动 ({p.X},{p.Y}) → 钉回 ({saveX},{saveY})");
+        return true;
+    }
+
+    /// <summary>光标当前是不是被系统藏起来了（触摸期间会藏，且不会自己恢复）。</summary>
+    private static bool CursorIsVisible()
+    {
+        var ci = new CURSORINFO { cbSize = Marshal.SizeOf(typeof(CURSORINFO)) };
+        if (!GetCursorInfo(ref ci)) return true;   // 读不到就别乱动
+        return (ci.flags & CURSOR_SHOWING) != 0;
+    }
+
+    /// <summary>
+    /// 把被系统藏起来的光标**叫回来**。
+    ///
+    /// Windows 的触摸行为：接触点活动期间隐藏箭头光标，抬起后也不自动恢复
+    ///（实测 CURSOR_SHOWING 一直是 false）→ 用户看到的就是「指针消失」。
+    /// 恢复办法（实测有效）：
+    ///   ① 先「原地刷新」SetCursorPos(同坐标) —— 不挪光标，最干净；
+    ///   ② 还不行就用一次 **1 像素的相对移动**触发系统的指针刷新，再把光标放回原位。
+    /// </summary>
+    private static void EnsureCursorVisible(int keepX, int keepY)
+    {
+        if (CursorIsVisible()) return;
+        SetCursorPos(keepX, keepY);
+        if (CursorIsVisible()) return;
+        Send(MOUSEEVENTF_MOVE, 1, 0);     // 1 像素相对移动 → 系统重新显示指针
+        SetCursorPos(keepX, keepY);       // 复位，不让光标真的挪走
+        if (!CursorIsVisible())
+            AppLog.Warn("[TouchZoom] 光标仍被系统隐藏（触摸行为），已尽力恢复");
     }
 
     /// <summary>把归一化坐标(0..1)换算成虚拟屏幕像素并绝对定位光标。</summary>
@@ -361,9 +515,6 @@ internal static class MouseControl
     private struct TZPoint { public int X; public int Y; }
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct RECT { public int left, top, right, bottom; }
-
-    [StructLayout(LayoutKind.Sequential)]
     private struct POINTER_INFO
     {
         public uint pointerType;
@@ -435,6 +586,10 @@ internal static class MouseControl
     private static double _tzMaxSpan;    // 本轮手势的跨度上限（受虚拟屏幕边界约束）
     private static bool _tzClampLogged;  // 本轮是否已经记过「触界」日志（避免刷屏）
     private static int _tzLastX, _tzLastY; // 最后一帧注入坐标（UP 必须与其完全一致）
+    // 捏合开始时的光标位置：触摸注入被系统「提升成鼠标」时光标会被挪走，
+    // 靠它把光标钉回原处（否则用户看到的是「光标消失 / 飞到别的屏」）。
+    private static int _tzSaveX, _tzSaveY;
+    private static bool _tzSaved;
     private static long _tzLastMs;       // 上一帧（真实或 keep-alive）注入时刻
     private static long _tzLastRealMs;   // 上一「真实事件」时刻（手机缩放帧/手势开始）
     private static readonly System.Threading.Timer? _tzTickTimer =
@@ -502,6 +657,15 @@ internal static class MouseControl
         _tzActive = false;
         // 必须发真正的 UP 帧（INRANGE|UP）把两个接触点抬起来，且坐标与上一帧一致（规则 3）。
         InjectOneFrame(phase: TouchPhase.Up, _tzLastX, _tzLastY, _tzSpan);
+        // 抬完手把光标拉回原位并叫醒它：
+        //   · 触摸被系统「提升成鼠标」时可能把光标拖走 → 钉回；
+        //   · 触摸期间系统会藏起光标且不自己恢复 → 强制显示。
+        if (_tzSaved)
+        {
+            PinCursorToSaved(_tzSaveX, _tzSaveY, force: true);
+            EnsureCursorVisible(_tzSaveX, _tzSaveY);
+            _tzSaved = false;
+        }
         AppLog.Info($"[TouchZoom] 捏合结束（抬起接触点，应用定稿刷新）最终跨度±{_tzSpan:0.0}");
     }
 
@@ -518,7 +682,15 @@ internal static class MouseControl
                 // 官方「按住不动」姿势：相同坐标连发 UPDATE 帧。
                 // 应用只看到手势活跃、没有任何位移增量 → 不刷新、不平移。
                 if (InjectOneFrame(TouchPhase.Move, _tzLastX, _tzLastY, _tzSpan))
+                {
                     _tzLastMs = Environment.TickCount64;
+                    // keep-alive 帧同样会触发系统的「触摸提升」副作用 → 立刻钉住并叫醒光标
+                    if (_tzSaved)
+                    {
+                        PinCursorToSaved(_tzSaveX, _tzSaveY, force: false);
+                        EnsureCursorVisible(_tzSaveX, _tzSaveY);
+                    }
+                }
                 else
                 {
                     // 注入失败（可能已被系统超时取消）→ 尝试清理后结束，下一轮重新 Down
@@ -544,6 +716,17 @@ internal static class MouseControl
     {
         EnsureTouchInit();
         if (!_touchReady) return false;
+
+        // 【安全闸门】只有「光标 + 前台窗口都在主显示器」时才允许注入合成触摸。
+        // 副屏注入会让 Windows 把触点按主屏坐标解释、再提升成鼠标 → 光标被搬到
+        // 主屏右边缘；同时触摸期间光标会被系统藏起来且不自己恢复（指针消失）。
+        // 这里直接返回 false，让调用方回退到 Ctrl+滚轮（缩放中心仍是光标，手感一致）。
+        if (!TouchZoomTargetSafe(out cx, out cy))
+        {
+            if (_tzActive) EndTouchZoom();      // 手势中途失效 → 先把接触点抬干净
+            return false;
+        }
+
         long now = Environment.TickCount64;
         if (!_tzActive)
         {
@@ -553,15 +736,29 @@ internal static class MouseControl
             _tzCx = cx; _tzCy = cy;
             _tzSpan = TZ_BASE_SPAN;
             _tzClampLogged = false;
-            // 上限还要受屏幕边界约束：两指是水平排布（y 相同），只需保证 x 方向不出界，
-            // 否则注入的坐标落到虚拟屏幕之外会被系统丢弃/夹住，缩放就断了。
+            // 记住捏合开始时的光标位置：触摸被系统「提升成鼠标」时光标会被挪走，
+            // 靠它把光标钉回原处（否则用户看到的是「光标消失 / 飞到别的屏」）。
+            _tzSaveX = cx; _tzSaveY = cy; _tzSaved = true;
+            // 上限受**主显示器**边界约束（不是虚拟桌面！）：两指水平排布，只需 x 方向不出界，
+            // 否则注入坐标落到显示器之外会被系统丢弃/夹住，缩放就断了。
+            // （副屏上界用虚拟桌面算会算出「跨到别的屏」的跨度——那正是光标飞走的帮凶。）
+            var hPri = GetPrimaryMonitorHandle();
+            int bound = (int)TZ_MAX_SPAN;
+            if (TryGetMonitorRect(hPri, out var pm))
+                bound = Math.Min(pm.Right - pm.Left, pm.Bottom - pm.Top);
             var vs = SystemInformation.VirtualScreen;
+            int vBound = Math.Min(cx - vs.Left, vs.Right - cx);
             _tzMaxSpan = Math.Min(TZ_MAX_SPAN,
-                Math.Max(TZ_MIN_SPAN, Math.Min(cx - vs.Left, vs.Right - cx) - TZ_EDGE_MARGIN));
-            if (!InjectOneFrame(TouchPhase.Down, cx, cy, _tzSpan)) return false;
+                Math.Max(TZ_MIN_SPAN, Math.Min(bound / 2, vBound) - TZ_EDGE_MARGIN));
+            if (!InjectOneFrame(TouchPhase.Down, cx, cy, _tzSpan))
+            {
+                _tzSaved = false;
+                return false;
+            }
             _tzActive = true;
             _tzLastX = cx; _tzLastY = cy;
             AppLog.Info($"[TouchZoom] 开始捏合 @({cx},{cy}) 跨度±{_tzSpan:0.0} 上限{_tzMaxSpan:0.0}");
+            EnsureCursorVisible(_tzSaveX, _tzSaveY);
         }
         else
         {
@@ -581,9 +778,13 @@ internal static class MouseControl
             {
                 // 触点可能已被系统取消 → 结束手势，下一个缩放帧重新 Down
                 _tzActive = false;
+                _tzSaved = false;
                 return false;
             }
             _tzLastX = _tzCx; _tzLastY = _tzCy;
+            // 每帧都要把光标钉回原位并叫醒它（触摸提升会挪走/藏起光标）
+            PinCursorToSaved(_tzSaveX, _tzSaveY, force: false);
+            EnsureCursorVisible(_tzSaveX, _tzSaveY);
         }
         _tzLastMs = now;
         _tzLastRealMs = now;

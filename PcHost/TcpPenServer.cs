@@ -898,7 +898,12 @@ public sealed class TcpPenServer : IDisposable
                 double factor = dx;
                 if (factor <= 0) break;
 
-                // ① 触摸注入（部分机器支持；本机 Win11 26300 被系统禁用，会立即熔断跳过）
+                // ① 触摸注入（合成双指触摸 → 系统翻译成原生缩放手势）
+                //    本机可用（2026-10-30 实测日志确认走的是这条路径）。
+                //    但 MouseControl 内部有安全闸门：光标或前台窗口不在【主显示器】上时
+                //    一律不注入（副屏注入会让 Windows 把触点按主屏坐标解释 → 光标飞到
+                //    主屏右边缘、且触摸期间被系统藏起来 = 用户说的「指针消失、飞走」），
+                //    返回 false 后自动落到 ② 的 Ctrl+滚轮。
                 if (_cfg.PinchMode != "Wheel" && MouseControl.TouchZoomAvailable() &&
                     MouseControl.TryGetCursorPos(out var zx, out var zy) &&
                     MouseControl.UpdateTouchZoom(factor, zx, zy))
