@@ -75,7 +75,7 @@
 
 ## 🚀 快速开始（三步）
 
-1. **PC 端**：从 [Releases](https://github.com/volcanochen/drawing-phone/releases/latest)  
+1. **PC 端**：从 [Releases](https://github.com/volcanochen/draw-touch/releases/latest)  
    下载 `DrawTouchHost-win64-*.zip` 解压运行 `DrawTouchHost.exe`（自包含单文件、免安装、托盘常驻）；  
    或自行编译：`cd PcHost && dotnet publish -c Release` → `publish/DrawTouchHost.exe`  
    > 首次运行会请求一次**管理员权限**（UAC）。原因：前台程序若以管理员身份运行（WorkBuddy 就是），
