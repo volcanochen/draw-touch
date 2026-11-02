@@ -113,6 +113,16 @@ class MainActivity : Activity() {
     /** 见 Protocol.MODE_*：数位板（默认）/ 鼠标。决定手指的用途，两者互斥 */
     private var workMode = Protocol.MODE_MOUSE
 
+    /**
+     * 双指平移**在 PC 上怎么实现**（见 Protocol.PAN_*）：
+     *   PAN_TOUCH（默认）—— PC 注入两个真实接触点做原生平移，手感与真触摸板一致；
+     *                     接触期间 Windows 会隐藏光标，但物理鼠标一动光标立刻回来、
+     *                     而且**能同时移动**（2026-11-01 探针实测：接触期间鼠标通道全速可用）。
+     *   PAN_WHEEL        —— PC 发高分辨率滚轮，连光标隐藏都不会发生（代价是「滚」不是「拖」）。
+     * 两种方式都保留，随握手帧下发给 PC。
+     */
+    private var panMode = Protocol.PAN_TOUCH
+
     /** PC 主机下发的 INFO：版本号 / 计算机名 / 候选 IP（拓扑图展示用） */
     private var pcVersion = "—"
     private var pcName = "—"
@@ -134,6 +144,7 @@ class MainActivity : Activity() {
         port = prefs.getInt("port", Protocol.DEFAULT_PORT)
         aspectMode = prefs.getInt("aspect", Protocol.ASPECT_KEEP)
         workMode = prefs.getInt("mode", Protocol.MODE_MOUSE) // 默认鼠标模式
+        panMode = prefs.getInt("panMode", Protocol.PAN_TOUCH) // 默认触摸注入（原生手感，鼠标可同时用）
         // 备注/画笔模式：记住用户的选择；没选过时数位板默认「备注」（笔迹直接上桌面）
         noteOn = prefs.getBoolean("noteOn", workMode == Protocol.MODE_TABLET)
         orientMode = prefs.getInt("orient", 0)
@@ -631,6 +642,34 @@ class MainActivity : Activity() {
             })
         }
 
+        // ---- 双指平移在 PC 上怎么实现：滚轮 vs 触摸注入（都支持，随时切换）----
+        val panTitle = TextView(this).apply {
+            textSize = 13f; setTextColor(Color.WHITE)
+            text = "双指平移方式（PC 端如何实现平移）"
+            setPadding(0, 8, 0, 2)
+        }
+        val radioPanTouch = RadioButton(this).apply {
+            id = View.generateViewId()
+            text = "触摸注入（默认）：原生触摸板手感，鼠标可同时移动"
+            setTextColor(Color.WHITE)
+        }
+        val radioPanWheel = RadioButton(this).apply {
+            id = View.generateViewId()
+            text = "滚轮：指针全程不动不消失，但手感是「滚」不是「拖」"
+            setTextColor(Color.WHITE)
+        }
+        val panGroup = RadioGroup(this).apply {
+            addView(radioPanTouch); addView(radioPanWheel)
+            check(if (panMode == Protocol.PAN_TOUCH) radioPanTouch.id else radioPanWheel.id)
+        }
+        val panNote = TextView(this).apply {
+            textSize = 11f; setTextColor(Color.parseColor("#FF9E9E9E"))
+            setPadding(0, 2, 0, 0)
+            text = "两种方式都能平移，区别在 PC 鼠标指针的表现：" +
+                "触摸注入时指针会被系统藏起来，但鼠标一动就回来、且能边平移边用鼠标；" +
+                "滚轮则全程不碰指针。某个应用平移发飘/无效时换另一种试试。"
+        }
+
         sections.add(sectionCard(
             "指针与滚动",
             "触摸板模式的手感：光标快慢、滚动比例、抖动过滤、滚轮惯性。滚轮动量 = 抬手后惯性滚动的时长倍率。"
@@ -643,6 +682,9 @@ class MainActivity : Activity() {
             it.addView(momentumRow)
             it.addView(colorTitle)
             it.addView(colorRow)
+            it.addView(panTitle)
+            it.addView(panGroup)
+            it.addView(panNote)
         })
 
         // ==================== 4. 按压识别 ====================
@@ -919,6 +961,12 @@ class MainActivity : Activity() {
         modeGroup.setOnCheckedChangeListener { _, id ->
             val m = if (id == radioMouse.id) Protocol.MODE_MOUSE else Protocol.MODE_TABLET
             setWorkMode(m) // 与主界面模式按钮共用：同步图标 + 通知 PC
+        }
+        // 双指平移方式：只是 PC 端的实现口径，不用断开重连 —— 重发握手帧即可生效
+        panGroup.setOnCheckedChangeListener { _, id ->
+            panMode = if (id == radioPanTouch.id) Protocol.PAN_TOUCH else Protocol.PAN_WHEEL
+            prefs.edit().putInt("panMode", panMode).apply()
+            if (::net.isInitialized) net.sendHelloNow()
         }
         resetFrameBtn.setOnClickListener {
             canvas.resetFrame()
@@ -2192,11 +2240,12 @@ class MainActivity : Activity() {
         return if (h > 0) h.toFloat() else resources.displayMetrics.heightPixels.toFloat()
     }
 
-    /** 握手帧：书写区尺寸 + 比例偏好 + 工作模式 + 操作框状态（PC 据此还原同形状的桌面框） */
+    /** 握手帧：书写区尺寸 + 比例偏好 + 工作模式 + 操作框状态 + 双指平移方式 */
     private fun helloFrame(): ByteArray =
         Protocol.buildHello(
             surfaceW(), surfaceH(), aspectMode, workMode,
-            canvas.frameLeft, canvas.frameTop, canvas.frameScale
+            canvas.frameLeft, canvas.frameTop, canvas.frameScale,
+            panMode
         )
 
     private fun startMdnsDiscovery(manual: Boolean) {

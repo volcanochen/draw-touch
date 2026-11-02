@@ -1665,7 +1665,9 @@ class PenCanvasView(context: Context) : View(context) {
                                     val gate = scrollEmitter.feed(tpScrollAxis, dCx, dCy)
                                     if (!gate.isZero) {
                                         // 方向取反（用户要求）：手指上滑 → 页面内容向下（传统滚轮方向）
-                                        onMouse?.invoke(Protocol.MOUSE_SCROLL, -gate.dx / h * scrollScale, -gate.dy / h * scrollScale)
+                                        // 双指平移用**专属帧** MOUSE_PAN：PC 端据此才敢走触摸注入，
+                                        // 单指滚动（MOUSE_SCROLL）则永远走高分辨率滚轮。
+                                        onMouse?.invoke(Protocol.MOUSE_PAN, -gate.dx / h * scrollScale, -gate.dy / h * scrollScale)
                                         Haptics.scrollTick()     // 滚动中的细震（节流，像触摸板的段落感）
                                         onDebug?.invoke("双指滑动 dx=${String.format("%.3f", gate.dx / h)} dy=${String.format("%.3f", gate.dy / h)} → 滚动 axis=$tpScrollAxis")
                                     }

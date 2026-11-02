@@ -45,8 +45,9 @@ public sealed class TcpPenServer : IDisposable
     /// <summary>
     /// 协议兼容版本：握手（HELLO 的第 8 个 float / INFO 的 pv=）互相交换，
     /// 不一致就拒绝对接（手机黄灯警告、PC 拒收）。改协议时两端同步 +1。
+    /// v3：HELLO 增加第 9 个 float = 双指平移方式（0=滚轮 / 1=触摸注入）。
     /// </summary>
-    internal const int ProtoVer = 2;
+    internal const int ProtoVer = 4;
 
     // 鼠标帧 kind（与手机端 Protocol.MOUSE_* 一致）
     private const int MOUSE_MOVE = 0;
@@ -68,6 +69,15 @@ public sealed class TcpPenServer : IDisposable
     private const int MOUSE_FINGER = 15;
     /// <summary>左键双击：一次 SendInput 内发 下-上-下-上，避免被拆成两次单击。</summary>
     private const int MOUSE_LEFT_DOUBLE = 16;
+    /// <summary>
+    /// 双指平移（v4 新增）：**只有这条帧**允许走触摸注入。
+    /// 与 [MOUSE_SCROLL] 分开是必须的 —— 单指滚动是最高频操作，若也走触摸注入：
+    ///   ① 每次普通滚动都会把光标藏起来（用户明确讨厌「指针消失」）；
+    ///   ② 列表 / 对话框 / 菜单只认滚轮，不认触摸平移手势；
+    ///   ③ 单指滚动与「纵向双指平移」在协议上原本同形（dx=0），无法区分（见 MOUSE_SCROLL 注释）。
+    /// 因此单指滚动永远走滚轮，双指平移才交给 [MappingConfig.PanMode] 决定。
+    /// </summary>
+    private const int MOUSE_PAN = 17;
 
     /// <summary>
     /// 手指划过整个书写区高度 = 滚动多少**像素**。
@@ -415,6 +425,14 @@ public sealed class TcpPenServer : IDisposable
             return true;
         }
         _cfg.SetPhoneHello(w, h, mode, work, frameL, frameT, frameScale);
+        // 双指平移方式（手机端设置页开关，HELLO 第 9 个 float）。
+        // 老手机 HELLO 只有 32 字节 → 不带这个字段，保持 PC 端配置窗体里设置的值不变。
+        if (p.Length >= 36 && _cfg.SetPanMode((int)BitConverter.ToSingle(p, 32)))
+        {
+            // 切走的那条路径不能留残党：注入的接触点会锁住画面，滚轮残量会让下一帧突然跳一下
+            MouseControl.EndTouchPanIfActive();
+            _scrollRemX = 0; _scrollRemY = 0;
+        }
         // 握手成功后立刻把主机信息（版本号/计算机名/候选 IP）下发给手机，供拓扑图展示
         SendInfo(_clientStream!);
         _zoomLog = 0;
@@ -423,6 +441,8 @@ public sealed class TcpPenServer : IDisposable
                     $"偏好={(mode >= 1f ? "保持等比" : "拉伸")}");
         AppLog.Info($"[Hello] 工作模式={(_cfg.IsMouseMode ? "触摸板" : "数位板")} " +
                     $"操作框 缩放×{_cfg.Scale:0.###} 位置({_cfg.FrameL:0.###},{_cfg.FrameT:0.###}) " +
+                    $"平移方式={(_cfg.IsTouchPan ? "Touch 触摸注入" : "Wheel 滚轮")} " +
+                    $"平移方向={(_cfg.PanInvertX || _cfg.PanInvertY ? (_cfg.PanDirection ?? "").Trim() : "默认")}" +
                     $"→ 桌面映射区域 {r.x},{r.y} {r.w}×{r.h}");
         return reject;
     }
@@ -461,6 +481,7 @@ public sealed class TcpPenServer : IDisposable
         if (mouse == _cfg.IsMouseMode) return;
         _cfg.SetWorkMode(mouse);
         MouseControl.EndTouchZoomIfActive(); // 捏合注入还挂着就抬起，防触摸接触点残留锁死左键
+        MouseControl.EndTouchPanIfActive();  // 平移注入同理
         MouseControl.ReleaseAll();     // 避免左键卡在按下状态
         AppLog.Info(mouse
             ? "[Mode] 切换到【触摸板模式】：取消操作范围框，手指=触摸板，右侧滚轮条，底部左/中/右键，S Pen=绝对定位鼠标笔"
@@ -468,6 +489,7 @@ public sealed class TcpPenServer : IDisposable
     }
 
     private int _zoomLog;
+    private int _panFallbackLog;
 
     /// <summary>缩放帧：手指双指捏合 → 缩放桌面上的操作范围框（以捏合中心为锚点）。</summary>
     private void HandleZoom(byte[] p)
@@ -784,6 +806,12 @@ public sealed class TcpPenServer : IDisposable
     // 触摸板相对移动：不足 1 像素的位移残量（跨帧累积，避免慢速移动"不动/跳"）
     private double _moveRemX, _moveRemY;
 
+    // 滚轮像素残量（横/纵各一份）：不足 1 像素的平移量不丢，攒够再发。
+    // 不累积的话，慢速平移一帧 0.1~0.3px 会被逐帧四舍五入成 0 永久丢弃 → 用户感知「很慢/不受控制」。
+    private double _scrollRemX, _scrollRemY;
+    /// <summary>滚轮残量上限：手久按不动 / 断线时残量不能无限堆积。</summary>
+    private const double ScrollRemainLimit = 400;
+
     /// <summary>残量上限：系统在虚拟桌面/异构多屏下截断位移时，残量不能无限堆积。</summary>
     private const double MoveRemainLimit = 600;
 
@@ -850,10 +878,14 @@ public sealed class TcpPenServer : IDisposable
                     }
                     else
                     {
-                        // 手指真正离开触摸板 → 结束一切缩放会话：
+                        // 手指真正离开触摸板 → 结束一切缩放/平移会话：
                         // 触摸注入的抬接触点 / Ctrl 缩放会话松开 Ctrl——应用此刻定稿刷新。
                         MouseControl.EndTouchZoomIfActive();
+                        MouseControl.EndTouchPanIfActive();
                         MouseControl.CtrlZoomEnd();
+                        // 清掉滚轮亚像素残量：一次手势结束不该把不到 1px 的零头带到下一次
+                        // （否则下次刚落下就会莫名跳一下）。
+                        _scrollRemX = 0; _scrollRemY = 0;
                         AppLog.Info("[Mouse] 手指离开触摸板 → S Pen 恢复控制光标");
                     }
                 }
@@ -879,13 +911,87 @@ public sealed class TcpPenServer : IDisposable
                 MouseControl.RightClick();
                 AppLog.Info("[Mouse] 右键");
                 break;
+            case MOUSE_PAN:
             case MOUSE_SCROLL:
             {
-                // 手指上滑(dy<0) → 向上滚动（内容跟着手指走）
+                // ===== 双指平移 / 单指滚动 =====
+                //
+                // 【v4 起分成两种帧】双指平移 = MOUSE_PAN（只有它可能走触摸注入）；
+                // 单指滚动 / 点击滚一格 / 手势滚 = MOUSE_SCROLL（**永远走滚轮**）。
+                // 为什么必须分开：单指滚动与「纵向双指平移」在协议上原本同形（dx=0），
+                // 若一起走触摸注入 → 每次普通滚动都隐藏光标，且列表/对话框/菜单只认滚轮。
+                //
+                // 【为什么触摸注入要「能不碰光标」才算合格】（2026-11-01 受控探针实测）
+                //  · 注入接触期间系统**不会**把光标拽到触点：保持接触 1s 偏移恒 0px；
+                //  · 接触期间鼠标通道**全速可用**：+80 米奇 → 339px（无接触时 338px）；
+                //  · 唯一副作用是「接触期间光标被隐藏」，鼠标一动立即显示、抬手后由尾巴期点亮。
+                //  ⇒ 以前每帧 SetCursorPos 钉回起点 + 8ms 看护，会把用户正在移动的物理鼠标
+                //    逐帧拽回去 → 真触摸板那种「pan 的同时还能用鼠标」直接失效。现已全部移除。
+                //
+                // 【滚轮路径仍在，且是一等公民】panMode=Wheel 时用它；触摸注入不可用（远程桌面/
+                // 虚拟机/无合成指针设备）时兜底。代码里原先写着「OneNote 忽略横向滚轮
+                // WM_MOUSEHWHEEL」——那是**未经证实的猜测**，已用受控探针 tests/hwheel_probe.py 证伪：
+                // SendInput(MOUSEEVENTF_HWHEEL) 正常送达，wParam 与注入值同号（+360→+360、
+                // -720→-720），控件滚动位置 0→90→180→0。
+                //    用户当时的原话也是「不是不会动，就是很慢」，说明它本来就会动。
+                //
+                // 【「很慢 / 不受控制」的真凶：亚像素残量被逐帧丢弃】
+                //    旧实现每帧 `PreciseDelta(Math.Round(pixels))`，|pixels| < 0.5 的帧被静默丢弃
+                //    且**不保留残量**。慢速平移每帧只有 0.1~0.3px（360 × dx，dx≈0.0005/帧）
+                //    → 帧帧被丢 → 累计位移永远攒不起来。现在按轴累积残量、截断取整、余数留到下一帧。
+                double pxX = dx * SCROLL_PIXELS_PER_SCREEN;    // 横向原始像素量
+                double pxY = -dy * SCROLL_PIXELS_PER_SCREEN;   // 纵向原始像素量（手指上滑 dy<0 → 正值）
+
+                // 【方向配置 PanDirection】只作用于双指平移帧（MOUSE_PAN）；
+                // 单指滚动（MOUSE_SCROLL）不走这里，保持原方向。见 MappingConfig.PanDirection 注释。
+                if (kind == MOUSE_PAN && (_cfg.PanInvertX || _cfg.PanInvertY))
+                {
+                    if (_cfg.PanInvertX) pxX = -pxX;
+                    if (_cfg.PanInvertY) pxY = -pxY;
+                }
+
+                // 触摸注入平移（只有双指平移帧 MOUSE_PAN 才可能走；单指滚动永远走滚轮）
+                if (kind == MOUSE_PAN && _cfg.IsTouchPan && MouseControl.TouchPanAvailable())
+                {
+                    // 先清掉可能残留的捏合接触点，避免两套接触点打架
+                    MouseControl.EndTouchZoomIfActive();
+                    // 【纵向符号为什么是 +pxY】触摸屏的通识：注入的接触点往哪挪，内容就跟着往哪挪。
+                    // 手指下滑 → 手机端取反一次（dy_sent<0）→ pxY=-dy_sent>0 → 接触点也该往下挪（sy>0）
+                    // → 所以纵向必须**原样传 pxY**。旧代码传的是 -pxY（第三次取反），
+                    //   纵向凑成奇数次取反 → 内容与手指反向（2026-11-01 用户实测「滚动方向是反的」）。
+                    // 横向链路只有两次取反（手机端 + 这里的 -pxX），本来就是内容跟手，保持不变。
+                    if (MouseControl.UpdateTouchPan(-pxX, pxY))
+                    {
+                        if (_mouseLog++ % 20 == 0)
+                            AppLog.Info($"[Mouse] 双指平移 → 触摸注入 (sx={-pxX:F1} sy={pxY:F1})");
+                        break;
+                    }
+                    // 注入失败（极少）→ 落到下面滚轮兜底
+                }
+                else if (kind == MOUSE_PAN && _cfg.IsTouchPan && _panFallbackLog++ % 30 == 0)
+                {
+                    // 选了触摸注入但系统不给合成指针设备（远程桌面 / 部分虚拟机 / 权限不足）→ 只能滚轮兜底
+                    AppLog.Warn("[Pan] 已选「触摸注入」，但本机无法创建合成指针设备 → 本次平移回退为滚轮");
+                }
+
+                // ---- 滚轮路径（默认 / 兜底）----
+                // 残量累积：不足 1 像素的位移不丢，攒够再发，慢速拖动才有 1:1 手感。
+                _scrollRemX += pxX;
+                _scrollRemY += pxY;
+                if (_scrollRemX > ScrollRemainLimit) _scrollRemX = ScrollRemainLimit;
+                else if (_scrollRemX < -ScrollRemainLimit) _scrollRemX = -ScrollRemainLimit;
+                if (_scrollRemY > ScrollRemainLimit) _scrollRemY = ScrollRemainLimit;
+                else if (_scrollRemY < -ScrollRemainLimit) _scrollRemY = -ScrollRemainLimit;
+
+                int stepX = (int)_scrollRemX;   // 截断取整（向零取整），余数留在残量里
+                int stepY = (int)_scrollRemY;
+                _scrollRemX -= stepX;
+                _scrollRemY -= stepY;
+
                 // 单位是**像素**：Windows 收到非 120 倍数的滚轮增量时，
                 // 会当成高分辨率滚动（触摸板那样平滑），而不是一格一格跳。
-                int v = PreciseDelta(-dy * SCROLL_PIXELS_PER_SCREEN);
-                int h = PreciseDelta(dx * SCROLL_PIXELS_PER_SCREEN);
+                int v = PreciseDelta(stepY);
+                int h = PreciseDelta(stepX);
                 if (v != 0) MouseControl.WheelPixels(v);
                 if (h != 0) MouseControl.HWheelPixels(h);
                 if (v != 0 || h != 0) AppLog.Info($"[Mouse] 滚动 v={v}px h={h}px");
@@ -898,12 +1004,15 @@ public sealed class TcpPenServer : IDisposable
                 double factor = dx;
                 if (factor <= 0) break;
 
+                // 先清掉可能残留的平移接触点，避免两套接触点打架
+                MouseControl.EndTouchPanIfActive();
                 // ① 触摸注入（合成双指触摸 → 系统翻译成原生缩放手势）
                 //    本机可用（2026-10-30 实测日志确认走的是这条路径）。
-                //    但 MouseControl 内部有安全闸门：光标或前台窗口不在【主显示器】上时
-                //    一律不注入（副屏注入会让 Windows 把触点按主屏坐标解释 → 光标飞到
-                //    主屏右边缘、且触摸期间被系统藏起来 = 用户说的「指针消失、飞走」），
-                //    返回 false 后自动落到 ② 的 Ctrl+滚轮。
+                //    MouseControl 内部用**局部坐标**注入（相对虚拟桌面原点），
+                //    任何屏幕上触点都精确落在光标处 → 应用收到的是正确位置的原生捏合。
+                //    注入期间系统会把光标藏起来、并在抬手时把它「提升」到右手接触点，
+                //    MouseControl 内部有 8ms 看护定时器把光标钉回原位并叫回可见。
+                //    只有系统不支持合成指针设备时才返回 false，回退到 ② 的 Ctrl+滚轮。
                 if (_cfg.PinchMode != "Wheel" && MouseControl.TouchZoomAvailable() &&
                     MouseControl.TryGetCursorPos(out var zx, out var zy) &&
                     MouseControl.UpdateTouchZoom(factor, zx, zy))

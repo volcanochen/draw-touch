@@ -45,6 +45,7 @@ internal sealed class ConfigForm : Form
     private readonly ComboBox _cmbMode;
     private readonly ComboBox _cmbWork;
     private readonly NumericUpDown _nudMouseSpeed;
+    private readonly ComboBox _cmbPan;
     private readonly ComboBox _cmbPinch;
     private readonly NumericUpDown _nudScale;
     private readonly ComboBox _cmbAspect;
@@ -225,6 +226,16 @@ internal sealed class ConfigForm : Form
         // 在 OneNote 里会变成「下标 / 删除线」，直接按「Ctrl+滚轮」处理。
         _cmbPinch.SelectedIndex = cfg.PinchMode.Equals("Wheel", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
         AddRow("捏合缩放方式", _cmbPinch);
+
+        // 双指平移方式（手机端设置页也能实时切换，随握手帧下发）
+        _cmbPan = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 380 };
+        _cmbPan.Items.AddRange(new object[]
+        {
+            "触摸注入（默认）：真实双指平移，原生手感；接触期间光标会隐藏，鼠标一动即显示且可同时用",
+            "滚轮：高分辨率 WHEEL/HWHEEL，指针全程不动、不消失",
+        });
+        _cmbPan.SelectedIndex = cfg.IsTouchPan ? 0 : 1;
+        AddRow("双指平移方式", _cmbPan);
 
         var zoomRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
         _nudScale = new NumericUpDown
@@ -464,6 +475,8 @@ internal sealed class ConfigForm : Form
         _cfg.ShowRegion = _chkShowRegion.Checked;
         _cfg.MouseSpeed = (double)_nudMouseSpeed.Value;
         _cfg.PinchMode = _cmbPinch.SelectedIndex == 1 ? "Wheel" : "Touch";
+        // 平移方式：这里存的是 PC 端默认值（手机端设置页切换只影响本次连接，不改写配置文件）
+        _cfg.SetPanMode(_cmbPan.SelectedIndex == 0 ? 1 : 0);
         // 操作框的缩放/位置由手机端捏合控制，PC 这里只读不写
         _cfg.SetWorkMode(_cmbWork.SelectedIndex == 1);
         if (_cfg.IsMouseMode) MouseControl.ReleaseAll();

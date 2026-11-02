@@ -27,8 +27,12 @@ object Protocol {
      * 任何一端发现对方与自己不一致 → 指示灯变黄、停止后续对接（功能口径对不上，
      * 硬连只会出现「手势错乱 / 光标瞬移」这类查不出原因的怪象）。
      * 改协议（加帧类型 / 改帧语义 / 改负载布局）时必须 +1，两端同步改。
+     *
+     * v3：HELLO 增加第 9 个 float = 双指平移方式（[PAN_WHEEL] / [PAN_TOUCH]）。
+     * v4：新增双指平移専用帧 [MOUSE_PAN]=17（单指滚动与双指平移分开，
+     *     单指滚动永远走滚轮、双指平移才可能走触摸注入）。
      */
-    const val PROTO_VER: Int = 2
+    const val PROTO_VER: Int = 4
 
     const val TYPE_PEN_DOWN: Int = 0x01
     const val TYPE_PEN_MOVE: Int = 0x02
@@ -68,6 +72,12 @@ object Protocol {
     const val NOTE_CLEAR: Int = 3
     /** 切换笔迹颜色：arg = 预设颜色索引（与 PC 端 NoteOverlay.Presets 顺序一致） */
     const val NOTE_COLOR: Int = 4
+
+    // ---- 双指平移方式（手机端设置页开关，随握手帧下发给 PC）----
+    /** 滚轮：PC 发高分辨率 WHEEL/HWHEEL。指针不动、不消失，与纵向滚动一致（默认）。 */
+    const val PAN_WHEEL: Int = 0
+    /** 触摸注入：PC 注入两个真实接触点做平移。原生手感，但触摸期间系统会隐藏鼠标光标。 */
+    const val PAN_TOUCH: Int = 1
 
     // ---- 工作模式 ----
     const val MODE_TABLET: Int = 0   // 数位板：S Pen 在框内作画，手指拖动框
@@ -112,6 +122,16 @@ object Protocol {
      * 拆成两次 MOUSE_LEFT_CLICK 时，两次网络往返之间可能超过系统的双击时间，被当成两次单击。
      */
     const val MOUSE_LEFT_DOUBLE: Int = 16
+    /**
+     * 双指平移（v4 新增）：dx/dy 是两指质心的归一化位移。
+     *
+     * 为什么不复用 [MOUSE_SCROLL]：单指滚动与「纵向双指平移」在协议上原本同形（dx=0），
+     * PC 端无法区分，只能让两种帧都走同一条实现路径 ——
+     * 而单指滚动是最高频操作，它**必须**走滚轮（否则每次滚动都会隐藏光标，
+     * 且列表/对话框/菜单只认滚轮）。分开后：单指滚动=滚轮，双指平移=按用户选择的
+     * 「滚轮 / 触摸注入」实现。
+     */
+    const val MOUSE_PAN: Int = 17
 
     const val DEFAULT_PORT: Int = 6000
 
@@ -120,8 +140,8 @@ object Protocol {
     const val ASPECT_KEEP: Int = 1
 
     private const val PAYLOAD_LEN = 24
-    /** 握手帧 payload 长度（7 个 float） */
-    private const val HELLO_LEN = 32
+    /** 握手帧 payload 长度（8 个 float，v2）→ v3 起为 [HELLO_LEN_V3]（9 个 float） */
+    private const val HELLO_LEN_V3 = 36
 
     fun buildPen(
         type: Int,
@@ -319,6 +339,8 @@ object Protocol {
      *   [0]=surfaceW(float) 书写区宽  [4]=surfaceH(float) 书写区高
      *   [8]=aspectMode(float)        [12]=workMode(float)
      *   [16]=frameL [20]=frameT [24]=frameScale   ← 手机端操作框状态
+     *   [28]=PROTO_VER(float)
+     *   [32]=panMode(float)  ← v3：双指平移方式（[PAN_WHEEL] / [PAN_TOUCH]）
      * PC 据此恢复出**与手机端同形状同位置**的桌面范围框。
      */
     fun buildHello(
@@ -328,14 +350,15 @@ object Protocol {
         workMode: Int = MODE_TABLET,
         frameL: Float = 0f,
         frameT: Float = 0f,
-        frameScale: Float = 1f
+        frameScale: Float = 1f,
+        panMode: Int = PAN_WHEEL
     ): ByteArray {
-        val buf = ByteBuffer.allocate(6 + HELLO_LEN).order(ByteOrder.LITTLE_ENDIAN)
+        val buf = ByteBuffer.allocate(6 + HELLO_LEN_V3).order(ByteOrder.LITTLE_ENDIAN)
         buf.put(MAGIC1)
         buf.put(MAGIC2)
         buf.put(VERSION)
         buf.put(TYPE_HELLO.toByte())
-        buf.putShort(HELLO_LEN.toShort())
+        buf.putShort(HELLO_LEN_V3.toShort())
         buf.putFloat(surfaceW)
         buf.putFloat(surfaceH)
         buf.putFloat(aspectMode.toFloat())
@@ -345,6 +368,8 @@ object Protocol {
         buf.putFloat(frameScale)
         // 协议兼容版本：老 PC 只认前 28 字节会忽略它；新 PC 用来做兼容性检查
         buf.putFloat(PROTO_VER.toFloat())
+        // v3：双指平移方式（老 PC 只读前 32 字节 → 保留自己在 appsettings.json 里的设置）
+        buf.putFloat(panMode.toFloat())
         return buf.array()
     }
 }

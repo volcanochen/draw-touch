@@ -57,6 +57,108 @@ public sealed class MappingConfig
     public string PinchMode { get; set; } = "Touch";
 
     /// <summary>
+    /// 双指平移方式（与 PinchMode 对称）。**默认 Touch（触摸注入）**：用户 2026-11-01 明确要求
+    /// 「默认设置为鼠标注入」——原生平移手势手感是第一位，指针问题已按实测证据修掉。
+    ///
+    ///   Touch  —— 触摸注入平移（两个接触点一起平移 → 系统翻译成原生平移手势）。
+    ///            手感与真实触摸板一致（Office / 浏览器 / 图片 / PDF / 地图都原生支持）。
+    ///            已知副作用 & 处理（2026-11-01 受控探针 tests/PanProbe 实测）：
+    ///              · 接触期间系统会隐藏光标 → 抬手后尾巴期「只点亮、不定位」把它叫回来；
+    ///              · 系统**不会**把光标拽到触点（保持接触 1s 偏移恒 0px）→ 所以平移全程
+    ///                一个字都不碰光标，物理鼠标可以同时移动（真触摸板的效果）。
+    ///    Wheel  —— 高分辨率滚轮（WM_MOUSEWHEEL / WM_MOUSEHWHEEL 像素增量）。
+    ///            全程不碰光标、连隐藏都不会发生；代价是「滚」而不是「拖」，某些应用里增益不一致。
+    ///
+    /// 两种方式都要保留、由用户在手机端设置页（或 PC 配置窗体）随时切换 —— 握手帧
+    /// HELLO 的第 9 个 float 携带该开关（0=Wheel / 1=Touch），见 [SetPanMode]。
+    ///
+    /// 注：与「必须用注入触摸，不能 Ctrl+滚轮」那条硬规则一致 —— 那条针对**捏合缩放**
+    /// （PinchMode 仍为 Touch），双指平移现在也默认走触摸注入。
+    /// </summary>
+    public string PanMode { get; set; } = "Touch";
+
+    /// <summary>
+    /// 【诊断用】强制平移实现方式，覆盖手机端设置：""（默认，听手机）/ "Touch" / "Wheel"。
+    ///
+    /// 为什么要有它：2026-11-01 排查「pan 时有个东西跟着手指走」，需要做 A/B
+    ///（触摸注入 ↔ 滚轮）来判定现象来自哪条路径。但手机端那个单选项藏在
+    /// 「设置 → 指针与滚动」卡片里，用户两次 pan 都仍是 Touch，A/B 一直做不成。
+    /// 有了这个键，改 appsettings.json 重启宿主就能强制切过去，无需碰手机。
+    /// 平时保持空字符串。
+    /// </summary>
+    public string PanModeForce { get; set; } = "";
+
+    /// <summary>
+    /// 双指平移（MOUSE_PAN 帧）的方向翻转，只作用于平移帧、**不影响单指滚动**：
+    ///   ""（默认）/ "Normal" —— 默认方向（触摸注入 = 内容跟手；滚轮路径维持原调校）
+    ///   "InvertY"  —— 纵向翻反（手指下滑 → 内容上移，即传统滚轮方向）
+    ///   "InvertX"  —— 横向翻反
+    ///   "Invert"   —— 两轴都翻
+    /// 大小写不敏感；写别的值等同 ""。改 appsettings.json 后重启宿主生效。
+    ///
+    /// 为什么需要它：符号链是按滚轮路径手工调校的（手机端取反一次 + PC 端 pxY 再取反），
+    /// 触摸注入路径当年又多套了一次取反（`UpdateTouchPan(-pxX, -pxY)`），
+    /// 纵向凑成奇数次取反 → 内容与手指反向（2026-11-01 用户实测「滚动方向是反的」）。
+    /// 代码已把触摸注入的纵向修正为「内容跟手」；若用户偏好反过来，用这个键翻。
+    /// </summary>
+    public string PanDirection { get; set; } = "";
+
+    /// <summary>PanDirection 是否要求横向翻转。</summary>
+    public bool PanInvertX
+    {
+        get
+        {
+            var v = (PanDirection ?? "").Trim();
+            return v.Equals("Invert", StringComparison.OrdinalIgnoreCase)
+                || v.Equals("InvertX", StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    /// <summary>PanDirection 是否要求纵向翻转。</summary>
+    public bool PanInvertY
+    {
+        get
+        {
+            var v = (PanDirection ?? "").Trim();
+            return v.Equals("Invert", StringComparison.OrdinalIgnoreCase)
+                || v.Equals("InvertY", StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    /// <summary>当前是否为「触摸注入」平移（false = 高分辨率滚轮）。</summary>
+    public bool IsTouchPan
+    {
+        get
+        {
+            var f = (PanModeForce ?? "").Trim();
+            if (f.Equals("Touch", StringComparison.OrdinalIgnoreCase)) return true;
+            if (f.Equals("Wheel", StringComparison.OrdinalIgnoreCase)) return false;
+            return PanMode.Equals("Touch", StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    /// <summary>平移方式的一句人话说明（日志/界面用）。</summary>
+    public string PanModeText => IsTouchPan
+        ? "触摸注入（原生触摸板手感；接触期间光标会隐藏，鼠标一动即显示）"
+        : "滚轮（指针不动、不消失；与纵向滚动一致）";
+
+    /// <summary>
+    /// 切换双指平移方式（手机端设置页开关 → 握手帧下发）。
+    /// code：0=滚轮 Wheel / 1=触摸注入 Touch；其余值忽略（保持现状）。
+    /// </summary>
+    /// <returns>true = 真的变了（调用方需要清理另一条路径的残留状态）。</returns>
+    public bool SetPanMode(int code)
+    {
+        var v = code >= 1 ? "Touch" : "Wheel";
+        if (v.Equals(PanMode, StringComparison.OrdinalIgnoreCase)) return false;
+        var old = PanModeText;
+        PanMode = v;
+        AppLog.Info($"[Pan] 平移方式切换：{old} → {PanModeText}");
+        Changed?.Invoke();
+        return true;
+    }
+
+    /// <summary>
     /// 截屏保存目录（手机点「截屏」时 PNG 存到哪）。
     /// 留空 = 默认「图片库\DrawTouch」；目录不存在会自动创建。
     /// </summary>

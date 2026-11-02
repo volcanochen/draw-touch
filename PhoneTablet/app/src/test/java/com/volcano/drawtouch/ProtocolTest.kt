@@ -69,13 +69,13 @@ class ProtocolTest {
     }
 
     @Test
-    fun `hello 帧 - 32 字节 8 个 float，末位是协议版本`() {
+    fun `hello 帧 - 36 字节 9 个 float：倒数第二位是协议版本，末位是双指平移方式`() {
         val f = Protocol.buildHello(1080f, 2400f, Protocol.ASPECT_KEEP, Protocol.MODE_MOUSE, 0.1f, 0.2f, 1.5f)
         val buf = ByteBuffer.wrap(f)
         val (type, len, _) = header(buf)
         assertEquals(Protocol.TYPE_HELLO, type)
-        assertEquals(32, len)
-        assertEquals(6 + 32, f.size)
+        assertEquals(36, len)
+        assertEquals(6 + 36, f.size)
         assertEquals(1080f, buf.float, 1e-4f)
         assertEquals(2400f, buf.float, 1e-4f)
         assertEquals(Protocol.ASPECT_KEEP.toFloat(), buf.float, 1e-6f)
@@ -85,6 +85,28 @@ class ProtocolTest {
         assertEquals(1.5f, buf.float, 1e-6f)
         // 第 8 个 float = 协议兼容版本：PC 端据此判断两端能否对接
         assertEquals(Protocol.PROTO_VER.toFloat(), buf.float, 1e-6f)
+        // 第 9 个 float = 双指平移方式；不传时默认滚轮（指针不动、不消失）
+        assertEquals(Protocol.PAN_WHEEL.toFloat(), buf.float, 1e-6f)
+    }
+
+    @Test
+    fun `hello 帧 - 双指平移方式随开关变化（滚轮 ↔ 触摸注入）`() {
+        fun panModeOf(pan: Int): Float {
+            val f = Protocol.buildHello(1080f, 2400f, Protocol.ASPECT_KEEP, Protocol.MODE_MOUSE,
+                0f, 0f, 1f, pan)
+            val buf = ByteBuffer.wrap(f)
+            header(buf)
+            repeat(8) { buf.float }          // 前 8 个 float 跳过
+            return buf.float                  // 第 9 个 = panMode
+        }
+        assertEquals(Protocol.PAN_TOUCH.toFloat(), panModeOf(Protocol.PAN_TOUCH), 1e-6f)
+        assertEquals(Protocol.PAN_WHEEL.toFloat(), panModeOf(Protocol.PAN_WHEEL), 1e-6f)
+        // 默认（不传）必须是滚轮：这是「横向和纵向一样，指针不动不消失」的默认体验
+        val d = Protocol.buildHello(1080f, 2400f, Protocol.ASPECT_KEEP)
+        val db = ByteBuffer.wrap(d)
+        header(db)
+        repeat(8) { db.float }
+        assertEquals(Protocol.PAN_WHEEL.toFloat(), db.float, 1e-6f)
     }
 
     @Test
