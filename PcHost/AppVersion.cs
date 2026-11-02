@@ -8,5 +8,5 @@ namespace DrawTouchHost;
 /// </summary>
 internal static class AppVersion
 {
-    public const string Version = "1.4.9";
+    public const string Version = "1.5.0";
 }

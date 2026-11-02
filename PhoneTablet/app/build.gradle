@@ -14,8 +14,8 @@ android {
         applicationId "com.volcano.drawtouch"
         minSdk 21
         targetSdk 34
-        versionCode 25
-        versionName "1.4.9"
+        versionCode 26
+        versionName "1.5.0"
         // 构建信息注入 BuildConfig：BUILD_TIME 每次构建都是当前时间
         buildConfigField "String", "BUILD_TIME", "\"${buildTime()}\""
         // 真机端到端测试（androidTest）：驱动真实 PenCanvasView 跑真实手势
