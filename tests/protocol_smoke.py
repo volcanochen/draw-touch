@@ -154,8 +154,8 @@ def main():
 
     # ---- 1. HELLO 握手 + INFO 回包 ----
     mark = log_size(log)
-    # 8 个 float：书写区宽高 / 比例偏好 / 工作模式 / 框 L T S / 协议兼容版本（末位）
-    hello = f32(1080.0, 2400.0, 1.0, 0.0, 0.0, 0.0, 1.0, 2.0)  # 数位板、保持比例、框复位、pv=2
+    # 9 个 float：书写区宽高 / 比例偏好 / 工作模式 / 框 L T S / 协议兼容版本 / 双指平移方式（末位）
+    hello = f32(1080.0, 2400.0, 1.0, 0.0, 0.0, 0.0, 1.0, 4.0, 1.0)  # 数位板、保持比例、框复位、pv=4、平移=触摸注入
     s.sendall(frame(T_HELLO, hello))
     info = recv_frame(s, timeout=5)
     check("HELLO → 收到 INFO 回包", info is not None and info[0] == T_INFO,
@@ -419,7 +419,7 @@ def main():
     mark = log_size(log)
     s3 = socket.create_connection((args.host, args.port), timeout=5)
     try:
-        bad = f32(1080.0, 2400.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0)  # pv=1 ≠ 2
+        bad = f32(1080.0, 2400.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0)  # pv=1 ≠ 4
         s3.sendall(frame(T_HELLO, bad))
         closed = False
         deadline = time.time() + 6

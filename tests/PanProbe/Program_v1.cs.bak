@@ -1,0 +1,593 @@
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+
+namespace PanProbe;
+
+/// <summary>
+/// 「平移期间真实鼠标能不能同时动」的取证工具（2026-11-01）。
+///
+/// 用户的判据：真实触摸板上做双指 pan 时，物理鼠标的指针**仍然可见、也仍然能动**。
+/// 我们现在的触摸注入（PT_TOUCH）做不到 —— 接触期间系统隐藏光标 + 触摸提升拽走光标，
+/// 我们的看护还会把光标钉回起点（等于把用户移动的鼠标拽回去）。
+///
+/// 本探针不猜，逐项实测：
+///   A. PT_TOUCHPAD(5) 合成设备能否创建？（真实触摸板就是 touchpad 语义，理论上不会进入触摸模式）
+///   B. 若能：注入双指平移 → 目标控件真的滚了吗？期间光标可见吗？鼠标通道（SendInput 相对移动）还生效吗？
+///   C. 对照：PT_TOUCH(2) 同样一套测量（已知表现差，用来确认测量方法确实能抓到差异）。
+///   D. PT_TOUCH 下「ShowCursor / SetCursorPos 原地刷新」能否把光标叫回来、且不抢鼠标。
+///
+/// 目标控件：自建 Win32 多行 EDIT（横向+纵向滚动条），读 GetScrollPos / EM_GETFIRSTVISIBLELINE。
+/// 输出：控制台 + report.txt。
+/// </summary>
+internal static class Program
+{
+    // ---------- 结构 ----------
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT { public int L, T, R, B; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CURSORINFO { public int cbSize; public int flags; public IntPtr hCursor; public POINT ptScreenPos; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINTER_INFO
+    {
+        public uint pointerType;
+        public uint pointerId;
+        public uint frameId;
+        public uint pointerFlags;
+        public IntPtr sourceDevice;
+        public IntPtr hwndTarget;
+        public POINT ptPixelLocation;
+        public POINT ptPixelLocationRaw;
+        public POINT ptHimetricLocation;
+        public POINT ptHimetricLocationRaw;
+        public uint dwTime;
+        public uint historyCount;
+        public int inputData;
+        public uint dwKeyStates;
+        public ulong PerformanceCount;
+        public uint ButtonChangeType;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINTER_TOUCH_INFO
+    {
+        public POINTER_INFO pointerInfo;
+        public uint touchFlags;
+        public uint touchMask;
+        public RECT rcContact;
+        public RECT rcContactRaw;
+        public uint orientation;
+        public uint pressure;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINTER_TOUCHPAD_INFO
+    {
+        public POINTER_INFO pointerInfo;
+        public uint touchFlags;
+        public uint touchMask;
+        public RECT rcContact;
+        public RECT rcContactRaw;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TYPE_INFO_TOUCH { public uint type; public POINTER_TOUCH_INFO touch; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TYPE_INFO_TOUCHPAD { public uint type; public POINTER_TOUCHPAD_INFO touchpad; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr extra; }
+    [StructLayout(LayoutKind.Explicit)]
+    private struct INPUT { [FieldOffset(0)] public int type; [FieldOffset(8)] public MOUSEINPUT mi; }
+
+    // ---------- P/Invoke ----------
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr CreateSyntheticPointerDevice(uint pointerType, uint maxCount, uint feedbackMode);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool InjectSyntheticPointerInput(IntPtr device, IntPtr pointerInfo, uint count);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool DestroySyntheticPointerDevice(IntPtr device);
+
+    [DllImport("user32.dll")] private static extern bool GetCursorInfo(ref CURSORINFO ci);
+    [DllImport("user32.dll")] private static extern bool GetCursorPos(out POINT p);
+    [DllImport("user32.dll")] private static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] private static extern int ShowCursor(bool show);
+    [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint n, INPUT[] i, int cb);
+    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] private static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);
+    [DllImport("user32.dll")] private static extern int GetSystemMetrics(int i);
+
+    // 窗口
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateWindowExW(uint ex, string cls, string name, uint style,
+        int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr inst, IntPtr param);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern ushort RegisterClassW(ref WNDCLASS wc);
+    [DllImport("user32.dll")] private static extern IntPtr DefWindowProcW(IntPtr h, uint m, IntPtr w, IntPtr l);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool SetWindowTextW(IntPtr h, string s);
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] private static extern bool DestroyWindow(IntPtr h);
+    [DllImport("user32.dll")] private static extern bool PeekMessageW(out MSG m, IntPtr h, uint min, uint max, uint remove);
+    [DllImport("user32.dll")] private static extern bool TranslateMessage(ref MSG m);
+    [DllImport("user32.dll")] private static extern bool DispatchMessageW(ref MSG m);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr SendMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] private static extern int GetScrollPos(IntPtr h, int bar);
+    [DllImport("user32.dll")] private static extern bool CloseGestureInfoHandle(IntPtr h);
+    [DllImport("user32.dll")] private static extern bool GetGestureInfo(IntPtr hGestureInfo, ref GESTUREINFO p);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GESTUREINFO
+    {
+        public uint cbSize; public uint dwFlags; public uint dwID; public IntPtr hwndTarget;
+        public POINTS ptsLocation; public uint dwInstanceID; public uint dwSequenceID;
+        public ulong ullArguments; public uint cbExtraArgs;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINTS { public short X, Y; }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct WNDCLASS
+    {
+        public uint style; public IntPtr lpfnWndProc; public int cbClsExtra; public int cbWndExtra;
+        public IntPtr hInstance; public IntPtr hIcon; public IntPtr hCursor; public IntPtr hbrBackground;
+        public string lpszMenuName; public string lpszClassName;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MSG
+    {
+        public IntPtr hwnd; public uint message; public IntPtr wParam; public IntPtr lParam;
+        public uint time; public POINT pt;
+    }
+
+    private delegate IntPtr WndProc(IntPtr h, uint m, IntPtr w, IntPtr l);
+    private static readonly WndProc Proc = (h, m, w, l) => DefWindowProcW(h, m, w, l);
+
+    // 常量
+    private const uint PT_TOUCH = 2, PT_TOUCHPAD = 5;
+    private const uint FB_DEFAULT = 1, FB_INDIRECT = 2, FB_NONE = 3;
+    private const uint FLAG_INRANGE = 0x00000002, FLAG_INCONTACT = 0x00000004;
+    private const uint FLAG_PRIMARY = 0x00002000;
+    private const uint FLAG_DOWN = 0x00010000, FLAG_UPDATE = 0x00020000, FLAG_UP = 0x00040000;
+    private const uint TOUCH_MASK_PRESSURE = 0x00000004;
+    private const uint MOVE = 0x0001;
+    private const int SB_HORZ = 0, SB_VERT = 1;
+    private const uint EM_GETFIRSTVISIBLELINE = 0x00CE;
+    private const uint WS_VISIBLE = 0x10000000, WS_OVERLAPPEDWINDOW = 0x00CF0000;
+    private const uint ES_MULTILINE = 0x0004, ES_AUTOVSCROLL = 0x0040, ES_AUTOHSCROLL = 0x0080,
+                       WS_VSCROLL = 0x00200000, WS_HSCROLL = 0x00100000;
+    private const uint PM_REMOVE = 0x0001;
+    private static readonly IntPtr PER_MONITOR_AWARE_V2 = new(-4);
+
+    private static readonly StringBuilder Report = new();
+    private static int _vsLeft, _vsTop;
+
+    // 目标窗口（会消费触摸/手势）收到的东西：用来证明「注入的触摸真的被翻译成 pan」
+    private static int _touchMsgCount, _gestureCount, _panCount, _wheelCount, _hwheelCount;
+    private static int _panDx, _panDy;                 // GID_PAN 累积位移
+    private static IntPtr _targetWnd;
+    private static readonly WndProc TargetProcDelegate = TargetProc;
+    private static IntPtr _targetProcPtr;
+
+    private const uint WM_TOUCH = 0x0240, WM_GESTURE = 0x0119, WM_GESTURENOTIFY = 0x011A;
+    private const uint WM_MOUSEWHEEL = 0x020A, WM_MOUSEHWHEEL = 0x020E;
+    private const uint GID_PAN = 4;
+
+    private static IntPtr TargetProc(IntPtr h, uint m, IntPtr w, IntPtr l)
+    {
+        switch (m)
+        {
+            case WM_TOUCH: _touchMsgCount++; break;
+            case WM_GESTURE:
+                _gestureCount++;
+                var gi = new GESTUREINFO { cbSize = (uint)Marshal.SizeOf(typeof(GESTUREINFO)) };
+                if (GetGestureInfo(l, ref gi))
+                {
+                    if (gi.dwID == GID_PAN)
+                    {
+                        _panCount++;
+                        int dx = (int)(gi.ullArguments & 0xFFFFFFFF);
+                        int dy = (int)(gi.ullArguments >> 32);
+                        _panDx += dx; _panDy += dy;
+                    }
+                    CloseGestureInfoHandle(l);
+                }
+                break;
+            case WM_MOUSEWHEEL: _wheelCount++; break;
+            case WM_MOUSEHWHEEL: _hwheelCount++; break;
+        }
+        return DefWindowProcW(h, m, w, l);
+    }
+
+    private static void Out(string s = "")
+    {
+        Console.WriteLine(s);
+        Report.AppendLine(s);
+    }
+
+    private static bool CursorShown()
+    {
+        var ci = new CURSORINFO { cbSize = Marshal.SizeOf(typeof(CURSORINFO)) };
+        if (!GetCursorInfo(ref ci)) return true;
+        return (ci.flags & 0x00000001) != 0;   // CURSOR_SHOWING
+    }
+
+    private static void Pump()
+    {
+        for (int i = 0; i < 6; i++)
+        {
+            if (PeekMessageW(out var m, IntPtr.Zero, 0, 0, PM_REMOVE))
+            {
+                TranslateMessage(ref m);
+                DispatchMessageW(ref m);
+            }
+            else break;
+        }
+    }
+
+    private static void MouseRelative(int dx, int dy)
+    {
+        var inputs = new INPUT[1];
+        inputs[0].type = 0; // INPUT_MOUSE
+        inputs[0].mi.dx = dx;
+        inputs[0].mi.dy = dy;
+        inputs[0].mi.dwFlags = MOVE;
+        SendInput(1, inputs, Marshal.SizeOf(typeof(INPUT)));
+    }
+
+    private static IntPtr BuildTouchFrame(uint flags, IntPtr hwnd, int cx, int cy, int dx, int dy)
+    {
+        var arr = new TYPE_INFO_TOUCH[2];
+        for (int i = 0; i < 2; i++)
+        {
+            int px = cx + (i == 0 ? -dx : dx);
+            int py = cy + (i == 0 ? -dy : dy);
+            arr[i] = new TYPE_INFO_TOUCH
+            {
+                type = PT_TOUCH,
+                touch = new POINTER_TOUCH_INFO
+                {
+                    pointerInfo = new POINTER_INFO
+                    {
+                        pointerType = PT_TOUCH,
+                        pointerId = 1u + (uint)i,
+                        frameId = 0,
+                        pointerFlags = (i == 0 ? FLAG_PRIMARY : 0u) | flags,
+                        hwndTarget = hwnd,
+                        ptPixelLocation = new POINT { X = px, Y = py },
+                        ptPixelLocationRaw = new POINT { X = px, Y = py },
+                    },
+                    touchMask = TOUCH_MASK_PRESSURE,
+                    pressure = 1,
+                },
+            };
+        }
+        int sz = Marshal.SizeOf(typeof(TYPE_INFO_TOUCH));
+        IntPtr buf = Marshal.AllocHGlobal(sz * 2);
+        for (int i = 0; i < 2; i++)
+            Marshal.StructureToPtr(arr[i], buf + i * sz, false);
+        return buf;
+    }
+
+    private static IntPtr BuildTouchpadFrame(uint flags, IntPtr hwnd, int cx, int cy, int dx, int dy)
+    {
+        var arr = new TYPE_INFO_TOUCHPAD[2];
+        for (int i = 0; i < 2; i++)
+        {
+            int px = cx + (i == 0 ? -dx : dx);
+            int py = cy + (i == 0 ? -dy : dy);
+            arr[i] = new TYPE_INFO_TOUCHPAD
+            {
+                type = PT_TOUCHPAD,
+                touchpad = new POINTER_TOUCHPAD_INFO
+                {
+                    pointerInfo = new POINTER_INFO
+                    {
+                        pointerType = PT_TOUCHPAD,
+                        pointerId = 1u + (uint)i,
+                        frameId = 0,
+                        pointerFlags = (i == 0 ? FLAG_PRIMARY : 0u) | flags,
+                        hwndTarget = hwnd,
+                        ptPixelLocation = new POINT { X = px, Y = py },
+                        ptPixelLocationRaw = new POINT { X = px, Y = py },
+                    },
+                    touchMask = TOUCH_MASK_PRESSURE,
+                },
+            };
+        }
+        int sz = Marshal.SizeOf(typeof(TYPE_INFO_TOUCHPAD));
+        IntPtr buf = Marshal.AllocHGlobal(sz * 2);
+        for (int i = 0; i < 2; i++)
+            Marshal.StructureToPtr(arr[i], buf + i * sz, false);
+        return buf;
+    }
+
+    /// <summary>一次完整的双指平移：横向 panX 像素、纵向 panY 像素，共 frames 帧。</summary>
+    private static (int hidden, int maxDev, int? mouseDelta, bool visAfterUp, int devErr)
+        RunPan(string tag, IntPtr dev, uint devType, IntPtr hwnd,
+               int cx, int cy, int halfGap, int panX, int panY, int frames)
+    {
+        int stepX = panX / Math.Max(1, frames), stepY = panY / Math.Max(1, frames);
+        bool touchpad = devType == PT_TOUCHPAD;
+        int px = cx, py = cy;
+
+        Func<uint, int, int, IntPtr> build = (flags, x, y) =>
+            touchpad ? BuildTouchpadFrame(flags, hwnd, x, y, 0, halfGap)
+                     : BuildTouchFrame(flags, hwnd, x, y, 0, halfGap);
+
+        // Down
+        var f = build(FLAG_INRANGE | FLAG_INCONTACT | FLAG_DOWN, px, py);
+        bool okDown = InjectSyntheticPointerInput(dev, f, 2);
+        int errDown = Marshal.GetLastWin32Error();
+        Marshal.FreeHGlobal(f);
+        Out($"  [{tag}] Down ok={okDown} err={errDown}  可见(注入前)={CursorShown()}");
+
+        int hiddenFrames = 0, shownFrames = 0;
+        int maxCursorDev = 0;
+        GetCursorPos(out var p0);
+        int baseX = p0.X, baseY = p0.Y;
+        int? mouseProbeDelta = null;
+
+        for (int i = 0; i < frames; i++)
+        {
+            px += stepX; py += stepY;
+            f = build(FLAG_INRANGE | FLAG_INCONTACT | FLAG_UPDATE, px, py);
+            bool ok = InjectSyntheticPointerInput(dev, f, 2);
+            Marshal.FreeHGlobal(f);
+            if (!ok) { Out($"  [{tag}] 第 {i} 帧注入失败 err={Marshal.GetLastWin32Error()}"); break; }
+
+            Thread.Sleep(30);
+            Pump();
+            if (CursorShown()) shownFrames++; else hiddenFrames++;
+
+            GetCursorPos(out var pc);
+            int dev2 = Math.Max(Math.Abs(pc.X - baseX), Math.Abs(pc.Y - baseY));
+            if (dev2 > maxCursorDev) maxCursorDev = dev2;
+
+            // 第 3 帧：模拟「物理鼠标同时移动」——发一次相对移动，看光标跟不跟
+            if (i == 3 && mouseProbeDelta == null)
+            {
+                GetCursorPos(out var before);
+                MouseRelative(80, 0);
+                Thread.Sleep(60);
+                Pump();
+                GetCursorPos(out var after);
+                mouseProbeDelta = after.X - before.X;
+            }
+        }
+
+        // Up
+        f = build(FLAG_INRANGE | FLAG_UP, px, py);
+        bool okUp = InjectSyntheticPointerInput(dev, f, 2);
+        Marshal.FreeHGlobal(f);
+        Thread.Sleep(120);
+        Pump();
+
+        Out($"  [{tag}] Up ok={okUp}）；期间光标 隐藏帧={hiddenFrames}/{frames} 可见帧={shownFrames}/{frames}");
+        Out($"  [{tag}] 期间光标最大偏移={maxCursorDev}px（0 = 指针没被系统拽走）");
+        Out($"  [{tag}] 鼠标通道探测：发 +80px 相对移动 → 光标实际 X 位移={mouseProbeDelta}px");
+        Out($"  [{tag}] 抬手后光标可见={CursorShown()}");
+        return (hiddenFrames, maxCursorDev, mouseProbeDelta, CursorShown(), 0);
+    }
+
+    private static void Main()
+    {
+        Console.OutputEncoding = Encoding.UTF8;
+        SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2);
+        _targetProcPtr = Marshal.GetFunctionPointerForDelegate(TargetProcDelegate);
+        _vsLeft = GetSystemMetrics(76);
+        _vsTop = GetSystemMetrics(77);
+        Out($"[虚拟屏幕] 原点=({_vsLeft},{_vsTop})   注入值 = 全局坐标 − 原点");
+
+        // ---- 建一个多行 EDIT 作为被测控件 ----
+        var wc = new WNDCLASS
+        {
+            lpfnWndProc = Marshal.GetFunctionPointerForDelegate(Proc),
+            lpszClassName = "PanProbeHost",
+            hbrBackground = new IntPtr(6),
+        };
+        RegisterClassW(ref wc);
+        IntPtr host = CreateWindowExW(0, "PanProbeHost", "PanProbe 宿主（被测控件）",
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE, 120, 120, 700, 420, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+        if (host == IntPtr.Zero) { Out("建宿主窗口失败 err=" + Marshal.GetLastWin32Error()); return; }
+
+        IntPtr edit = CreateWindowExW(0, "EDIT", "",
+            WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL,
+            10, 10, 660, 360, host, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+
+        var sb = new StringBuilder();
+        for (int i = 1; i <= 200; i++)
+            sb.Append($"第{i:000}行 ").Append(new string('X', 200)).Append("\r\n");
+        SetWindowTextW(edit, sb.ToString());
+        SetForegroundWindow(host);
+        Thread.Sleep(200);
+        Pump();
+
+        GetWindowRect(edit, out var r);
+        int gx = (r.L + r.R) / 2, gy = (r.T + r.B) / 2;
+        int cx = gx - _vsLeft, cy = gy - _vsTop;    // 注入用局部坐标
+        Out($"\n[被测控件] EDIT 中心 全局=({gx},{gy}) 注入局部=({cx},{cy})  前台={GetForegroundWindow() == host}");
+
+        int hBefore = GetScrollPos(edit, SB_HORZ);
+        int vBefore = (int)SendMessageW(edit, EM_GETFIRSTVISIBLELINE, IntPtr.Zero, IntPtr.Zero).ToInt64();
+        Out($"[滚动基线] 横向 GetScrollPos(SB_HORZ)={hBefore}  纵向首行={vBefore}");
+
+        // ---- A. PT_TOUCHPAD 设备能否创建 ----
+        Out("\n=== A. CreateSyntheticPointerDevice(PT_TOUCHPAD=5) ===");
+        IntPtr devTp = IntPtr.Zero;
+        foreach (var (max, fb, fbName) in new[] { (2u, FB_NONE, "NONE"), (5u, FB_NONE, "NONE"), (5u, FB_DEFAULT, "DEFAULT") })
+        {
+            IntPtr d = CreateSyntheticPointerDevice(PT_TOUCHPAD, max, fb);
+            int err = Marshal.GetLastWin32Error();
+            Out($"  PT_TOUCHPAD maxCount={max} feedback={fbName} → handle={(d == IntPtr.Zero ? "0" : "OK")} err={err}");
+            if (d != IntPtr.Zero && devTp == IntPtr.Zero) devTp = d;
+        }
+        IntPtr devTouch = CreateSyntheticPointerDevice(PT_TOUCH, 2, FB_NONE);
+        Out($"  PT_TOUCH    maxCount=2 feedback=NONE → handle={(devTouch == IntPtr.Zero ? "0" : "OK")} err={Marshal.GetLastWin32Error()}");
+
+        // ---- B. PT_TOUCHPAD 平移实测 ----
+        if (devTp != IntPtr.Zero)
+        {
+            Out("\n=== B. PT_TOUCHPAD 双指横向平移 120px ===");
+            RunPan("TOUCHPAD-H", devTp, PT_TOUCHPAD, edit, cx, cy, 40, -120, 0, 8);
+            int hAfter = GetScrollPos(edit, SB_HORZ);
+            int vAfter = (int)SendMessageW(edit, EM_GETFIRSTVISIBLELINE, IntPtr.Zero, IntPtr.Zero).ToInt64();
+            Out($"  → 滚动变化：横向 {hBefore}→{hAfter}（Δ={hAfter - hBefore}）纵向 {vBefore}→{vAfter}");
+        }
+
+        // ---- C. 对照：PT_TOUCH ----
+        if (devTouch != IntPtr.Zero)
+        {
+            Out("\n=== C. 对照 PT_TOUCH 双指横向平移 120px（现状实现） ===");
+            RunPan("TOUCH-H", devTouch, PT_TOUCH, edit, cx, cy, 40, -120, 0, 8);
+            int hAfter = GetScrollPos(edit, SB_HORZ);
+            Out($"  → 滚动变化：横向 {hBefore}→{hAfter}（Δ={hAfter - hBefore}）");
+
+            // ---- D. PT_TOUCH 下「把光标叫回来」的手段 ----
+            Out("\n=== D. PT_TOUCH 期间把光标叫回来的手段 ===");
+            var f = BuildTouchFrame(FLAG_INRANGE | FLAG_INCONTACT | FLAG_DOWN, edit, cx, cy, 0, 40);
+            InjectSyntheticPointerInput(devTouch, f, 2); Marshal.FreeHGlobal(f);
+            Thread.Sleep(60); Pump();
+            Out($"  Down 后可见={CursorShown()}");
+            for (int k = 0; k < 3; k++)
+            {
+                f = BuildTouchFrame(FLAG_INRANGE | FLAG_INCONTACT | FLAG_UPDATE, edit, cx, cy, 0, 40);
+                InjectSyntheticPointerInput(devTouch, f, 2); Marshal.FreeHGlobal(f);
+                Thread.Sleep(30); Pump();
+            }
+            Out($"  保持接触期间可见={CursorShown()}");
+            int before = ShowCursor(true);
+            Out($"  ShowCursor(TRUE) → 可见={CursorShown()}（计数 {before}→{ShowCursor(false)}→ 已回滚）");
+            ShowCursor(true);
+            GetCursorPos(out var cur);
+            SetCursorPos(cur.X, cur.Y);
+            Out($"  SetCursorPos 原地刷新 → 可见={CursorShown()}");
+            f = BuildTouchFrame(FLAG_INRANGE | FLAG_UP, edit, cx, cy, 0, 40);
+            InjectSyntheticPointerInput(devTouch, f, 2); Marshal.FreeHGlobal(f);
+            Thread.Sleep(120); Pump();
+            Out($"  抬手后可见={CursorShown()}");
+        }
+
+        // ---- E. 在「会消费触摸/手势」的目标窗口上实测（真实应用的行为基准）----
+        if (devTouch != IntPtr.Zero)
+        {
+            Out("\n=== E. 目标窗口自己消费 WM_GESTURE(GID_PAN) 时的表现 ===");
+            var wct = new WNDCLASS
+            {
+                lpfnWndProc = _targetProcPtr,
+                lpszClassName = "PanTarget",
+                hbrBackground = new IntPtr(5),
+            };
+            RegisterClassW(ref wct);
+            IntPtr tgt = CreateWindowExW(0, "PanTarget", "PanTarget（消费手势）",
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE, 900, 140, 520, 360,
+                IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            SetForegroundWindow(tgt);
+            Thread.Sleep(250); Pump();
+            GetWindowRect(tgt, out var rt);
+            int tgx = (rt.L + rt.R) / 2, tgy = (rt.T + rt.B) / 2;
+            int tcx = tgx - _vsLeft, tcy = tgy - _vsTop;
+            Out($"  [目标] 前台={GetForegroundWindow() == tgt} 中心 全局=({tgx},{tgy}) 注入=({tcx},{tcy})");
+            _touchMsgCount = _gestureCount = _panCount = _wheelCount = _hwheelCount = 0;
+            _panDx = _panDy = 0;
+
+            RunPan("TARGET-H", devTouch, PT_TOUCH, tgt, tcx, tcy, 40, -120, 0, 8);
+            Out($"  → 收到 WM_TOUCH={_touchMsgCount} WM_GESTURE={_gestureCount}（GID_PAN={_panCount}）" +
+                $" 累积位移=({_panDx},{_panDy}) 纵滚轮={_wheelCount} 横滚轮={_hwheelCount}");
+
+            Out("  -- 保持接触期间的「叫醒」手段（同一轮接触内依次尝试）--");
+            var f2 = BuildTouchFrame(FLAG_INRANGE | FLAG_INCONTACT | FLAG_DOWN, tgt, tcx, tcy, 0, 40);
+            InjectSyntheticPointerInput(devTouch, f2, 2); Marshal.FreeHGlobal(f2);
+            Thread.Sleep(60); Pump();
+            Out($"   注入 DOWN 后 可见={CursorShown()}");
+
+            GetCursorPos(out var c1); SetCursorPos(c1.X, c1.Y); Thread.Sleep(40); Pump();
+            Out($"   ① SetCursorPos 原地刷新 → 可见={CursorShown()}");
+            MouseRelative(1, 0); Thread.Sleep(40); Pump();
+            GetCursorPos(out var c2); SetCursorPos(c2.X - 1, c2.Y); Thread.Sleep(40); Pump();
+            Out($"   ② 1px 相对移动再复位 → 可见={CursorShown()}");
+            int cnt = ShowCursor(true); Thread.Sleep(40); Pump();
+            Out($"   ③ ShowCursor(TRUE)（计数 {cnt}） → 可见={CursorShown()}");
+
+            GetCursorPos(out var beforeMouse);
+            MouseRelative(80, 0);
+            Thread.Sleep(80); Pump();
+            GetCursorPos(out var afterMouse);
+            Out($"   叫醒后鼠标通道：+80px → 实际 X 位移={afterMouse.X - beforeMouse.X}px");
+
+            f2 = BuildTouchFrame(FLAG_INRANGE | FLAG_UP, tgt, tcx, tcy, 0, 40);
+            InjectSyntheticPointerInput(devTouch, f2, 2); Marshal.FreeHGlobal(f2);
+            Thread.Sleep(150); Pump();
+            Out($"   抬手后 可见={CursorShown()}");
+            DestroyWindow(tgt);
+        }
+
+        // ---- F. 三种反馈模式对比：DEFAULT(1)=直接 / INDIRECT(2)=间接(触摸板语义) / NONE(3) ----
+        Out("\n=== F. PT_TOUCH 三种 feedback 模式对比（同样在消费手势的目标窗口上）===");
+        IntPtr tgt2 = IntPtr.Zero;
+        {
+            var wct2 = new WNDCLASS
+            {
+                lpfnWndProc = _targetProcPtr,
+                lpszClassName = "PanTarget2",
+                hbrBackground = new IntPtr(5),
+            };
+            RegisterClassW(ref wct2);
+            tgt2 = CreateWindowExW(0, "PanTarget2", "PanTarget2（消费手势）",
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE, 900, 140, 520, 360,
+                IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+        }
+        SetForegroundWindow(tgt2);
+        Thread.Sleep(250); Pump();
+        GetWindowRect(tgt2, out var rt2);
+        int g2x = (rt2.L + rt2.R) / 2, g2y = (rt2.T + rt2.B) / 2;
+        int c2x = g2x - _vsLeft, c2y = g2y - _vsTop;
+
+        foreach (var (fb, name) in new[] { (FB_DEFAULT, "DEFAULT(1) 直接"), (FB_INDIRECT, "INDIRECT(2) 间接=触摸板语义"), (FB_NONE, "NONE(3) 现状") })
+        {
+            IntPtr d = CreateSyntheticPointerDevice(PT_TOUCH, 2, fb);
+            int err = Marshal.GetLastWin32Error();
+            if (d == IntPtr.Zero)
+            {
+                Out($"  [{name}] 创建设备失败 err={err}");
+                continue;
+            }
+            _touchMsgCount = _gestureCount = _panCount = _wheelCount = _hwheelCount = 0;
+            _panDx = _panDy = 0;
+            var st = RunPan(name, d, PT_TOUCH, tgt2, c2x, c2y, 40, -120, 0, 8);
+            Out($"  [{name}] 手势：WM_GESTURE={_gestureCount} GID_PAN={_panCount} 累积位移=({_panDx},{_panDy})");
+            DestroySyntheticPointerDevice(d);
+            Thread.Sleep(150);
+        }
+
+        // ---- G. ShowCursor 单独测（不借助 1px 移动）----
+        Out("\n=== G. ShowCursor(TRUE) 单独能否叫回光标（不做任何鼠标移动）===");
+        {
+            IntPtr d = CreateSyntheticPointerDevice(PT_TOUCH, 2, FB_NONE);
+            var f3 = BuildTouchFrame(FLAG_INRANGE | FLAG_INCONTACT | FLAG_DOWN, tgt2, c2x, c2y, 0, 40);
+            InjectSyntheticPointerInput(d, f3, 2); Marshal.FreeHGlobal(f3);
+            Thread.Sleep(80); Pump();
+            Out($"  DOWN 后 可见={CursorShown()}");
+            int c = ShowCursor(true);
+            Thread.Sleep(80); Pump();
+            Out($"  ShowCursor(TRUE)（计数 {c}） → 可见={CursorShown()}");
+            f3 = BuildTouchFrame(FLAG_INRANGE | FLAG_UP, tgt2, c2x, c2y, 0, 40);
+            InjectSyntheticPointerInput(d, f3, 2); Marshal.FreeHGlobal(f3);
+            DestroySyntheticPointerDevice(d);
+        }
+        if (tgt2 != IntPtr.Zero) DestroyWindow(tgt2);
+
+        // 收尾
+        if (devTp != IntPtr.Zero) DestroySyntheticPointerDevice(devTp);
+        if (devTouch != IntPtr.Zero) DestroySyntheticPointerDevice(devTouch);
+        DestroyWindow(edit);
+        DestroyWindow(host);
+
+        System.IO.File.WriteAllText("report.txt", Report.ToString(), Encoding.UTF8);
+        Out("\n报告已写入 report.txt");
+    }
+}

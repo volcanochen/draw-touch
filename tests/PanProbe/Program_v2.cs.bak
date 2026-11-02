@@ -1,0 +1,423 @@
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+
+namespace PanProbe;
+
+/// <summary>
+/// v2（2026-11-01）：严格隔离的取证 —— 「注入触摸平移期间，物理鼠标能不能同时动、光标能不能用」。
+///
+/// v1 的教训（不要重犯）：
+///   · 段与段之间共用同一轮触摸接触状态 / 光标可见性跨段残留 → 数据互相污染；
+///   · 调了 ShowCursor()（全局计数，改了就回不去）→ 后面所有可见性测量作废；
+///   · 平移过程中夹一个「鼠标探测」→ 测出来的“光标最大偏移”是探测自己造成的（80 米奇≈339px）。
+/// ⇒ v2 规则：每项测量都独立（先唤醒光标 → 测量 → 抬手 → 等待回落）；**绝不调用 ShowCursor**；
+///   先单独校准「鼠标通道 1 米奇 = 多少像素」，再在接触期间复测同一量。
+///
+/// 测量项：
+///   K. 校准：无触摸时 80 米奇 → 光标位移多少像素（后面所有比较的基准）
+///   A. 注入双指 DOWN 后保持不动 300ms：光标是否被系统「提升」到触点、是否被隐藏
+///   B. 保持接触期间发一次鼠标移动：光标跟不跟、跟了多少、之后会不会又被藏起来
+///   C. 持续注入平移 1.2s，中途「同时移动鼠标」：pan 是否继续、光标是否跟着鼠标走、可见性如何
+///   D. 三种 feedback 模式（DEFAULT/INDIRECT/NONE）在同一套测试下的差异
+/// 目标窗口：自建窗口，自己消费 WM_GESTURE（GID_PAN），等价于 OneNote/浏览器这类真实应用。
+/// </summary>
+internal static class Program
+{
+    // ---------- 结构 ----------
+    [StructLayout(LayoutKind.Sequential)] private struct POINT { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)] private struct RECT { public int L, T, R, B; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CURSORINFO { public int cbSize; public int flags; public IntPtr hCursor; public POINT ptScreenPos; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINTER_INFO
+    {
+        public uint pointerType, pointerId, frameId, pointerFlags;
+        public IntPtr sourceDevice, hwndTarget;
+        public POINT ptPixelLocation, ptPixelLocationRaw, ptHimetricLocation, ptHimetricLocationRaw;
+        public uint dwTime, historyCount; public int inputData; public uint dwKeyStates;
+        public ulong PerformanceCount; public uint ButtonChangeType;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINTER_TOUCH_INFO
+    {
+        public POINTER_INFO pointerInfo;
+        public uint touchFlags, touchMask;
+        public RECT rcContact, rcContactRaw;
+        public uint orientation, pressure;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TYPE_INFO_TOUCH { public uint type; public POINTER_TOUCH_INFO touch; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr extra; }
+    [StructLayout(LayoutKind.Explicit)]
+    private struct INPUT { [FieldOffset(0)] public int type; [FieldOffset(8)] public MOUSEINPUT mi; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GESTUREINFO
+    {
+        public uint cbSize, dwFlags, dwID; public IntPtr hwndTarget;
+        public POINTS ptsLocation; public uint dwInstanceID, dwSequenceID;
+        public ulong ullArguments; public uint cbExtraArgs;
+    }
+    [StructLayout(LayoutKind.Sequential)] private struct POINTS { public short X, Y; }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct WNDCLASS
+    {
+        public uint style; public IntPtr lpfnWndProc; public int cbClsExtra, cbWndExtra;
+        public IntPtr hInstance, hIcon, hCursor, hbrBackground;
+        public string lpszMenuName, lpszClassName;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MSG
+    {
+        public IntPtr hwnd; public uint message; public IntPtr wParam, lParam;
+        public uint time; public POINT pt;
+    }
+
+    // ---------- P/Invoke ----------
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr CreateSyntheticPointerDevice(uint pointerType, uint maxCount, uint feedbackMode);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool InjectSyntheticPointerInput(IntPtr device, IntPtr pointerInfo, uint count);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool DestroySyntheticPointerDevice(IntPtr device);
+    [DllImport("user32.dll")] private static extern bool GetCursorInfo(ref CURSORINFO ci);
+    [DllImport("user32.dll")] private static extern bool GetCursorPos(out POINT p);
+    [DllImport("user32.dll")] private static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint n, INPUT[] i, int cb);
+    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] private static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);
+    [DllImport("user32.dll")] private static extern int GetSystemMetrics(int i);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateWindowExW(uint ex, string cls, string name, uint style,
+        int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr inst, IntPtr param);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern ushort RegisterClassW(ref WNDCLASS wc);
+    [DllImport("user32.dll")] private static extern IntPtr DefWindowProcW(IntPtr h, uint m, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] private static extern bool DestroyWindow(IntPtr h);
+    [DllImport("user32.dll")] private static extern bool PeekMessageW(out MSG m, IntPtr h, uint min, uint max, uint remove);
+    [DllImport("user32.dll")] private static extern bool TranslateMessage(ref MSG m);
+    [DllImport("user32.dll")] private static extern bool DispatchMessageW(ref MSG m);
+    [DllImport("user32.dll")] private static extern bool CloseGestureInfoHandle(IntPtr h);
+    [DllImport("user32.dll")] private static extern bool GetGestureInfo(IntPtr hGestureInfo, ref GESTUREINFO p);
+
+    private delegate IntPtr WndProc(IntPtr h, uint m, IntPtr w, IntPtr l);
+
+    private const uint PT_TOUCH = 2;
+    private const uint FB_DEFAULT = 1, FB_INDIRECT = 2, FB_NONE = 3;
+    private const uint FLAG_INRANGE = 0x2, FLAG_INCONTACT = 0x4, FLAG_PRIMARY = 0x2000;
+    private const uint FLAG_DOWN = 0x10000, FLAG_UPDATE = 0x20000, FLAG_UP = 0x40000;
+    private const uint TOUCH_MASK_PRESSURE = 0x4;
+    private const uint MOVE = 0x0001;
+    private const uint WS_VISIBLE = 0x10000000, WS_OVERLAPPEDWINDOW = 0x00CF0000;
+    private const uint PM_REMOVE = 0x0001;
+    private const uint WM_POINTERDOWN = 0x0246, WM_POINTERUPDATE = 0x0245, WM_GESTURE = 0x0119;
+    private const uint WM_MOUSEWHEEL = 0x020A, WM_MOUSEHWHEEL = 0x020E;
+    private const uint GID_PAN = 4;
+    private static readonly IntPtr PER_MONITOR_AWARE_V2 = new(-4);
+
+    private static readonly StringBuilder Report = new();
+    private static int _vsLeft, _vsTop;
+
+    private static int _ptrDown, _ptrUpd, _gesture, _pan, _wheel, _hwheel;
+    private static int _panDx;
+    private static IntPtr _procPtr;
+    private static readonly WndProc TargetProcDelegate = TargetProc;
+
+    private static IntPtr TargetProc(IntPtr h, uint m, IntPtr w, IntPtr l)
+    {
+        switch (m)
+        {
+            case WM_POINTERDOWN: _ptrDown++; break;
+            case WM_POINTERUPDATE: _ptrUpd++; break;
+            case WM_GESTURE:
+                _gesture++;
+                var gi = new GESTUREINFO { cbSize = (uint)Marshal.SizeOf(typeof(GESTUREINFO)) };
+                if (GetGestureInfo(l, ref gi))
+                {
+                    if (gi.dwID == GID_PAN) { _pan++; _panDx += (int)(gi.ullArguments & 0xFFFFFFFF); }
+                    CloseGestureInfoHandle(l);
+                }
+                break;
+            case WM_MOUSEWHEEL: _wheel++; break;
+            case WM_MOUSEHWHEEL: _hwheel++; break;
+        }
+        return DefWindowProcW(h, m, w, l);
+    }
+
+    private static void Out(string s = "")
+    {
+        Console.WriteLine(s);
+        Report.AppendLine(s);
+    }
+
+    private static bool Shown()
+    {
+        var ci = new CURSORINFO { cbSize = Marshal.SizeOf(typeof(CURSORINFO)) };
+        if (!GetCursorInfo(ref ci)) return true;
+        return (ci.flags & 1) != 0;
+    }
+
+    private static void Pump()
+    {
+        for (int i = 0; i < 8; i++)
+        {
+            if (!PeekMessageW(out var m, IntPtr.Zero, 0, 0, PM_REMOVE)) break;
+            TranslateMessage(ref m);
+            DispatchMessageW(ref m);
+        }
+    }
+
+    private static void MouseMove(int mickeys)
+    {
+        var inp = new INPUT[1];
+        inp[0].type = 0;
+        inp[0].mi.dx = mickeys;
+        inp[0].mi.dy = 0;
+        inp[0].mi.dwFlags = MOVE;
+        SendInput(1, inp, Marshal.SizeOf(typeof(INPUT)));
+    }
+
+    /// <summary>只靠鼠标输入把光标唤醒/复位（不碰 ShowCursor，避免污染全局计数）。</summary>
+    private static void WakeCursor()
+    {
+        MouseMove(3); Thread.Sleep(50); MouseMove(-3); Thread.Sleep(80); Pump();
+    }
+
+    /// <summary>发一次鼠标相对移动，返回光标实际像素位移。</summary>
+    private static int MoveAndMeasure(int mickeys, int waitMs = 80)
+    {
+        GetCursorPos(out var a);
+        MouseMove(mickeys);
+        Thread.Sleep(waitMs);
+        Pump();
+        GetCursorPos(out var b);
+        return b.X - a.X;
+    }
+
+    private static IntPtr BuildFrame(uint flags, IntPtr hwnd, int cx, int cy, int gap)
+    {
+        var arr = new TYPE_INFO_TOUCH[2];
+        for (int i = 0; i < 2; i++)
+        {
+            int py = cy + (i == 0 ? -gap : gap);
+            arr[i] = new TYPE_INFO_TOUCH
+            {
+                type = PT_TOUCH,
+                touch = new POINTER_TOUCH_INFO
+                {
+                    pointerInfo = new POINTER_INFO
+                    {
+                        pointerType = PT_TOUCH,
+                        pointerId = 1u + (uint)i,
+                        pointerFlags = (i == 0 ? FLAG_PRIMARY : 0u) | flags,
+                        hwndTarget = hwnd,
+                        ptPixelLocation = new POINT { X = cx, Y = py },
+                        ptPixelLocationRaw = new POINT { X = cx, Y = py },
+                    },
+                    touchMask = TOUCH_MASK_PRESSURE,
+                    pressure = 1,
+                },
+            };
+        }
+        int sz = Marshal.SizeOf(typeof(TYPE_INFO_TOUCH));
+        IntPtr buf = Marshal.AllocHGlobal(sz * 2);
+        for (int i = 0; i < 2; i++) Marshal.StructureToPtr(arr[i], buf + i * sz, false);
+        return buf;
+    }
+
+    private static bool Down(IntPtr dev, IntPtr hwnd, int cx, int cy, int gap)
+    {
+        var f = BuildFrame(FLAG_INRANGE | FLAG_INCONTACT | FLAG_DOWN, hwnd, cx, cy, gap);
+        bool ok = InjectSyntheticPointerInput(dev, f, 2);
+        Marshal.FreeHGlobal(f);
+        return ok;
+    }
+
+    private static bool Update(IntPtr dev, IntPtr hwnd, int cx, int cy, int gap)
+    {
+        var f = BuildFrame(FLAG_INRANGE | FLAG_INCONTACT | FLAG_UPDATE, hwnd, cx, cy, gap);
+        bool ok = InjectSyntheticPointerInput(dev, f, 2);
+        Marshal.FreeHGlobal(f);
+        return ok;
+    }
+
+    private static bool Up(IntPtr dev, IntPtr hwnd, int cx, int cy, int gap)
+    {
+        var f = BuildFrame(FLAG_INRANGE | FLAG_UP, hwnd, cx, cy, gap);
+        bool ok = InjectSyntheticPointerInput(dev, f, 2);
+        Marshal.FreeHGlobal(f);
+        return ok;
+    }
+
+    private static void ResetCounters() { _ptrDown = _ptrUpd = _gesture = _pan = _wheel = _hwheel = 0; _panDx = 0; }
+
+    private static void Main()
+    {
+        Console.OutputEncoding = Encoding.UTF8;
+        SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2);
+        _procPtr = Marshal.GetFunctionPointerForDelegate(TargetProcDelegate);
+        _vsLeft = GetSystemMetrics(76);
+        _vsTop = GetSystemMetrics(77);
+        Out($"[环境] 虚拟屏幕原点=({_vsLeft},{_vsTop})  注入值 = 全局坐标 − 原点");
+
+        var wc = new WNDCLASS
+        {
+            lpfnWndProc = _procPtr,
+            lpszClassName = "PanTargetV2",
+            hbrBackground = new IntPtr(5),
+        };
+        RegisterClassW(ref wc);
+        IntPtr tgt = CreateWindowExW(0, "PanTargetV2", "PanProbe v2 目标窗口（消费 WM_GESTURE）",
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE, 900, 140, 520, 360,
+            IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+        if (tgt == IntPtr.Zero) { Out("建窗口失败 err=" + Marshal.GetLastWin32Error()); return; }
+        SetForegroundWindow(tgt);
+        Thread.Sleep(300); Pump();
+
+        GetWindowRect(tgt, out var rt);
+        int gx = (rt.L + rt.R) / 2, gy = (rt.T + rt.B) / 2;
+        int cx = gx - _vsLeft, cy = gy - _vsTop;
+        Out($"[目标窗口] 中心 全局=({gx},{gy})  注入局部=({cx},{cy})  前台={GetForegroundWindow() == tgt}");
+
+        WakeCursor();
+        Out($"[起始] 光标可见={Shown()}");
+
+        // ---------- K. 校准 ----------
+        Out("\n=== K. 鼠标通道校准（无触摸）===");
+        int k1 = MoveAndMeasure(80), k2 = MoveAndMeasure(-80), k3 = MoveAndMeasure(40);
+        Out($"  80 米奇 → {k1}px / -80 米奇 → {k2}px / 40 米奇 → {k3}px");
+        int unit = (int)Math.Round((Math.Abs(k1) + Math.Abs(k2)) / 160.0 * 10) / 10;  // 粗略线性系数
+        Out($"  ⇒ 线性系数 ≈ {unit:0.0} px/米奇（有指针加速，非线性，只作量级参考）");
+
+        // ---------- A. 只 DOWN 不动：会不会被「提升」到触点 ----------
+        Out("\n=== A. 注入双指 DOWN 后保持不动 300ms（不碰鼠标）===");
+        {
+            IntPtr dev = CreateSyntheticPointerDevice(PT_TOUCH, 2, FB_NONE);
+            ResetCounters();
+            GetCursorPos(out var before);
+            bool ok = Down(dev, tgt, cx, cy, 40);
+            int hidden = 0, moved = 0; int maxDev = 0;
+            for (int i = 0; i < 10; i++)
+            {
+                Thread.Sleep(30); Pump();
+                if (!Shown()) hidden++;
+                GetCursorPos(out var p);
+                int d = Math.Max(Math.Abs(p.X - before.X), Math.Abs(p.Y - before.Y));
+                if (d > maxDev) maxDev = d;
+                if (d != 0) moved++;
+            }
+            Out($"  Down ok={ok}  前 30ms 光标可见={Shown()}（此刻）");
+            Out($"  300ms 内：隐藏 {hidden}/10 帧  光标偏移 {moved}/10 帧，最大偏移 {maxDev}px");
+            Out($"  目标收到：WM_POINTERDOWN={_ptrDown} WM_POINTERUPDATE={_ptrUpd} WM_GESTURE={_gesture} GID_PAN={_pan}");
+            SetCursorPos(cx + _vsLeft, cy + _vsTop);   // 故意把光标放到触点旁，便于观察是否被拽
+
+            // ---------- B. 接触期间发一次鼠标移动 ----------
+            Out("\n=== B. 保持接触期间发一次鼠标移动（模拟物理鼠标）+80 米奇 ===");
+            GetCursorPos(out var b0);
+            int d1 = MoveAndMeasure(80, 100);
+            Out($"  +80 米奇 → 光标位移 {d1}px（对照校准 {k1}px）  可见={Shown()}");
+            _ptrDown = _ptrUpd = _gesture = _pan = 0;
+            int hid2 = 0;
+            for (int i = 0; i < 6; i++) { Thread.Sleep(50); Pump(); if (!Shown()) hid2++; }
+            Out($"  之后 300ms（无任何鼠标动作）：隐藏 {hid2}/6 帧");
+            int d2 = MoveAndMeasure(-80, 100);
+            Out($"  再 -80 米奇 → 光标位移 {d2}px  可见={Shown()}");
+            Up(dev, tgt, cx, cy, 40);
+            Thread.Sleep(200); Pump();
+            Out($"  抬手后 光标可见={Shown()}");
+            DestroySyntheticPointerDevice(dev);
+        }
+        Thread.Sleep(250); WakeCursor();
+
+        // ---------- C. 边平移边动鼠标（用户要的场景）----------
+        Out("\n=== C. 持续注入平移 1.2s，中途同时移动鼠标 ===");
+        {
+            IntPtr dev = CreateSyntheticPointerDevice(PT_TOUCH, 2, FB_NONE);
+            ResetCounters();
+            GetCursorPos(out var start);
+            WakeCursor();
+            int px = cx;
+            bool ok = Down(dev, tgt, px, cy, 40);
+            Thread.Sleep(120); Pump();
+
+            int hidden = 0, frames = 12;
+            int panBeforeMouse = 0, panAfterMouse = 0;
+            int mouseDelta = 0, mouseCursorAfter = 0;
+            var trace = new StringBuilder();
+
+            for (int i = 0; i < frames; i++)
+            {
+                px -= 10;                      // 每帧横向平移 10px
+                Update(dev, tgt, px, cy, 40);
+                Thread.Sleep(70); Pump();
+                if (!Shown()) hidden++;
+
+                GetCursorPos(out var pc);
+                trace.Append($"{pc.X - start.X},");
+
+                if (i == 4)
+                {
+                    panBeforeMouse = _panDx;
+                    mouseDelta = MoveAndMeasure(60, 90);
+                    GetCursorPos(out var pm);
+                    mouseCursorAfter = pm.X - start.X;
+                }
+                else if (i == 7)
+                {
+                    panAfterMouse = _panDx;
+                }
+            }
+            Up(dev, tgt, cx, cy, 40);
+            Thread.Sleep(200); Pump();
+
+            Out($"  Down ok={ok}  隐藏 {hidden}/{frames} 帧");
+            Out($"  光标 X 相对起点每帧轨迹：{trace}");
+            Out($"  鼠标那次 +60 米奇 → 位移 {mouseDelta}px，之后光标 X 相对起点={mouseCursorAfter}px");
+            Out($"  pan 累积位移：鼠标操作前={panBeforeMouse}  操作后(第7帧)={panAfterMouse}  全程={_panDx}");
+            Out($"  目标收到：WM_POINTERDOWN={_ptrDown} WM_GESTURE={_gesture} GID_PAN={_pan}");
+            Out($"  抬手后 光标可见={Shown()}");
+            DestroySyntheticPointerDevice(dev);
+        }
+        Thread.Sleep(300); WakeCursor();
+
+        // ---------- D. 三种 feedback 模式对比 ----------
+        Out("\n=== D. 三种 feedback 模式：接触期间「隐藏帧 / 鼠标位移 / pan 是否继续」 ===");
+        foreach (var (fb, name) in new[] { (FB_DEFAULT, "DEFAULT(1)"), (FB_INDIRECT, "INDIRECT(2)"), (FB_NONE, "NONE(3)") })
+        {
+            IntPtr dev = CreateSyntheticPointerDevice(PT_TOUCH, 2, fb);
+            int err = Marshal.GetLastWin32Error();
+            if (dev == IntPtr.Zero) { Out($"  [{name}] 创建失败 err={err}"); continue; }
+
+            WakeCursor();
+            ResetCounters();
+            Down(dev, tgt, cx, cy, 40);
+            Thread.Sleep(120); Pump();
+            int hidden = 0;
+            for (int i = 0; i < 8; i++) { Thread.Sleep(40); Pump(); if (!Shown()) hidden++; }
+            int d = MoveAndMeasure(60, 100);
+            int hidAfterMove = 0;
+            for (int i = 0; i < 6; i++) { Thread.Sleep(40); Pump(); if (!Shown()) hidAfterMove++; }
+            int panKept = _pan;
+            Up(dev, tgt, cx, cy, 40);
+            Thread.Sleep(150); Pump();
+            Out($"  [{name}] 无鼠标时隐藏 {hidden}/8 帧；鼠标位移 {d}px（校准 {k1}px）；其后隐藏 {hidAfterMove}/6 帧；抬手可见={Shown()}");
+            DestroySyntheticPointerDevice(dev);
+            Thread.Sleep(200); WakeCursor();
+        }
+
+        DestroyWindow(tgt);
+        System.IO.File.WriteAllText("report2.txt", Report.ToString(), Encoding.UTF8);
+        Out("\n报告已写入 report2.txt");
+    }
+}
