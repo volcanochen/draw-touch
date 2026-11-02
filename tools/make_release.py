@@ -20,6 +20,7 @@ zip 里只放 2 个文件：exe（自包含单文件）+ appsettings.json。
     python tools/make_release.py [版本号]
 """
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -82,6 +83,17 @@ def main():
         z.write(exe, 'DrawTouchHost.exe')
         z.write(cfg, 'appsettings.json')
     print('PC zip :', zip_path, os.path.getsize(zip_path), 'bytes')
+
+    # 【防呆】APK 必须与发布版本一致：2026-11-03 v1.5.0 发布时打进去的是 1.4.9 旧构建产物
+    gradle = io.open(os.path.join(ROOT, 'PhoneTablet', 'app', 'build.gradle'), encoding='utf-8').read()
+    m = re.search(r'versionName\s+"([^"]+)"', gradle)
+    if not m or m.group(1) != VER:
+        raise SystemExit('APK 版本不匹配: build.gradle versionName=%s ≠ 发布版本 %s → 先跑 gradle assembleDebug' %
+                         (m.group(1) if m else '?', VER))
+    apk_mtime = os.path.getmtime(apk_src)
+    gradle_mtime = os.path.getmtime(os.path.join(ROOT, 'PhoneTablet', 'app', 'build.gradle'))
+    if apk_mtime < gradle_mtime:
+        raise SystemExit('APK 构建产物早于 build.gradle 修改 → 先跑 gradle assembleDebug 再发布')
 
     apk_src = os.path.join(ROOT, 'PhoneTablet', 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk')
     apk_dst = os.path.join(ASSETS, 'DrawTouchPhone-v%s.apk' % VER)
